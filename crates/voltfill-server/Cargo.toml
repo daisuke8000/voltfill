@@ -1,0 +1,22 @@
+[package]
+name = "voltfill-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+voltfill-core = { path = "../voltfill-core" }
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+tower = { version = "0.5", default-features = false, features = ["util"] }
+
+[features]
+default = []
+pdfium = ["voltfill-core/pdfium"]
+hayro = ["voltfill-core/hayro"]

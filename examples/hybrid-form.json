@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "fields": [
+    {
+      "id": "reference",
+      "label": "Printed reference",
+      "output_type": "string",
+      "pages": [
+        1
+      ],
+      "questions": [
+        {
+          "id": "present",
+          "type": "noul",
+          "instructions": "Is a reference value present on this page?",
+          "input": {
+            "modality": "both"
+          }
+        },
+        {
+          "id": "location",
+          "type": "box",
+          "instructions": "Locate the printed reference value, excluding its label.",
+          "input": {
+            "modality": "both"
+          },
+          "depends_on": [
+            "present"
+          ]
+        },
+        {
+          "id": "pick_reference",
+          "type": "choice",
+          "instructions": "Choose the printed reference value, or none if absent.",
+          "input": {
+            "modality": "text"
+          },
+          "candidate_source": {
+            "kind": "text_spans",
+            "none_option": "No matching reference"
+          }
+        }
+      ],
+      "resolver": {
+        "kind": "text_in_box",
+        "question_id": "location",
+        "presence_question_id": "present"
+      },
+      "validators": [
+        {
+          "kind": "non_empty"
+        }
+      ]
+    }
+  ]
+}

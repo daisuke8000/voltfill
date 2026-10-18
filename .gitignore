@@ -1,0 +1,13 @@
+/target/
+/output/
+/.cache/
+
+.secrets/
+
+.env*
+.direnv/
+.DS_Store
+*.key
+*.pem
+.ssh/
+.aws/

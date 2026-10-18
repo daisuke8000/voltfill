@@ -1,0 +1,15 @@
+# Paths in this file are relative to its directory.
+version: 1
+run:
+  pdf: input.pdf
+  schema: text-form.json
+  mock: text-mock.json
+  strategy: text
+  model: jev-1.14.0
+serve:
+  mock: text-mock.json
+  listen: 127.0.0.1:3000
+execution:
+  max_concurrency: 2
+  max_batch_questions: 10
+  max_attempts: 3

@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    if: github.event_name != 'schedule'
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain
+        shell: bash
+        run: |
+          toolchain=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)
+          test -n "$toolchain"
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+          rustc --version
+          cargo --version
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Check
+        run: cargo check --workspace --all-targets --locked
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Tests
+        run: cargo test --workspace --locked
+      - name: Check Hayro feature
+        run: cargo check --workspace --all-targets --features hayro --locked
+      - name: Clippy with Hayro feature
+        run: cargo clippy --workspace --all-targets --features hayro --locked -- -D warnings
+      - name: Hayro tests
+        run: cargo test --workspace --features hayro --locked
+      - name: Check combined renderers
+        run: cargo check --workspace --all-targets --features pdfium,hayro --locked
+      - name: Check PDFium feature
+        run: cargo check --workspace --all-targets --features pdfium --locked
+      - name: Clippy with PDFium feature
+        run: cargo clippy --workspace --all-targets --features pdfium --locked -- -D warnings
+      - name: Compile tests with PDFium feature
+        run: cargo test --workspace --features pdfium --locked --no-run
+      - name: Clean build artifacts
+        if: always()
+        run: cargo clean
+  audit:
+    name: Dependency vulnerabilities
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-audit-target
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain and auditor
+        shell: bash
+        run: |
+          toolchain=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)
+          test -n "$toolchain"
+          rustup toolchain install "$toolchain" --profile minimal
+          cargo install cargo-audit --version 0.22.2 --locked --root "$RUNNER_TEMP/cargo-audit"
+      - name: Audit locked dependencies
+        shell: bash
+        run: '"$RUNNER_TEMP/cargo-audit/bin/cargo-audit" audit --file Cargo.lock --deny unsound'
+      - name: Clean auditor build artifacts
+        if: always()
+        run: cargo clean
+  secrets:
+    name: Secret scanning
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GOBIN: ${{ runner.temp }}/security-bin
+      GOMODCACHE: ${{ runner.temp }}/security-go-mod
+      GOCACHE: ${{ runner.temp }}/security-go-build
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install pinned scanner
+        run: go install github.com/zricethezav/gitleaks/v8@v8.30.1
+      - name: Scan committed history
+        run: '"$GOBIN/gitleaks" git --redact=100 --no-banner --log-opts="--all" .'

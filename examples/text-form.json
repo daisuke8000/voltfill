@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "fields": [{
+    "id": "reference",
+    "label": "Reference printed on page one",
+    "output_type": "string",
+    "pages": [1],
+    "questions": [{
+      "id": "pick_reference",
+      "type": "choice",
+      "instructions": "Choose the reference printed on the page, or none if absent.",
+      "input": {"modality": "text"},
+      "candidate_source": {"kind": "text_spans", "none_option": "No matching reference"}
+    }],
+    "resolver": {"kind": "selected_candidate", "question_id": "pick_reference"},
+    "validators": [{"kind": "non_empty"}]
+  }]
+}

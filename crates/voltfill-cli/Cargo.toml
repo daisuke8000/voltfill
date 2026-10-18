@@ -1,0 +1,24 @@
+[package]
+name = "voltfill-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "voltfill"
+path = "src/main.rs"
+
+[dependencies]
+voltfill-core = { path = "../voltfill-core" }
+voltfill-server = { path = "../voltfill-server" }
+toml = { version = "=0.9.12", default-features = false, features = ["parse", "serde", "std"] }
+serde-saphyr = { version = "=2.0.0", default-features = false, features = ["deserialize"] }
+serde_json.workspace = true
+serde.workspace = true
+log.workspace = true
+
+[features]
+default = []
+pdfium = ["voltfill-core/pdfium", "voltfill-server/pdfium"]
+hayro = ["voltfill-core/hayro", "voltfill-server/hayro"]
