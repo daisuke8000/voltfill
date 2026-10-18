@@ -52,6 +52,7 @@ fn unsafe_or_ambiguous_configs_fail_without_disclosing_contents_or_reading_keys(
         ("yaml", "run: {remote: true}\n---\nrun: {remote: false}\n"),
         ("yaml", "run: {remote: yes}\n"),
         ("yaml", "run: !include secret-canary-private.yaml\n"),
+        ("toml", "[run]\nremote = true\nremote = false\n"),
         ("toml", "[run]\nremote = true\napi_key = 'secret-canary'\n"),
         ("json", r#"{"run":{"remote":true,"remote":false}}"#),
     ] {
