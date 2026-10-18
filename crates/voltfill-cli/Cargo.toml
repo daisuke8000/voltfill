@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 voltfill-core = { path = "../voltfill-core" }
 voltfill-server = { path = "../voltfill-server" }
-toml = { version = "=0.9.12", default-features = false, features = ["parse", "serde", "std"] }
+toml = { version = "=1.1.8", default-features = false, features = ["parse", "serde", "std"] }
 serde-saphyr = { version = "=2.0.0", default-features = false, features = ["deserialize"] }
 serde_json.workspace = true
 serde.workspace = true
