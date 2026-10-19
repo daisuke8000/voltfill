@@ -379,7 +379,7 @@ resources:
   max_render_output_bytes: 67108864
 ```
 
-All limits must be positive except `max_recovery_pages`, which may be zero. `serve.upload_timeout_ms` or `--upload-timeout-ms` controls upload time separately from extraction deadlines. `serve.model` or `--model` sets the default for requests that omit a model. The server admits one extraction job at a time so execution budgets and cooldown are not multiplied across jobs; `max_concurrency` controls Jev workers within that job. Parser-internal allocations remain outside these limits.
+All limits must be positive except `max_recovery_pages`, which may be zero. `serve.upload_timeout_ms` or `--upload-timeout-ms` controls upload time separately from extraction deadlines. `serve.model` or `--model` sets the default for requests that omit a model. The server admits one extraction job at a time so execution budgets and cooldown are not multiplied across jobs; `max_concurrency` controls Jev workers within that job. While a job runs, during the cooldown after it, or while remote work is paused, the server answers `429 server_busy` with `Retry-After` (or `503 remote_paused_unknown_outcome`) without starting an extraction; it first reads and discards the rest of the upload, within the upload size limit and upload deadline, so the client receives that response instead of a closed connection. A client sending `Expect: 100-continue` gets the response before uploading. An upload declared larger than the limit, or arriving while several rejected uploads are already being read, is answered without reading it, and the connection may close before the upload finishes. Parser-internal allocations remain outside these limits.
 
 ## Request control
 
