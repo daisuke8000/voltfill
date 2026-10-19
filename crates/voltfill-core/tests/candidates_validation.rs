@@ -58,6 +58,41 @@ fn suspect_and_unknown_source_are_not_candidates() {
     assert!(CandidateIndex::new(&raw).unwrap().candidates().is_empty());
 }
 #[test]
+fn only_radical_blocks_are_unified() {
+    assert_eq!(
+        validate::unify_cjk_radicals("\u{2F08}\u{2F64}\u{2E9F}\u{2EF3}"),
+        "\u{4EBA}\u{7528}\u{6BCD}\u{9F9F}"
+    );
+    assert_eq!(validate::unify_cjk_radicals("\u{2FD5}"), "\u{9FA0}");
+    let kept = "\u{2E80}\u{2FD6}\u{2FDF}\u{2FF0}\u{FF21}\u{2460}\u{3231}\u{F900}人";
+    assert_eq!(validate::unify_cjk_radicals(kept), kept);
+}
+
+#[test]
+fn unset_radical_unification_is_omitted_from_serialization() {
+    let field = json!({"id":"a","label":"A","output_type":"string","questions":[
+        {"id":"q","type":"noul","instructions":"Present?","input":{"modality":"text"}}],
+        "resolver":{"kind":"noul_to_boolean","question_id":"q"}});
+    let parsed: voltfill_core::schema::FieldDefinition =
+        serde_json::from_value(field.clone()).unwrap();
+    assert!(!parsed.unify_cjk_radicals);
+    assert!(
+        serde_json::to_value(&parsed)
+            .unwrap()
+            .get("unify_cjk_radicals")
+            .is_none()
+    );
+    let mut on = field;
+    on["unify_cjk_radicals"] = json!(true);
+    let parsed: voltfill_core::schema::FieldDefinition = serde_json::from_value(on).unwrap();
+    assert!(parsed.unify_cjk_radicals);
+    assert_eq!(
+        serde_json::to_value(&parsed).unwrap()["unify_cjk_radicals"],
+        true
+    );
+}
+
+#[test]
 fn normalization_does_not_change_original_and_date_decimal_are_not_guessed() {
     let raw = "  日本語\n  A ";
     assert_eq!(

@@ -14,5 +14,6 @@ serde_json = { version = "1.0", default-features = false, features = ["std"] }
 thiserror = "2.0"
 sha2 = "0.11"
 log = "0.4"
+unicode-normalization = "0.1.26"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "multipart", "tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }

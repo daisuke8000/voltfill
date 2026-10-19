@@ -17,6 +17,21 @@ pub fn normalize(raw: &str, normalization: Normalization) -> String {
     }
 }
 
+// Only the radical blocks are folded: other compatibility characters, such as
+// full-width letters and circled numbers, are meaningful as printed.
+pub fn unify_cjk_radicals(raw: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        if ('\u{2E80}'..='\u{2FDF}').contains(&c) {
+            out.extend(std::iter::once(c).nfkc());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn iso_date(s: &str) -> bool {
     if s.len() != 10
         || s.as_bytes()[4] != b'-'
