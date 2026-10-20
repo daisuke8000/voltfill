@@ -484,10 +484,12 @@ featureごとのテストは `cargo test --workspace --features hayro --locked` 
 
 CIではコミット履歴への秘密情報の混入も検査し、出力時は値を伏せます。DependabotはCargo依存とGitHub Actionsの更新を毎週提案します。自動マージは設定していません。
 
+`main`へのpushでは、Rustの検証・依存関係監査・秘密情報検査が成功した後、日英のアーキテクチャページをGitHub Pagesへ公開します。pull request・手動実行・定期実行では公開しません。
+
 CIはJevへの送信、PDFiumのダウンロード、ビルドキャッシュの永続化を行いません。ローカルでの検証後は `cargo clean` でビルド成果物を削除できます。
 
 ### 依存ライブラリの更新
 
 VOLTFILLではフォント解析に使う依存ライブラリの正式リリースを確認し、修正を取り込む前に原文・座標・Evidenceを確認します。
 
-[アーキテクチャ・C4](docs/architecture.html) · [MITライセンス](LICENSE)
+[アーキテクチャ・C4](https://daisuke8000.github.io/voltfill/) · [MITライセンス](LICENSE)
