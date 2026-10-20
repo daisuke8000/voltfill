@@ -25,6 +25,30 @@ fn valid_dynamic_schema_preserves_question_and_limits_strategy() {
     );
 }
 #[test]
+fn shared_context_is_optional_and_must_not_be_empty() {
+    let plain = serde_json::to_vec(&check(form()).unwrap()).unwrap();
+    let mut f = form();
+    f["shared_context"] = Value::Null;
+    assert_eq!(serde_json::to_vec(&check(f).unwrap()).unwrap(), plain);
+    let mut f = form();
+    f["shared_context"] = json!({"a": "Alpha", "b": "Beta"});
+    assert!(check(f).is_ok());
+    for invalid in [json!(""), json!({}), json!([]), json!(5), json!(true)] {
+        let mut f = form();
+        f["shared_context"] = invalid;
+        assert_eq!(check(f).unwrap_err(), SchemaError::Contract);
+    }
+    // A request adds the root and `state` around the value, so 31 nested arrays parse as a
+    // schema but could not be sent.
+    let nested = |levels| (1..levels).fold(json!([]), |inner, _| json!([inner]));
+    let mut f = form();
+    f["shared_context"] = nested(30);
+    assert!(check(f).is_ok());
+    let mut f = form();
+    f["shared_context"] = nested(31);
+    assert_eq!(check(f).unwrap_err(), SchemaError::Contract);
+}
+#[test]
 fn duplicate_keys_unknown_fields_and_unbounded_input_rejected() {
     assert!(schema::parse(br#"{"schema_version":1,"schema_version":1,"fields":[]}"#).is_err());
     let mut f = form();

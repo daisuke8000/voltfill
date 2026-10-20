@@ -382,6 +382,9 @@ fn prepare_batch(
             },
         );
     }
+    if let Some(context) = &form.shared_context {
+        state.insert("shared_context".into(), context.clone());
+    }
     let default_config = Default::default();
     let config = options.execution_config.as_ref().unwrap_or(&default_config);
     let request = jev::build_request(
@@ -1898,5 +1901,34 @@ mod tests {
         let (_, _, usage, script) = run(&form, &options, vec![Ok(("c_p1r1", false))]);
         assert_eq!(usage.attempts, 1);
         assert_eq!(script.image_lookups.get(), 1);
+    }
+    #[test]
+    fn shared_context_is_sent_in_every_request_state_only_when_set() {
+        let steps = || {
+            vec![
+                Ok(("c_p1r2", false)),
+                Ok(("c_p1r1", false)),
+                Ok(("none", false)),
+            ]
+        };
+        let options = ExtractOptions::default();
+        let (_, _, _, plain) = run(&form(8), &options, steps());
+        assert_eq!(plain.requests.len(), 3);
+        assert!(
+            plain
+                .requests
+                .iter()
+                .all(|r| r["state"].get("shared_context").is_none())
+        );
+        let mut shared = form(8);
+        shared.shared_context = Some(Content::Text("Alpha means the first run".into()));
+        let (_, _, _, script) = run(&shared, &options, steps());
+        assert_eq!(script.requests.len(), 3);
+        assert!(
+            script
+                .requests
+                .iter()
+                .all(|r| r["state"]["shared_context"] == json!("Alpha means the first run"))
+        );
     }
 }
