@@ -60,3 +60,60 @@ fn repeated_images_in_values_are_counted_but_asset_keys_are_not() {
         300
     );
 }
+
+#[test]
+fn a_measured_byte_ratio_divides_only_the_text_estimate() {
+    let request = request(
+        json!({"model":jev::MODEL,"state":{"image":"<img>","text":"原文".repeat(200)},
+        "assets":{"<img>":{"part":"image"}},"questions":{
+            "a":{"type":"noul","instructions":"Present?"}
+        }}),
+    );
+    let bytes = request.bytes().len() as u64;
+    let default = planning::estimate(&request, &ContextLimits::default());
+    let lowered = planning::estimate(
+        &request,
+        &ContextLimits {
+            text_tokens_per_100_bytes: 60,
+            ..Default::default()
+        },
+    );
+    assert_eq!(default.request_tokens, bytes + 256 + 16_000);
+    assert_eq!(
+        lowered.request_tokens,
+        (bytes * 60).div_ceil(100) + 256 + 16_000
+    );
+    let text = default.largest_question_tokens - 256 - 16_000;
+    assert_eq!(
+        lowered.largest_question_tokens,
+        (text * 60).div_ceil(100) + 256 + 16_000
+    );
+}
+
+#[test]
+fn the_byte_ratio_is_read_validated_and_left_out_of_the_default_identity() {
+    use voltfill_core::jev::transport::ExecutionConfig;
+    let parse = |value: serde_json::Value| serde_json::from_value::<ExecutionConfig>(value);
+    let config = parse(json!({"context":{"text_tokens_per_100_bytes":25}})).unwrap();
+    assert_eq!(config.context.text_tokens_per_100_bytes, 25);
+    assert!(config.validate().is_ok());
+    for value in [0, 24, 101] {
+        let config = parse(json!({"context":{"text_tokens_per_100_bytes":value}})).unwrap();
+        assert!(config.validate().is_err());
+    }
+    assert!(parse(json!({"context":{"text_tokens_per_100_byte":60}})).is_err());
+    let omitted = serde_json::to_value(ExecutionConfig::default()).unwrap();
+    let explicit =
+        serde_json::to_value(parse(json!({"context":{"text_tokens_per_100_bytes":100}})).unwrap())
+            .unwrap();
+    assert_eq!(omitted, explicit);
+    assert!(
+        omitted["context"]
+            .get("text_tokens_per_100_bytes")
+            .is_none()
+    );
+    assert_eq!(
+        serde_json::to_value(&config).unwrap()["context"]["text_tokens_per_100_bytes"],
+        25
+    );
+}

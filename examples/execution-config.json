@@ -16,7 +16,8 @@
   "context": {
     "max_request_tokens": 64000,
     "max_question_tokens": 32000,
-    "image_tokens_per_image": 16000
+    "image_tokens_per_image": 16000,
+    "text_tokens_per_100_bytes": 100
   },
   "organization": {
     "requests_per_second": 80,
