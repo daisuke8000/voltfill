@@ -12,14 +12,14 @@ use serde::Deserialize;
 use serde_json::json;
 use std::{
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex, MutexGuard, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
 };
 use tokio::sync::Semaphore;
 use voltfill_core::{
-    engine::{self, EvaluationProfile, ExtractOptions},
+    engine::{self, DocumentCache, EvaluationProfile, ExtractOptions},
     evaluate::{FixtureEvaluator, MonotonicClock, RemoteEvaluator},
     jev::{
         http::{Endpoint, HttpTransport},
@@ -38,6 +38,10 @@ pub struct ServerConfig {
     pub execution: ExecutionConfig,
     pub resources: voltfill_core::resources::ResourceLimits,
     pub upload_timeout_ms: u64,
+    /// Off by default: reuse keeps the last document's text and page images in
+    /// memory after the request ends, until `reuse_document_ttl_ms` passes.
+    pub reuse_document: bool,
+    pub reuse_document_ttl_ms: u64,
     pub model: String,
     pub allow_preview_images: bool,
     pub api_key: Option<Secret>,
@@ -52,6 +56,8 @@ impl ServerConfig {
             execution: ExecutionConfig::default(),
             resources: Default::default(),
             upload_timeout_ms: 30_000,
+            reuse_document: false,
+            reuse_document_ttl_ms: 60_000,
             model: voltfill_core::jev::MODEL.into(),
             allow_preview_images: false,
             api_key: None,
@@ -65,6 +71,8 @@ impl ServerConfig {
             execution: ExecutionConfig::default(),
             resources: Default::default(),
             upload_timeout_ms: 30_000,
+            reuse_document: false,
+            reuse_document_ttl_ms: 60_000,
             model: voltfill_core::jev::MODEL.into(),
             allow_preview_images: false,
             api_key: None,
@@ -74,6 +82,41 @@ impl ServerConfig {
     }
     pub fn requires_authentication(&self) -> bool {
         self.api_key.is_some()
+    }
+}
+struct DocumentReuse {
+    cache: Arc<Mutex<DocumentCache>>,
+    wake: Condvar,
+}
+/// Upper bound on how long the janitor sleeps, which is also how soon it notices
+/// that the server state is gone and exits.
+const JANITOR_POLL: Duration = Duration::from_secs(1);
+fn locked(cache: &Mutex<DocumentCache>) -> MutexGuard<'_, DocumentCache> {
+    cache.lock().unwrap_or_else(|e| e.into_inner())
+}
+/// Releases the cached document at its deadline on a thread of its own, so release
+/// depends on neither the request that filled the cache nor any async runtime.
+fn run_janitor(reuse: Weak<DocumentReuse>) {
+    while let Some(reuse) = reuse.upgrade() {
+        let mut cache = locked(&reuse.cache);
+        let wait = cache
+            .expire_due(Instant::now())
+            .map_or(JANITOR_POLL, |left| left.min(JANITOR_POLL));
+        drop(
+            reuse
+                .wake
+                .wait_timeout(cache, wait)
+                .unwrap_or_else(|e| e.into_inner()),
+        );
+    }
+}
+/// Clears the cache if the job unwinds, so a failed job cannot leave a document behind.
+struct CacheLease<'a>(MutexGuard<'a, DocumentCache>);
+impl Drop for CacheLease<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.clear();
+        }
     }
 }
 struct Admission {
@@ -87,6 +130,7 @@ pub struct AppState {
     jobs: Arc<Semaphore>,
     discards: Arc<Semaphore>,
     admission: Arc<Mutex<Admission>>,
+    reuse: Option<Arc<DocumentReuse>>,
 }
 impl AppState {
     /// Construct outside an async runtime; blocking client shutdown stays outside it too.
@@ -104,6 +148,9 @@ impl AppState {
         if !(1..=3_600_000).contains(&config.upload_timeout_ms) {
             return Err("invalid_upload_timeout");
         }
+        if !(1..=3_600_000).contains(&config.reuse_document_ttl_ms) {
+            return Err("invalid_reuse_document_ttl");
+        }
         voltfill_core::jev::validate_model(&config.model).map_err(|_| "invalid_model")?;
         let transport = match &config.backend {
             Backend::Remote(endpoint, _) => {
@@ -111,6 +158,21 @@ impl AppState {
             }
             Backend::Fixture(_) => None,
         };
+        let reuse = config.reuse_document.then(|| {
+            Arc::new(DocumentReuse {
+                cache: Arc::new(Mutex::new(DocumentCache::with_ttl(Duration::from_millis(
+                    config.reuse_document_ttl_ms,
+                )))),
+                wake: Condvar::new(),
+            })
+        });
+        if let Some(reuse) = &reuse {
+            let weak = Arc::downgrade(reuse);
+            std::thread::Builder::new()
+                .name("voltfill-document-janitor".into())
+                .spawn(move || run_janitor(weak))
+                .map_err(|_| "janitor_start_failed")?;
+        }
         Ok(Self {
             config: Arc::new(config),
             transport,
@@ -120,6 +182,7 @@ impl AppState {
                 next: Instant::now(),
                 paused: false,
             })),
+            reuse,
         })
     }
 }
@@ -406,6 +469,9 @@ async fn extract(State(state): State<AppState>, request: Request) -> Response {
     let joined = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let config = &job_state.config;
+        let cache_handle = job_state.reuse.as_ref().map(|r| r.cache.clone());
+        let mut lease = cache_handle.as_deref().map(|c| CacheLease(locked(c)));
+        let cache = lease.as_mut().map(|l| &mut *l.0);
         let options = ExtractOptions {
             model,
             pdf_limits: config.resources.pdf,
@@ -420,7 +486,9 @@ async fn extract(State(state): State<AppState>, request: Request) -> Response {
             Err(error) => Err(error),
             Ok(options) => match &config.backend {
                 Backend::Fixture(bytes) => match FixtureEvaluator::from_bytes(bytes) {
-                    Ok(mut evaluator) => engine::extract(&pdf, &form, &options, &mut evaluator),
+                    Ok(mut evaluator) => {
+                        engine::extract_reusing(&pdf, &form, &options, &mut evaluator, cache)
+                    }
                     Err(_) => Err(engine::EngineError::Config),
                 },
                 Backend::Remote(_, secret) => {
@@ -444,7 +512,7 @@ async fn extract(State(state): State<AppState>, request: Request) -> Response {
                         .and_then(|e| e.with_execution_config(&config.execution).ok())
                     {
                         Some(mut evaluator) => {
-                            engine::extract(&pdf, &form, &options, &mut evaluator)
+                            engine::extract_reusing(&pdf, &form, &options, &mut evaluator, cache)
                         }
                         None => Err(engine::EngineError::Config),
                     }
@@ -453,6 +521,10 @@ async fn extract(State(state): State<AppState>, request: Request) -> Response {
         };
         if matches!(config.backend, Backend::Remote(_, _)) {
             finish_remote(&job_state, &result);
+        }
+        drop(lease);
+        if let Some(reuse) = &job_state.reuse {
+            reuse.wake.notify_one();
         }
         match result {
             Ok(report) => {
@@ -773,5 +845,169 @@ mod tests {
         assert_eq!(body["jev_responses"], expected);
         assert_eq!(body["jev_responses"][0]["body"], raw);
         assert_eq!(body["jev_responses"][1]["body"], json!([255, 0]));
+    }
+
+    fn text_pdf(text: &str) -> Vec<u8> {
+        let stream = format!("BT /F1 24 Tf 72 700 Td ({text}) Tj ET");
+        let objects = [
+            "<</Type/Catalog/Pages 2 0 R>>".to_owned(),
+            "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_owned(),
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>".to_owned(),
+            format!("<</Length {}>>\nstream\n{stream}\nendstream", stream.len()),
+            "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>".to_owned(),
+        ];
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend(format!("{} 0 obj\n{object}\nendobj\n", i + 1).bytes());
+        }
+        let xref = pdf.len();
+        pdf.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).bytes());
+        for offset in offsets {
+            pdf.extend(format!("{offset:010} 00000 n \n").bytes());
+        }
+        pdf.extend(
+            format!(
+                "trailer\n<</Size {}/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .bytes(),
+        );
+        pdf
+    }
+
+    async fn extract_pdf(state: &AppState, pdf: &[u8], options: &str) -> Response {
+        let mut body = Vec::new();
+        for (name, content) in [
+            ("pdf", pdf),
+            ("options", options.as_bytes()),
+            (
+                "schema",
+                &include_bytes!("../../../examples/text-form.json")[..],
+            ),
+        ] {
+            body.extend(
+                format!("--b\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n").bytes(),
+            );
+            body.extend(content);
+            body.extend(b"\r\n");
+        }
+        body.extend(b"--b--\r\n");
+        router(state.clone())
+            .oneshot(
+                Request::post("/v1/extract")
+                    .header(header::CONTENT_TYPE, "multipart/form-data; boundary=b")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    fn reuse_state(ttl_ms: u64) -> (AppState, Arc<DocumentReuse>) {
+        let mut config =
+            ServerConfig::fixture(include_bytes!("../../../examples/text-mock.json").to_vec())
+                .unwrap();
+        config.reuse_document = true;
+        config.reuse_document_ttl_ms = ttl_ms;
+        let state = AppState::new(config).unwrap();
+        let reuse = state.reuse.clone().unwrap();
+        (state, reuse)
+    }
+
+    fn cached(reuse: &DocumentReuse) -> bool {
+        !locked(&reuse.cache).is_empty()
+    }
+
+    async fn until(mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(Instant::now() < deadline, "condition not reached");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    // Holding the cache lock is how the test keeps the job inside its blocking section.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn reused_document_is_dropped_after_the_ttl_even_if_the_client_disconnects() {
+        let (state, reuse) = reuse_state(1000);
+        let held = locked(&reuse.cache);
+        // The job clones the cache handle just before it blocks on the lock held here.
+        let waiting = Arc::strong_count(&reuse.cache) + 1;
+        let request = tokio::spawn({
+            let state = state.clone();
+            async move { extract_pdf(&state, &text_pdf("ALPHA42"), "{}").await }
+        });
+        until(|| Arc::strong_count(&reuse.cache) >= waiting).await;
+        request.abort();
+        let _ = request.await;
+        drop(held);
+        until(|| state.jobs.available_permits() == 1).await;
+        assert!(cached(&reuse));
+        until(|| !cached(&reuse)).await;
+    }
+
+    #[tokio::test]
+    async fn a_job_failing_before_it_opens_the_document_does_not_extend_its_lifetime() {
+        let (state, reuse) = reuse_state(1500);
+        let response = extract_pdf(&state, &text_pdf("ALPHA42"), "{}").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let filled = Instant::now();
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        let invalid = r#"{"evaluation_profile":{"min_confidence":2.0,"noul_true_min":0.9,"noul_false_max":0.1}}"#;
+        let response = extract_pdf(&state, &text_pdf("ALPHA42"), invalid).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(cached(&reuse));
+        tokio::time::sleep(
+            (filled + Duration::from_millis(2100)).saturating_duration_since(Instant::now()),
+        )
+        .await;
+        assert!(!cached(&reuse));
+    }
+
+    #[test]
+    fn janitor_releases_the_document_without_traffic_or_a_runtime() {
+        let (state, reuse) = reuse_state(1000);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let response = runtime.block_on(extract_pdf(&state, &text_pdf("ALPHA42"), "{}"));
+        assert_eq!(response.status(), StatusCode::OK);
+        drop(runtime);
+        assert!(cached(&reuse));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while cached(&reuse) {
+            assert!(Instant::now() < deadline, "document was not released");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn janitor_exits_when_the_server_state_is_dropped() {
+        let (state, reuse) = reuse_state(60_000);
+        let weak = Arc::downgrade(&reuse);
+        drop((state, reuse));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while weak.upgrade().is_some() {
+            assert!(Instant::now() < deadline, "janitor still holds the state");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn reuse_is_off_by_default_and_the_ttl_is_range_checked() {
+        let config = || {
+            ServerConfig::fixture(include_bytes!("../../../examples/text-mock.json").to_vec())
+                .unwrap()
+        };
+        assert!(AppState::new(config()).unwrap().reuse.is_none());
+        for ttl in [0, 3_600_001] {
+            let mut config = config();
+            config.reuse_document_ttl_ms = ttl;
+            assert_eq!(
+                AppState::new(config).err(),
+                Some("invalid_reuse_document_ttl")
+            );
+        }
     }
 }

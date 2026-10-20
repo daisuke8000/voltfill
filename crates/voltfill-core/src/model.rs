@@ -93,7 +93,7 @@ impl FieldResult {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PageDiagnostic {
     pub page: u32,
     pub text_available: bool,
@@ -101,7 +101,7 @@ pub struct PageDiagnostic {
     pub reason_codes: Vec<String>,
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Timings {
     pub metadata_ms: f64,
     pub positions_ms: f64,

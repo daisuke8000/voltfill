@@ -16,7 +16,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -150,13 +150,115 @@ impl PageResult {
     }
 }
 
+/// Keeping document text and page images in memory past the request is a privacy
+/// decision for the caller: enable it deliberately and release the entry with
+/// `clear` or `expire_due` once it is idle for the TTL. Cached images are capped at
+/// `max_concurrency * max_output_bytes` bytes in total, and are held in addition
+/// to the images of the window being evaluated (a hit copies them).
+pub struct DocumentCache {
+    entry: Option<CachedDocument>,
+    ttl: Duration,
+}
+struct CachedDocument {
+    key: String,
+    snapshot: pdf::DocumentSnapshot,
+    images: BTreeMap<u32, crate::evaluate::EvaluationImage>,
+    last_used: Instant,
+}
+impl Default for DocumentCache {
+    fn default() -> Self {
+        Self::with_ttl(Duration::from_secs(60))
+    }
+}
+impl DocumentCache {
+    pub fn with_ttl(ttl: Duration) -> Self {
+        Self { entry: None, ttl }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.entry.is_none()
+    }
+    pub fn clear(&mut self) {
+        self.entry = None;
+    }
+    /// Drops the entry if it has been idle for the TTL; otherwise returns the time
+    /// left. Deadlines are compared here, so an entry is never served or kept past
+    /// its TTL whatever timer state surrounds it.
+    pub fn expire_due(&mut self, now: Instant) -> Option<Duration> {
+        let entry = self.entry.as_ref()?;
+        let idle = now.saturating_duration_since(entry.last_used);
+        if idle >= self.ttl {
+            self.entry = None;
+            None
+        } else {
+            Some(self.ttl - idle)
+        }
+    }
+    // `max_concurrency` sizes the image cap, so entries built under another cap are not reused.
+    fn key(bytes: &[u8], options: &ExtractOptions) -> String {
+        #[cfg(any(feature = "pdfium", feature = "hayro"))]
+        let render = format!("{:?}", options.render_config);
+        #[cfg(not(any(feature = "pdfium", feature = "hayro")))]
+        let render = String::new();
+        format!(
+            "{}|{:?}|{}|{render}",
+            hash(bytes),
+            options.pdf_limits,
+            options.max_concurrency
+        )
+    }
+    fn open(
+        &mut self,
+        bytes: &[u8],
+        options: &ExtractOptions,
+    ) -> Result<
+        (
+            pdf::DocumentSnapshot,
+            BTreeMap<u32, crate::evaluate::EvaluationImage>,
+        ),
+        EngineError,
+    > {
+        self.expire_due(Instant::now());
+        let key = Self::key(bytes, options);
+        if let Some(entry) = self.entry.as_mut().filter(|entry| entry.key == key) {
+            let mut snapshot = entry.snapshot.clone();
+            snapshot.timings = Default::default();
+            return Ok((snapshot, std::mem::take(&mut entry.images)));
+        }
+        self.entry = None;
+        let snapshot = pdf::inspect(bytes, options.pdf_limits)?;
+        self.entry = Some(CachedDocument {
+            key,
+            snapshot: snapshot.clone(),
+            images: BTreeMap::new(),
+            last_used: Instant::now(),
+        });
+        Ok((snapshot, BTreeMap::new()))
+    }
+    fn restore(&mut self, images: BTreeMap<u32, crate::evaluate::EvaluationImage>) {
+        if let Some(entry) = &mut self.entry {
+            entry.images = images;
+            entry.last_used = Instant::now();
+        }
+    }
+}
+
 pub fn extract(
     bytes: &[u8],
     form: &FormDefinition,
     options: &ExtractOptions,
     evaluator: &mut impl Evaluator,
 ) -> Result<ExtractionReport, EngineError> {
-    extract_inner(bytes, form, options, evaluator).map_err(|source| {
+    extract_reusing(bytes, form, options, evaluator, None)
+}
+
+pub fn extract_reusing(
+    bytes: &[u8],
+    form: &FormDefinition,
+    options: &ExtractOptions,
+    evaluator: &mut impl Evaluator,
+    cache: Option<&mut DocumentCache>,
+) -> Result<ExtractionReport, EngineError> {
+    extract_inner(bytes, form, options, evaluator, cache).map_err(|source| {
         let jev_responses = evaluator.take_responses();
         if jev_responses.is_empty() {
             source
@@ -174,6 +276,7 @@ fn extract_inner(
     form: &FormDefinition,
     options: &ExtractOptions,
     evaluator: &mut impl Evaluator,
+    mut cache: Option<&mut DocumentCache>,
 ) -> Result<ExtractionReport, EngineError> {
     let started = Instant::now();
     form.validate()
@@ -193,9 +296,20 @@ fn extract_inner(
     {
         return Err(EngineError::Config);
     }
-    let mut snapshot = pdf::inspect(bytes, options.pdf_limits)?;
+    let (mut snapshot, mut images) = match cache.as_deref_mut() {
+        Some(cache) => cache.open(bytes, options)?,
+        None => (pdf::inspect(bytes, options.pdf_limits)?, BTreeMap::new()),
+    };
     let candidate_start = Instant::now();
-    let index = CandidateIndex::new(&snapshot.fragments).map_err(|_| EngineError::Provenance)?;
+    let index = match CandidateIndex::new(&snapshot.fragments) {
+        Ok(index) => index,
+        Err(_) => {
+            if let Some(cache) = cache {
+                cache.restore(images);
+            }
+            return Err(EngineError::Provenance);
+        }
+    };
     snapshot.timings.candidates_ms = candidate_start.elapsed().as_secs_f64() * 1000.0;
     let mut evidence = Vec::new();
     let mut usage = UsageSummary::default();
@@ -211,7 +325,11 @@ fn extract_inner(
         &mut snapshot.timings,
         started,
         &mut usage,
+        cache.is_some().then_some(&mut images),
     );
+    if let Some(cache) = cache {
+        cache.restore(images);
+    }
     snapshot.timings.evaluation_ms += (evaluation_started.elapsed().as_secs_f64() * 1000.0
         - snapshot.timings.resolve_ms
         - snapshot.timings.render_ms)
@@ -421,8 +539,9 @@ fn prepare_image(
     options: &ExtractOptions,
     evaluator: &impl Evaluator,
     timings: &mut crate::model::Timings,
+    reused: Option<&mut BTreeMap<u32, crate::evaluate::EvaluationImage>>,
 ) -> Result<PreparedImage, &'static str> {
-    let _ = (bytes, options, &timings);
+    let _ = (bytes, options, &timings, &reused);
     let image = if let Some(image) = evaluator.fixture_image(page) {
         if evaluator.backend() != "synthetic_fixture" {
             return Err("synthetic_image_backend_required");
@@ -434,14 +553,27 @@ fn prepare_image(
             let Some(config) = &options.render_config else {
                 return Err("image_binding_unavailable");
             };
-            timings.render_calls += 1;
-            let image =
-                crate::render::render(bytes, page, config).map_err(|_| "render_unavailable")?;
-            crate::evaluate::EvaluationImage {
-                png: image.png,
-                width: image.width,
-                height: image.height,
-                transform: image.transform,
+            if let Some(image) = reused.as_deref().and_then(|images| images.get(&page)) {
+                image.clone()
+            } else {
+                timings.render_calls += 1;
+                let image =
+                    crate::render::render(bytes, page, config).map_err(|_| "render_unavailable")?;
+                let image = crate::evaluate::EvaluationImage {
+                    png: image.png,
+                    width: image.width,
+                    height: image.height,
+                    transform: image.transform,
+                };
+                if let Some(images) = reused {
+                    let held: u64 = images.values().map(|i| i.png.len() as u64).sum();
+                    let cap =
+                        (options.max_concurrency as u64).saturating_mul(config.max_output_bytes);
+                    if held.saturating_add(image.png.len() as u64) <= cap {
+                        images.insert(page, image.clone());
+                    }
+                }
+                image
             }
         }
         #[cfg(not(any(feature = "pdfium", feature = "hayro")))]
@@ -628,6 +760,7 @@ fn evaluate_waves(
     timings: &mut crate::model::Timings,
     started: Instant,
     usage: &mut UsageSummary,
+    mut reused_images: Option<&mut BTreeMap<u32, crate::evaluate::EvaluationImage>>,
 ) -> Vec<Vec<PageResult>> {
     let mut outcomes: Vec<Vec<PageResult>> = (0..form.fields.len()).map(|_| Vec::new()).collect();
     let all_pages: BTreeSet<_> = pages.iter().map(|p| p.page).collect();
@@ -679,7 +812,8 @@ fn evaluate_waves(
     let mut rest = requested.as_slice();
     while !rest.is_empty() {
         // Every page in a window is rendered and held until the window ends, so pages
-        // the remaining request budget cannot reach are left for a later window.
+        // the remaining request budget cannot reach are left for a later window. Images kept
+        // for reuse are separate copies (see `DocumentCache`).
         let remaining = options.max_requests.saturating_sub(usage.attempts).max(1) as usize;
         let (window, next) = rest.split_at(options.max_concurrency.min(remaining).min(rest.len()));
         rest = next;
@@ -730,8 +864,15 @@ fn evaluate_waves(
                         .any(|q| q.input.modality != Modality::Text)
             }) {
                 let image_started = Instant::now();
-                let image =
-                    prepare_image(bytes, page, &geometries[&page], options, evaluator, timings);
+                let image = prepare_image(
+                    bytes,
+                    page,
+                    &geometries[&page],
+                    options,
+                    evaluator,
+                    timings,
+                    reused_images.as_deref_mut(),
+                );
                 timings.render_ms += image_started.elapsed().as_secs_f64() * 1000.0;
                 images.insert(page, image);
             }
@@ -1660,6 +1801,7 @@ mod tests {
             &mut Timings::default(),
             Instant::now(),
             &mut usage,
+            None,
         );
         let mut evidence = Vec::new();
         let fields = form
@@ -1930,5 +2072,214 @@ mod tests {
                 .iter()
                 .all(|r| r["state"]["shared_context"] == json!("Alpha means the first run"))
         );
+    }
+
+    fn pdf_with_text(text: &str) -> Vec<u8> {
+        use lopdf::{
+            Document, Object, Stream,
+            content::{Content, Operation},
+            dictionary,
+        };
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        // Type3 glyphs need no font file, which renderers refuse to substitute.
+        let glyph = |c: char| match c {
+            ' ' => "space".to_owned(),
+            '0'..='9' => [
+                "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+            ][c as usize - '0' as usize]
+                .to_owned(),
+            _ => c.to_string(),
+        };
+        let mut procs = lopdf::Dictionary::new();
+        let mut differences = Vec::new();
+        for c in text.chars() {
+            let name = glyph(c);
+            if !procs.has(name.as_bytes()) {
+                let proc = doc.add_object(Stream::new(
+                    dictionary! {},
+                    b"1000 0 0 0 750 750 d1 0 0 750 750 re f".to_vec(),
+                ));
+                procs.set(name.as_str(), proc);
+                differences.push(Object::Integer(c as i64));
+                differences.push(Object::Name(name.into_bytes()));
+            }
+        }
+        let mut cmap = String::from(
+            "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapName /Adobe-Identity-UCS def /CMapType 2 def 1 begincodespacerange <00> <FF> endcodespacerange\n",
+        );
+        let chars: std::collections::BTreeSet<char> = text.chars().collect();
+        cmap += &format!("{} beginbfchar\n", chars.len());
+        for c in chars {
+            cmap += &format!("<{:02X}> <{:04X}>\n", c as u32, c as u32);
+        }
+        cmap += "endbfchar endcmap CMapName currentdict /CMap defineresource pop end end";
+        let to_unicode = doc.add_object(Stream::new(dictionary! {}, cmap.into_bytes()));
+        let font_id = doc.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type3", "ToUnicode" => to_unicode,
+            "FontBBox" => vec![0.into(), 0.into(), 1000.into(), 1000.into()],
+            "FontMatrix" => vec![0.001.into(), 0.into(), 0.into(), 0.001.into(), 0.into(), 0.into()],
+            "CharProcs" => procs,
+            "Encoding" => dictionary! {"Type" => "Encoding", "Differences" => differences},
+            "FirstChar" => 32, "LastChar" => 126,
+            "Widths" => vec![Object::Integer(1000); 95],
+        });
+        let content = Content {
+            operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["F1".into(), 12.into()]),
+                Operation::new("Td", vec![80.into(), 240.into()]),
+                Operation::new("Tj", vec![Object::string_literal(text)]),
+                Operation::new("ET", vec![]),
+            ],
+        };
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id, "Contents" => content_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => dictionary! {"Font" => dictionary! {"F1" => font_id}},
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages", "Kids" => vec![page_id.into()], "Count" => 1,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {"Type" => "Catalog", "Pages" => pages_id});
+        doc.trailer.set("Root", catalog_id);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        bytes
+    }
+    fn reuse_form() -> FormDefinition {
+        crate::schema::parse(include_bytes!("../../../examples/text-form.json")).unwrap()
+    }
+    fn reuse_run(
+        bytes: &[u8],
+        options: &ExtractOptions,
+        cache: &mut DocumentCache,
+    ) -> ExtractionReport {
+        let mut evaluator = evaluate::FixtureEvaluator::from_bytes(include_bytes!(
+            "../../../examples/text-mock.json"
+        ))
+        .unwrap();
+        extract_reusing(bytes, &reuse_form(), options, &mut evaluator, Some(cache)).unwrap()
+    }
+
+    #[test]
+    fn cached_document_skips_inspection_and_yields_the_same_fields() {
+        let bytes = pdf_with_text("ALPHA42");
+        let options = ExtractOptions::default();
+        let mut cache = DocumentCache::default();
+        let first = reuse_run(&bytes, &options, &mut cache);
+        let second = reuse_run(&bytes, &options, &mut cache);
+        assert!(first.timings.parser_load_calls > 0);
+        assert_eq!(second.timings.parser_load_calls, 0);
+        assert_eq!(
+            serde_json::to_value(&first.fields).unwrap(),
+            serde_json::to_value(&second.fields).unwrap()
+        );
+        assert_eq!(first.document_id, second.document_id);
+        assert_eq!(first.fields[0].status, Status::Extracted);
+    }
+
+    #[test]
+    fn cache_is_replaced_when_bytes_or_limits_change() {
+        let bytes = pdf_with_text("ALPHA42");
+        let options = ExtractOptions::default();
+        let mut cache = DocumentCache::default();
+        reuse_run(&bytes, &options, &mut cache);
+        let other = reuse_run(&pdf_with_text("ALPHA42 "), &options, &mut cache);
+        assert!(other.timings.parser_load_calls > 0);
+        let limits = ExtractOptions {
+            pdf_limits: PdfLimits {
+                max_recovery_pages: 7,
+                ..PdfLimits::default()
+            },
+            ..Default::default()
+        };
+        let changed = reuse_run(&pdf_with_text("ALPHA42 "), &limits, &mut cache);
+        assert!(changed.timings.parser_load_calls > 0);
+    }
+
+    #[test]
+    fn an_entry_idle_for_the_ttl_is_dropped_and_never_served() {
+        let bytes = pdf_with_text("ALPHA42");
+        let options = ExtractOptions::default();
+        let mut cache = DocumentCache::default();
+        reuse_run(&bytes, &options, &mut cache);
+        let now = Instant::now();
+        assert!(
+            cache
+                .expire_due(now)
+                .is_some_and(|left| left <= Duration::from_secs(60))
+        );
+        assert_eq!(cache.expire_due(now + Duration::from_secs(61)), None);
+        assert!(cache.is_empty());
+
+        let mut cache = DocumentCache::with_ttl(Duration::ZERO);
+        reuse_run(&bytes, &options, &mut cache);
+        let again = reuse_run(&bytes, &options, &mut cache);
+        assert!(again.timings.parser_load_calls > 0);
+    }
+
+    #[cfg(feature = "hayro")]
+    #[test]
+    fn rendered_pages_are_reused_and_a_different_render_config_renders_again() {
+        let bytes = pdf_with_text("ALPHA");
+        let form =
+            crate::schema::parse(include_bytes!("../../../examples/vision-form.json")).unwrap();
+        let run = |options: &ExtractOptions, cache: Option<&mut DocumentCache>| {
+            let mut evaluator = evaluate::FixtureEvaluator::from_bytes(include_bytes!(
+                "../../../examples/vision-mock.json"
+            ))
+            .unwrap();
+            extract_reusing(&bytes, &form, options, &mut evaluator, cache).unwrap()
+        };
+        let options = |pixels_per_point| {
+            let mut config = crate::render::RenderConfig::hayro();
+            config.pixels_per_point = pixels_per_point;
+            ExtractOptions {
+                strategy: Strategy::VisionFirst,
+                render_config: Some(config),
+                ..Default::default()
+            }
+        };
+        let plain = run(&options(0.5), None);
+        assert_eq!(plain.timings.render_calls, 1);
+        assert_eq!(plain.fields[0].status, Status::Extracted);
+        assert_eq!(plain.fields[0].value, Some(json!("ALPHA")));
+        assert!(!plain.evidence.is_empty() && plain.evidence.iter().all(|e| e.image_id.is_some()));
+        let mut cache = DocumentCache::default();
+        let first = run(&options(0.5), Some(&mut cache));
+        let second = run(&options(0.5), Some(&mut cache));
+        assert_eq!(
+            (
+                second.timings.parser_load_calls,
+                second.timings.render_calls
+            ),
+            (0, 0)
+        );
+        for report in [&first, &second] {
+            assert_eq!(report.document_id, plain.document_id);
+            for (a, b) in [
+                (
+                    serde_json::to_value(&report.fields),
+                    serde_json::to_value(&plain.fields),
+                ),
+                (
+                    serde_json::to_value(&report.evidence),
+                    serde_json::to_value(&plain.evidence),
+                ),
+                (
+                    serde_json::to_value(&report.pages),
+                    serde_json::to_value(&plain.pages),
+                ),
+            ] {
+                assert_eq!(a.unwrap(), b.unwrap());
+            }
+        }
+        let rescaled = run(&options(0.75), Some(&mut cache));
+        assert_eq!(rescaled.timings.render_calls, 1);
     }
 }

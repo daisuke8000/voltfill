@@ -112,6 +112,11 @@ fn server_environment_and_credential_files_are_validated_before_listening() {
             vec![("VOLTFILL_UPLOAD_TIMEOUT_MS", "0")],
             "invalid_upload_timeout",
         ),
+        (
+            vec![],
+            vec![("VOLTFILL_REUSE_DOCUMENT_TTL_MS", "0")],
+            "invalid_reuse_document_ttl",
+        ),
     ] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_voltfill"));
         command
