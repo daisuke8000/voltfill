@@ -389,7 +389,7 @@ Pass an optional JSON file with `--config FILE`. Specify only overrides; omitted
 
 | Field | Meaning | Default |
 |---|---|---|
-| `max_concurrency` | Concurrent POST workers; 1–4 | `2` |
+| `max_concurrency` | Concurrent POST workers; at least 1. Up to this many pages are rendered and held at once, so memory grows with it | `2` |
 | `max_batch_questions` | Questions per batch; 1–255 | `32` |
 | `max_attempts` | Attempts per request, including the first; 1–3 | `3` |
 | `max_requests` | Total POST attempts, including retries | `128` |
@@ -456,15 +456,7 @@ cargo test --workspace --locked
 
 Run feature tests with `cargo test --workspace --features hayro --locked` or `cargo test --workspace --features pdfium --locked`. These tests do not use PDF files or exercise native rendering. Run feature configurations sequentially because executable paths are shared. Generate Rust API documentation with `cargo doc -p voltfill-core --no-deps`.
 
-[CI](.github/workflows/ci.yml) runs formatting, checks, Clippy and default-feature tests on Linux and macOS. It also runs Hayro checks, Clippy and tests, checks the combined renderer build, and checks, lints and compiles PDFium tests. PDFium feature checks do not load a native library.
-
-Locked dependencies are checked against RustSec advisories on pushes, pull requests, manual runs and a daily schedule. Known vulnerabilities and unsoundness advisories fail the audit; application security still requires source review and tests.
-
-CI also scans committed history for potential secrets with redacted output. Dependabot proposes weekly Cargo and GitHub Actions updates; automatic merging is not configured.
-
-On pushes to `main`, CI publishes the English and Japanese architecture pages to GitHub Pages after the Rust checks, dependency audit and secret scan succeed. Pull requests, manual runs and scheduled runs do not publish the site.
-
-CI does not call Jev, download PDFium or persist build caches. Run `cargo clean` to remove local build artifacts after verification.
+Run `cargo clean` to remove local build artifacts after verification.
 
 ### Dependency updates
 

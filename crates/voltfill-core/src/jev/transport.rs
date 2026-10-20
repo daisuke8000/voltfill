@@ -189,7 +189,7 @@ impl ExecutionConfig {
     }
     pub fn validate(&self) -> Result<(), Failure> {
         if !(1..=3).contains(&self.max_attempts)
-            || !(1..=4).contains(&self.max_concurrency)
+            || self.max_concurrency == 0
             || !(1..=255).contains(&self.max_batch_questions)
             || !(1..=10_000).contains(&self.max_requests)
             || self.total_deadline_ms == 0
@@ -364,7 +364,7 @@ impl AttemptBudget {
         s.value.max_cost_nano_usd = max_cost_nano_usd;
     }
     pub fn set_worker_limit(&self, max: usize) -> Result<(), Failure> {
-        if !(1..=4).contains(&max) {
+        if max == 0 {
             return Err(Failure::Config);
         }
         let mut s = self.lock();

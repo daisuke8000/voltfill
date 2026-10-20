@@ -161,6 +161,10 @@ fn invalid_allocations_are_rejected_before_any_attempt_is_reserved() {
             completion_gap_ms: voltfill_core::jev::transport::MIN_COMPLETION_GAP_MS - 1,
             ..base.clone()
         },
+        ExecutionConfig {
+            max_concurrency: 0,
+            ..base.clone()
+        },
     ];
     for config in invalid {
         let budget = AttemptBudget::default();
@@ -168,6 +172,17 @@ fn invalid_allocations_are_rejected_before_any_attempt_is_reserved() {
         assert_eq!(budget.snapshot().posts, 0);
         assert_eq!(budget.snapshot().reserved, 0);
     }
+    let budget = AttemptBudget::default();
+    assert!(
+        budget
+            .configure(&ExecutionConfig {
+                max_concurrency: 64,
+                ..base.clone()
+            })
+            .is_ok()
+    );
+    assert!(budget.set_worker_limit(64).is_ok());
+    assert_eq!(budget.set_worker_limit(0), Err(Failure::Config));
     assert_eq!(
         base.completion_gap_ms,
         voltfill_core::jev::transport::DEFAULT_COMPLETION_GAP_MS

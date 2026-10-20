@@ -28,6 +28,26 @@ fn assert_error_response(bytes: &[u8], reason: &str) {
 }
 
 #[test]
+fn concurrency_flag_accepts_values_above_the_default() {
+    let out = cli(&[
+        "extract",
+        "--pdf",
+        "missing-private-path",
+        "--allow-remote",
+        "--max-concurrency",
+        "64",
+    ]);
+    let error = serde_json::from_slice::<Value>(&out.stderr).unwrap()["error"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        !["invalid_arguments", "invalid_execution_config"].contains(&error.as_str()),
+        "{error}"
+    );
+}
+
+#[test]
 fn retry_and_logging_help_and_validation_precede_input_or_credentials() {
     let out = cli(&["--help"]);
     assert_eq!(out.status.code(), Some(0));
@@ -51,7 +71,6 @@ fn retry_and_logging_help_and_validation_precede_input_or_credentials() {
         ("--max-attempts", "01"),
         ("--max-attempts", "unbounded"),
         ("--max-concurrency", "0"),
-        ("--max-concurrency", "5"),
         ("--max-concurrency", "02"),
         ("--log-level", "trace"),
         ("--log-level", "DEBUG"),
