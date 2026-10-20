@@ -31,6 +31,10 @@ pub enum SchemaError {
 pub struct FormDefinition {
     pub schema_version: u32,
     pub fields: Vec<FieldDefinition>,
+    /// Left out when absent, so a form without it serializes, and hashes into `form_id`,
+    /// exactly as before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_context: Option<jev::Content>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,6 +229,11 @@ impl FormDefinition {
         }
         if self.fields.is_empty() || self.fields.len() > MAX_FIELDS {
             return Err(SchemaError::Limit);
+        }
+        if let Some(context) = &self.shared_context
+            && (!context.entry(false) || !jev::fits_in_state("shared_context", context))
+        {
+            return Err(SchemaError::Contract);
         }
         let mut ids = BTreeSet::new();
         for field in &self.fields {

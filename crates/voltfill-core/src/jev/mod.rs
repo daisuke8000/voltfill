@@ -297,6 +297,16 @@ pub fn build_request(draft: RequestDraft, limits: Limits) -> Result<Request, Err
     Ok(Request { draft, bytes })
 }
 
+/// Applies both depth checks of `build_request` to a value placed in `state`; they count
+/// differently (every node versus containers only). The configured byte limit applies later.
+pub(crate) fn fits_in_state(key: &str, value: &Content) -> bool {
+    let limits = Limits::default();
+    let state = Content::Object(BTreeMap::from([(key.to_string(), value.clone())]));
+    state.check(1, limits.max_depth).is_ok()
+        && serde_json::to_vec(&BTreeMap::from([("state", &state)]))
+            .is_ok_and(|bytes| json::preflight(&bytes, limits).is_ok())
+}
+
 #[derive(Debug, Deserialize, PartialEq, Default)]
 #[serde(transparent)]
 pub struct Nullable<T>(pub Option<T>);
