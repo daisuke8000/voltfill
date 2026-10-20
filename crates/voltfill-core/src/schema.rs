@@ -45,6 +45,10 @@ pub struct FieldDefinition {
     pub validators: Vec<Validator>,
     #[serde(default)]
     pub normalization: Normalization,
+    /// Left out when false, so a form that sets it to false serializes, and hashes into
+    /// `form_id`, exactly like one that omits it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unify_cjk_radicals: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

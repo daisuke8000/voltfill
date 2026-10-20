@@ -16,6 +16,7 @@ lopdf = { version = "=0.45.0", default-features = false }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 httpdate = "1.0"
 log.workspace = true
+unicode-normalization.workspace = true
 opentelemetry = { version = "0.33", default-features = false, features = ["logs", "trace"] }
 opentelemetry_sdk = { version = "0.33", default-features = false, features = ["logs", "trace"] }
 opentelemetry-proto = { version = "0.33", default-features = false, features = ["gen-tonic-messages", "logs", "with-serde"] }

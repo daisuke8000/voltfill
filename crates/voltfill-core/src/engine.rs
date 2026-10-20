@@ -1030,7 +1030,11 @@ fn source_value(
             source.image_transform = Some(image.transform.clone());
         }
         evidence.push(source);
-        let normalized = validate::normalize(&raw, field.normalization);
+        let normalized = if field.unify_cjk_radicals {
+            validate::normalize(&validate::unify_cjk_radicals(&raw), field.normalization)
+        } else {
+            validate::normalize(&raw, field.normalization)
+        };
         if normalized != raw {
             origin = "normalized_source";
         }
@@ -1587,13 +1591,21 @@ mod tests {
         options: &ExtractOptions,
         steps: Vec<Result<(&'static str, bool), evaluate::EvaluationError>>,
     ) -> (Vec<FieldResult>, Vec<Evidence>, UsageSummary, Script) {
+        run_with_text(form, options, steps, "same text")
+    }
+    fn run_with_text(
+        form: &FormDefinition,
+        options: &ExtractOptions,
+        steps: Vec<Result<(&'static str, bool), evaluate::EvaluationError>>,
+        text: &'static str,
+    ) -> (Vec<FieldResult>, Vec<Evidence>, UsageSummary, Script) {
         let fragments: Vec<_> = (1..=2)
             .flat_map(|page| {
                 (1..=3).map(move |i| SourceFragment {
                     id: format!("p{page}r{i}"),
                     page,
                     item_index: i,
-                    raw_text: if i < 3 { "same text" } else { "other" }.into(),
+                    raw_text: if i < 3 { text } else { "other" }.into(),
                     bbox: Rect::new(0.0, i as f64 * 10.0, 50.0, i as f64 * 10.0 + 5.0).unwrap(),
                     quality: Quality::Usable,
                 })
@@ -1709,6 +1721,44 @@ mod tests {
         assert_eq!(fields[0].status, Status::Ambiguous);
         assert_eq!(fields[0].value, Some(json!("same text")));
         assert_eq!(evidence.len(), 1);
+    }
+    #[test]
+    fn radical_code_points_are_unified_in_the_value_but_not_in_evidence() {
+        let options = ExtractOptions::default();
+        let mut single = form(8);
+        single.fields[0].output_type = OutputType::String;
+        single.fields[0].resolver = Resolver::SelectedCandidate {
+            question_id: "pick".into(),
+        };
+        let source = "\u{2F08}\u{2F64} \u{FF21}";
+        let (fields, evidence, _, _) =
+            run_with_text(&single, &options, vec![Ok(("c_p1r2", false))], source);
+        assert_eq!(fields[0].value, Some(json!(source)));
+        assert_eq!(fields[0].value_origin, "source_text");
+        single.fields[0].unify_cjk_radicals = true;
+        let (fields, evidence_unified, _, _) =
+            run_with_text(&single, &options, vec![Ok(("c_p1r2", false))], source);
+        assert_eq!(fields[0].value, Some(json!("\u{4EBA}\u{7528} \u{FF21}")));
+        assert_eq!(fields[0].value_origin, "normalized_source");
+        assert_eq!(evidence_unified[0].raw_fragments, evidence[0].raw_fragments);
+        assert_eq!(evidence_unified[0].raw_fragments, [source]);
+        let mut array = form(8);
+        array.fields[0].unify_cjk_radicals = true;
+        array.fields[0].normalization = crate::schema::Normalization::CollapseWhitespace;
+        let (fields, _, _, _) = run_with_text(
+            &array,
+            &options,
+            vec![
+                Ok(("c_p1r1", false)),
+                Ok(("c_p1r2", false)),
+                Ok(("none", false)),
+            ],
+            " \u{2F08}  \u{2F64} ",
+        );
+        assert_eq!(
+            fields[0].value,
+            Some(json!(["\u{4EBA} \u{7528}", "\u{4EBA} \u{7528}"]))
+        );
     }
     #[test]
     fn multiple_partial_values_survive_caps_failures_and_ambiguous_answers() {
