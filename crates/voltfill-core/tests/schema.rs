@@ -39,6 +39,31 @@ fn duplicate_keys_unknown_fields_and_unbounded_input_rejected() {
     );
 }
 #[test]
+fn field_count_is_capped() {
+    let fields = |n: usize| {
+        let template = form()["fields"][0].clone();
+        let mut f = form();
+        f["fields"] = Value::Array(
+            (0..n)
+                .map(|i| {
+                    let mut field = template.clone();
+                    field["id"] = json!(format!("f{i}"));
+                    field
+                })
+                .collect(),
+        );
+        f
+    };
+    assert_eq!(
+        check(fields(schema::MAX_FIELDS)).unwrap().fields.len(),
+        schema::MAX_FIELDS
+    );
+    assert_eq!(
+        check(fields(schema::MAX_FIELDS + 1)).unwrap_err(),
+        SchemaError::Limit
+    );
+}
+#[test]
 fn graph_requires_existing_acyclic_unique_questions() {
     let mut f = form();
     f["fields"][0]["questions"][0]["depends_on"] = json!(["missing"]);

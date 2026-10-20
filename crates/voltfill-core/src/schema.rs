@@ -4,7 +4,9 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_SCHEMA_BYTES: usize = 1024 * 1024;
-pub const MAX_FIELDS: usize = 128;
+// Only rejects pathological schemas; the request count, deadline and cost budget bound the
+// work an extraction actually does.
+pub const MAX_FIELDS: usize = 512;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum SchemaError {
