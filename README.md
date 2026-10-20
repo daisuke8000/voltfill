@@ -462,10 +462,12 @@ Locked dependencies are checked against RustSec advisories on pushes, pull reque
 
 CI also scans committed history for potential secrets with redacted output. Dependabot proposes weekly Cargo and GitHub Actions updates; automatic merging is not configured.
 
+On pushes to `main`, CI publishes the English and Japanese architecture pages to GitHub Pages after the Rust checks, dependency audit and secret scan succeed. Pull requests, manual runs and scheduled runs do not publish the site.
+
 CI does not call Jev, download PDFium or persist build caches. Run `cargo clean` to remove local build artifacts after verification.
 
 ### Dependency updates
 
 VOLTFILL tracks official font-parser dependency releases and checks source text, coordinates and Evidence before adopting relevant fixes.
 
-[Architecture and C4](docs/architecture.en.html) · [MIT license](LICENSE)
+[Architecture and C4](https://daisuke8000.github.io/voltfill/) · [MIT license](LICENSE)
