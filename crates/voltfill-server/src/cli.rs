@@ -9,7 +9,7 @@ use std::{
 };
 use voltfill_core::jev::transport::ExecutionConfig;
 
-const HELP: &str = "voltfill serve --config voltfill.yaml (or voltfill.toml / voltfill.json)\nvoltfill serve --mock FIXTURE.json | --remote\nvoltfill-server remains supported.\n  [--listen 127.0.0.1:3000] [--config CONFIG.json]\n  [--allow-images] [--renderer pdfium|hayro] (no automatic fallback)\n  [--pdfium-lib ABSOLUTE_PATH or VOLTFILL_PDFIUM_LIB_PATH] (selects PDFium when renderer omitted)\n  [--pixels-per-point NUMBER] (default: 1.5)\n  [--log-level off|error|warn|info|debug] (default: off)\n  [--model ID] [--upload-timeout-ms 1..3600000] (default: 30000)\n  [--resource-config FILE] lowers PDF/render resource ceilings.\nPrecedence: CLI > selected launch file > environment > defaults.\nVOLTFILL_LISTEN, VOLTFILL_UPLOAD_TIMEOUT_MS, VOLTFILL_MODEL, VOLTFILL_RENDERER,\nVOLTFILL_PIXELS_PER_POINT and VOLTFILL_LOG_LEVEL provide startup defaults.\nVOLTFILL_EXECUTION_CONFIG and VOLTFILL_RESOURCE_CONFIG select JSON files when\nno corresponding file/section was selected. VOLTFILL_CONFIG selects a launch\nfile for voltfill serve; standalone voltfill-server accepts execution JSON.\n\nPOST /v1/extract: multipart fields pdf, schema, optional options JSON.\noptions.model overrides the startup model (default jev-1.14.0); image strategies require a pinned version >= 1.14.0.\noptions.evaluation_profile optionally enables confidence filtering; omitted by default.\nGET /health: health check. Remote mode requires VOLTFILL_JEV_ENDPOINT (trusted HTTPS)\nand VOLTFILL_JEV_API_KEY or VOLTFILL_JEV_API_KEY_FILE.\nVOLTFILL_SERVER_API_KEY or VOLTFILL_SERVER_API_KEY_FILE enables Bearer authentication and is required\nfor non-loopback binding. Logs are JSONL; responses contain originals.\n";
+const HELP: &str = "voltfill serve --config voltfill.yaml (or voltfill.toml / voltfill.json)\nvoltfill serve --mock FIXTURE.json | --remote\nvoltfill-server remains supported.\n  [--listen 127.0.0.1:3000] [--config CONFIG.json]\n  [--allow-images] [--renderer pdfium|hayro] (no automatic fallback)\n  [--pdfium-lib ABSOLUTE_PATH or VOLTFILL_PDFIUM_LIB_PATH] (selects PDFium when renderer omitted)\n  [--pixels-per-point NUMBER] (default: 1.5)\n  [--log-level off|error|warn|info|debug] (default: off)\n  [--model ID] [--upload-timeout-ms 1..3600000] (default: 30000)\n  [--reuse-document] keeps the last PDF's text and page images in memory for reuse by an identical next request (default: off)\n  [--reuse-document-ttl-ms 1..3600000] drops that copy after this idle time (default: 60000)\n  [--resource-config FILE] lowers PDF/render resource ceilings.\nPrecedence: CLI > selected launch file > environment > defaults.\nVOLTFILL_LISTEN, VOLTFILL_UPLOAD_TIMEOUT_MS, VOLTFILL_REUSE_DOCUMENT_TTL_MS, VOLTFILL_MODEL, VOLTFILL_RENDERER,\nVOLTFILL_PIXELS_PER_POINT and VOLTFILL_LOG_LEVEL provide startup defaults.\nVOLTFILL_EXECUTION_CONFIG and VOLTFILL_RESOURCE_CONFIG select JSON files when\nno corresponding file/section was selected. VOLTFILL_CONFIG selects a launch\nfile for voltfill serve; standalone voltfill-server accepts execution JSON.\n\nPOST /v1/extract: multipart fields pdf, schema, optional options JSON.\noptions.model overrides the startup model (default jev-1.14.0); image strategies require a pinned version >= 1.14.0.\noptions.evaluation_profile optionally enables confidence filtering; omitted by default.\nGET /health: health check. Remote mode requires VOLTFILL_JEV_ENDPOINT (trusted HTTPS)\nand VOLTFILL_JEV_API_KEY or VOLTFILL_JEV_API_KEY_FILE.\nVOLTFILL_SERVER_API_KEY or VOLTFILL_SERVER_API_KEY_FILE enables Bearer authentication and is required\nfor non-loopback binding. Logs are JSONL; responses contain originals.\n";
 
 fn read(path: &str, limit: usize) -> Result<Vec<u8>, &'static str> {
     let file = std::fs::File::open(path).map_err(|_| "input_read_failed")?;
@@ -97,6 +97,7 @@ fn run(
             "--allow-remote",
             "--exclusive-org",
             "--allow-preview-images",
+            "--reuse-document",
         ]
         .contains(&arg.as_str())
         {
@@ -113,6 +114,7 @@ fn run(
             "--log-level",
             "--model",
             "--upload-timeout-ms",
+            "--reuse-document-ttl-ms",
             "--resource-config",
         ]
         .contains(&arg.as_str())
@@ -134,6 +136,7 @@ fn run(
         &[
             ("--listen", "VOLTFILL_LISTEN"),
             ("--upload-timeout-ms", "VOLTFILL_UPLOAD_TIMEOUT_MS"),
+            ("--reuse-document-ttl-ms", "VOLTFILL_REUSE_DOCUMENT_TTL_MS"),
         ],
     )?;
     if execution.is_none() {
@@ -196,6 +199,10 @@ fn run(
     }
     if let Some(timeout) = values.get("--upload-timeout-ms") {
         config.upload_timeout_ms = timeout.parse().map_err(|_| "invalid_upload_timeout")?;
+    }
+    config.reuse_document = flags.contains("--reuse-document");
+    if let Some(ttl) = values.get("--reuse-document-ttl-ms") {
+        config.reuse_document_ttl_ms = ttl.parse().map_err(|_| "invalid_reuse_document_ttl")?;
     }
     if !address.ip().is_loopback() && !config.requires_authentication() {
         return Err("authentication_required_for_non_loopback");

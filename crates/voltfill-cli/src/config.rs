@@ -56,6 +56,9 @@ struct Serve {
     listen: Option<String>,
     model: Option<String>,
     upload_timeout_ms: Option<u64>,
+    #[serde(default)]
+    reuse_document: bool,
+    reuse_document_ttl_ms: Option<u64>,
     renderer: Option<String>,
     pdfium_lib: Option<String>,
     pixels_per_point: Option<f64>,
@@ -205,7 +208,15 @@ pub fn expand(arguments: impl IntoIterator<Item = String>) -> Result<Invocation,
             if a.starts_with('-') {
                 let key = canonical(a);
                 explicit.insert(key.to_owned());
-                if !["--remote", "--allow-images", "--dry-run", "--exclusive-org"].contains(&key) {
+                if ![
+                    "--remote",
+                    "--allow-images",
+                    "--reuse-document",
+                    "--dry-run",
+                    "--exclusive-org",
+                ]
+                .contains(&key)
+                {
                     let _ = scan.next();
                 }
             } else {
@@ -247,6 +258,7 @@ pub fn expand(arguments: impl IntoIterator<Item = String>) -> Result<Invocation,
                 c.remote && !explicit.contains("--mock"),
             );
             flag(&mut args, &explicit, "--allow-images", c.allow_images);
+            flag(&mut args, &explicit, "--reuse-document", c.reuse_document);
             push(&mut args, &explicit, "--listen", c.listen);
             push(&mut args, &explicit, "--model", c.model);
             push(
@@ -254,6 +266,12 @@ pub fn expand(arguments: impl IntoIterator<Item = String>) -> Result<Invocation,
                 &explicit,
                 "--upload-timeout-ms",
                 c.upload_timeout_ms.map(|v| v.to_string()),
+            );
+            push(
+                &mut args,
+                &explicit,
+                "--reuse-document-ttl-ms",
+                c.reuse_document_ttl_ms.map(|v| v.to_string()),
             );
             push(&mut args, &explicit, "--renderer", c.renderer);
             push(
@@ -339,4 +357,32 @@ pub fn expand(arguments: impl IntoIterator<Item = String>) -> Result<Invocation,
         resources,
         source_path: Some(absolute),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serve_reuse_keys_expand_to_the_server_flags() {
+        let path = std::env::temp_dir().join(format!("voltfill-reuse-{}.yaml", std::process::id()));
+        std::fs::write(
+            &path,
+            "serve:\n  mock: mock.json\n  reuse_document: true\n  reuse_document_ttl_ms: 1234\n",
+        )
+        .unwrap();
+        let invocation = expand([
+            "serve".into(),
+            "--config".into(),
+            path.to_str().unwrap().into(),
+        ]);
+        std::fs::remove_file(&path).unwrap();
+        let arguments = invocation.unwrap().arguments;
+        assert!(arguments.contains(&"--reuse-document".to_owned()));
+        assert!(
+            arguments
+                .windows(2)
+                .any(|w| w == ["--reuse-document-ttl-ms", "1234"])
+        );
+    }
 }

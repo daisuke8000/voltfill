@@ -47,7 +47,7 @@ pub enum PdfError {
     Encrypted,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DocumentSnapshot {
     pub document_id: String,
     pub fragments: Vec<SourceFragment>,
