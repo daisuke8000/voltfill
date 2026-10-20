@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
   schedule:
@@ -11,23 +12,28 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # Pull requests cancel superseded runs; other events get their own group so a newer
+  # schedule or manual run never drops a queued main push and its Pages deploy.
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: true
 
 env:
   CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_TERM_COLOR: always
 
 jobs:
   rust:
     if: github.event_name != 'schedule'
-    name: Rust (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: Rust (${{ matrix.features }})
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14]
+        features: [default, hayro, pdfium]
+    env:
+      FEATURES: ${{ matrix.features }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -41,30 +47,22 @@ jobs:
           rustc --version
           cargo --version
       - name: Formatting
+        if: matrix.features == 'default'
         run: cargo fmt --all -- --check
-      - name: Check
-        run: cargo check --workspace --all-targets --locked
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        shell: bash
+        run: cargo clippy --workspace --all-targets --features "${FEATURES/default/}" --locked -- -D warnings
       - name: Tests
-        run: cargo test --workspace --locked
-      - name: Check Hayro feature
-        run: cargo check --workspace --all-targets --features hayro --locked
-      - name: Clippy with Hayro feature
-        run: cargo clippy --workspace --all-targets --features hayro --locked -- -D warnings
-      - name: Hayro tests
-        run: cargo test --workspace --features hayro --locked
-      - name: Check combined renderers
-        run: cargo check --workspace --all-targets --features pdfium,hayro --locked
-      - name: Check PDFium feature
-        run: cargo check --workspace --all-targets --features pdfium --locked
-      - name: Clippy with PDFium feature
-        run: cargo clippy --workspace --all-targets --features pdfium --locked -- -D warnings
+        if: matrix.features != 'pdfium'
+        shell: bash
+        run: cargo test --workspace --features "${FEATURES/default/}" --locked
+      # PDFium tests need a native library that CI does not download.
       - name: Compile tests with PDFium feature
+        if: matrix.features == 'pdfium'
         run: cargo test --workspace --features pdfium --locked --no-run
-      - name: Clean build artifacts
-        if: always()
-        run: cargo clean
+      - name: Check combined renderers
+        if: matrix.features == 'pdfium'
+        run: cargo check --workspace --all-targets --features pdfium,hayro --locked
   audit:
     name: Dependency vulnerabilities
     runs-on: ubuntu-24.04
@@ -72,8 +70,20 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 1 }}
           persist-credentials: false
+      # New advisories against unchanged dependencies are caught by main pushes and the daily schedule.
+      - name: Detect dependency changes
+        id: deps
+        if: github.event_name == 'pull_request'
+        run: |
+          if git diff --quiet HEAD^1 HEAD -- Cargo.lock Cargo.toml 'crates/*/Cargo.toml' .cargo/audit.toml .github/workflows/ci.yml; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: Install pinned toolchain and auditor
+        if: steps.deps.outputs.changed != 'false'
         shell: bash
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-audit-target
@@ -83,13 +93,9 @@ jobs:
           rustup toolchain install "$toolchain" --profile minimal
           cargo install cargo-audit --version 0.22.2 --locked --root "$RUNNER_TEMP/cargo-audit"
       - name: Audit locked dependencies
+        if: steps.deps.outputs.changed != 'false'
         shell: bash
         run: '"$RUNNER_TEMP/cargo-audit/bin/cargo-audit" audit --file Cargo.lock --deny unsound'
-      - name: Clean auditor build artifacts
-        if: always()
-        env:
-          CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-audit-target
-        run: cargo clean
   secrets:
     name: Secret scanning
     runs-on: ubuntu-24.04
@@ -111,6 +117,9 @@ jobs:
     name: Deploy architecture to GitHub Pages
     needs: [rust, audit, secrets]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -121,22 +130,45 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      # Runs finish out of order, so every deploy publishes the current tip of main
+      # rather than the commit that triggered it; the last deploy is always the newest.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: refs/heads/main
           persist-credentials: false
+      - name: Compare with the published pages
+        id: changed
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          deploy=true
+          # The query string bypasses CDN copies older than the live site.
+          if url=$(gh api "repos/$REPOSITORY/pages" --jq .html_url) \
+            && curl -fsS "${url%/}/architecture.html?run=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" | cmp -s - docs/architecture.html \
+            && curl -fsS "${url%/}/architecture.en.html?run=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" | cmp -s - docs/architecture.en.html \
+            && curl -fsS "${url%/}/?run=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" | cmp -s - docs/architecture.en.html; then
+            deploy=false
+          fi
+          echo "deploy=$deploy" >> "$GITHUB_OUTPUT"
       - name: Prepare architecture pages
+        if: steps.changed.outputs.deploy == 'true'
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/voltfill-pages"
           cp docs/architecture.html docs/architecture.en.html "$RUNNER_TEMP/voltfill-pages/"
           cp docs/architecture.en.html "$RUNNER_TEMP/voltfill-pages/index.html"
       - name: Configure GitHub Pages
+        if: steps.changed.outputs.deploy == 'true'
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
       - name: Upload Pages artifact
+        if: steps.changed.outputs.deploy == 'true'
         uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4.0.0
         with:
           path: ${{ runner.temp }}/voltfill-pages
       - name: Deploy GitHub Pages
+        if: steps.changed.outputs.deploy == 'true'
         id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
         with:

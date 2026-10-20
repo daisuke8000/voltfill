@@ -478,15 +478,7 @@ cargo test --workspace --locked
 
 featureごとのテストは `cargo test --workspace --features hayro --locked` または `cargo test --workspace --features pdfium --locked` で実行します。PDFファイルを使うテストとネイティブ描画のテストは含みません。実行ファイルのパスを共有するため、feature構成ごとのテストは順番に実行してください。Rust APIドキュメントは `cargo doc -p voltfill-core --no-deps` で生成できます。
 
-[CI](.github/workflows/ci.yml)はLinuxとmacOSでfmt・check・Clippy・既定featureのテストを実行します。Hayroのcheck・Clippy・テスト、両レンダラーを含む構成のcheck、PDFiumのcheck・Clippy・テストのコンパイルも行います。PDFiumのfeature検査ではネイティブライブラリをロードしません。
-
-依存関係はpush・pull request・手動実行と毎日の定期実行でRustSecのアドバイザリーと照合します。既知の脆弱性や健全性の問題が見つかると検査は失敗します。アプリケーション固有の問題には、別途コードレビューとテストが必要です。
-
-CIではコミット履歴への秘密情報の混入も検査し、出力時は値を伏せます。DependabotはCargo依存とGitHub Actionsの更新を毎週提案します。自動マージは設定していません。
-
-`main`へのpushでは、Rustの検証・依存関係監査・秘密情報検査が成功した後、日英のアーキテクチャページをGitHub Pagesへ公開します。pull request・手動実行・定期実行では公開しません。
-
-CIはJevへの送信、PDFiumのダウンロード、ビルドキャッシュの永続化を行いません。ローカルでの検証後は `cargo clean` でビルド成果物を削除できます。
+ローカルでの検証後は `cargo clean` でビルド成果物を削除できます。
 
 ### 依存ライブラリの更新
 
