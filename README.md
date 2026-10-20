@@ -389,7 +389,7 @@ Pass an optional JSON file with `--config FILE`. Specify only overrides; omitted
 
 | Field | Meaning | Default |
 |---|---|---|
-| `max_concurrency` | Concurrent POST workers; 1–4 | `2` |
+| `max_concurrency` | Concurrent POST workers; at least 1. Up to this many pages are rendered and held at once, so memory grows with it | `2` |
 | `max_batch_questions` | Questions per batch; 1–255 | `32` |
 | `max_attempts` | Attempts per request, including the first; 1–3 | `3` |
 | `max_requests` | Total POST attempts, including retries | `128` |

@@ -181,7 +181,7 @@ fn extract_inner(
         .map_err(|_| EngineError::Schema)?;
     if jev::validate_model(&options.model).is_err()
         || (options.strategy != Strategy::TextFirst && !jev::supports_images(&options.model))
-        || !(1..=4).contains(&options.max_concurrency)
+        || options.max_concurrency == 0
         || !(1..=255).contains(&options.max_batch_questions)
         || options.max_requests == 0
         || options.total_deadline_ms == 0
@@ -673,7 +673,13 @@ fn evaluate_waves(
         }
     }
     let namespaced = evaluator.supports_batching();
-    for window in requested.chunks(options.max_concurrency) {
+    let mut rest = requested.as_slice();
+    while !rest.is_empty() {
+        // Every page in a window is rendered and held until the window ends, so pages
+        // the remaining request budget cannot reach are left for a later window.
+        let remaining = options.max_requests.saturating_sub(usage.attempts).max(1) as usize;
+        let (window, next) = rest.split_at(options.max_concurrency.min(remaining).min(rest.len()));
+        rest = next;
         let mut jobs = Vec::new();
         let mut images = BTreeMap::new();
         for &page in window {
@@ -1506,10 +1512,15 @@ mod tests {
     struct Script {
         steps: VecDeque<Result<(&'static str, bool), evaluate::EvaluationError>>,
         requests: Vec<Value>,
+        image_lookups: std::cell::Cell<u32>,
     }
     impl Evaluator for Script {
         fn supports_batching(&self) -> bool {
             true
+        }
+        fn fixture_image(&self, _page: u32) -> Option<&evaluate::EvaluationImage> {
+            self.image_lookups.set(self.image_lookups.get() + 1);
+            None
         }
         fn evaluate(
             &mut self,
@@ -1632,6 +1643,7 @@ mod tests {
         let mut evaluator = Script {
             steps: steps.into(),
             requests: Vec::new(),
+            image_lookups: std::cell::Cell::new(0),
         };
         let mut usage = UsageSummary::default();
         let outcomes = evaluate_waves(
@@ -1868,5 +1880,23 @@ mod tests {
             && f.value == Some(json!(["same text"]))
             && f.reason_codes.contains(&"request_budget_exceeded".into())));
         assert_eq!(evidence.len(), 2);
+    }
+    #[test]
+    fn pages_beyond_the_request_budget_are_not_rendered() {
+        let mut form = form(8);
+        let mut boxed = crate::schema::parse(&serde_json::to_vec(&json!({"schema_version":1,"fields":[{
+            "id":"boxed","label":"Boxed","output_type":"string","pages":[1,2],
+            "questions":[{"id":"box","type":"box","instructions":"Locate the value","input":{"modality":"image"}},{"id":"present","type":"noul","instructions":"Is it present?","input":{"modality":"image"}}],
+            "resolver":{"kind":"text_in_box","question_id":"box","presence_question_id":"present"}
+        }]})).unwrap()).unwrap();
+        form.fields.append(&mut boxed.fields);
+        let options = ExtractOptions {
+            max_requests: 1,
+            max_concurrency: 8,
+            ..Default::default()
+        };
+        let (_, _, usage, script) = run(&form, &options, vec![Ok(("c_p1r1", false))]);
+        assert_eq!(usage.attempts, 1);
+        assert_eq!(script.image_lookups.get(), 1);
     }
 }

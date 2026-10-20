@@ -312,7 +312,7 @@ impl<
 > RemoteEvaluator<T, C, O>
 {
     pub fn with_max_concurrency(mut self, max: usize) -> Result<Self, EvaluationError> {
-        if !(1..=4).contains(&max) {
+        if max == 0 {
             return Err(EvaluationError::Protocol);
         }
         self.config.max_concurrency = max;
@@ -642,7 +642,9 @@ fn parallel_many<
                 responses: remote.responses.clone(),
             };
             let next = &next;
-            handles.push(scope.spawn(move || {
+            // A large configured concurrency can exhaust OS threads; the workers already
+            // started drain the shared queue, and with none the caller sees a count mismatch.
+            let spawned = std::thread::Builder::new().spawn_scoped(scope, move || {
                 let mut rows = Vec::new();
                 loop {
                     let index = next.fetch_add(1, Ordering::Relaxed);
@@ -680,7 +682,11 @@ fn parallel_many<
                     ));
                 }
                 rows
-            }));
+            });
+            match spawned {
+                Ok(handle) => handles.push(handle),
+                Err(_) => break,
+            }
         }
         let mut rows = Vec::new();
         for handle in handles {
@@ -880,6 +886,16 @@ mod concurrent_tests {
         .unwrap()
         .with_max_concurrency(2)
         .unwrap()
+    }
+    #[test]
+    fn worker_count_accepts_any_positive_value() {
+        assert!(remote(false, 1).with_max_concurrency(0).is_err());
+        let mut remote = remote(false, 1).with_max_concurrency(usize::MAX).unwrap();
+        remote.budget.set_test_input_quota(128_000);
+        let request = request();
+        let results = remote.evaluate_many(&calls(&request, 2, 30_000));
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|result| result.result.is_ok()));
     }
     #[test]
     fn actual_workers_overlap_under_sufficient_test_allocation_and_keep_scopes_separate() {
