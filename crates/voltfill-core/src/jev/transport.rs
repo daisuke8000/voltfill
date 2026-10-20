@@ -109,7 +109,11 @@ pub enum Failure {
 }
 pub const INPUT_RESERVATION: u64 = 64_000;
 pub const ATTEMPT_RESERVATION_NANO_USD: u64 = INPUT_RESERVATION * 42;
-pub const MIN_COMPLETION_GAP_MS: u64 = 2_000;
+// Provider limits are per second, so a completed attempt's tokens are held for at least
+// that long before they stop counting against the next admission. One second leaves no
+// margin for how the provider aligns its window; raise it if 429 responses appear.
+pub const MIN_COMPLETION_GAP_MS: u64 = 1_000;
+pub const DEFAULT_COMPLETION_GAP_MS: u64 = 2_000;
 pub const SESSION_DEADLINE_MS: u64 = 600_000;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -165,7 +169,7 @@ impl Default for ExecutionConfig {
             jitter_ms: 250,
             max_cost_nano_usd: 200_000_000,
             input_token_price_nano_usd: 42,
-            completion_gap_ms: MIN_COMPLETION_GAP_MS,
+            completion_gap_ms: DEFAULT_COMPLETION_GAP_MS,
             max_json_bytes: Limits::default().max_bytes,
             max_total_body_bytes: 32 * 1024 * 1024,
             requests_per_second: 80,
@@ -336,7 +340,7 @@ impl AttemptBudget {
                 starts: Default::default(),
                 cooldown_until: value
                     .last_completion
-                    .map_or(0, |at| at.saturating_add(MIN_COMPLETION_GAP_MS)),
+                    .map_or(0, |at| at.saturating_add(DEFAULT_COMPLETION_GAP_MS)),
                 rng: hasher.finish(),
             })),
         }
