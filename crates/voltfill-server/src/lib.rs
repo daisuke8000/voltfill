@@ -85,6 +85,7 @@ pub struct AppState {
     config: Arc<ServerConfig>,
     transport: Option<HttpTransport>,
     jobs: Arc<Semaphore>,
+    discards: Arc<Semaphore>,
     admission: Arc<Mutex<Admission>>,
 }
 impl AppState {
@@ -114,6 +115,7 @@ impl AppState {
             config: Arc::new(config),
             transport,
             jobs: Arc::new(Semaphore::new(1)),
+            discards: Arc::new(Semaphore::new(MAX_DISCARDS)),
             admission: Arc::new(Mutex::new(Admission {
                 next: Instant::now(),
                 paused: false,
@@ -125,10 +127,11 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(|| async { Json(json!({"status":"ok"})) }))
         .route("/v1/extract", post(extract))
-        .layer(DefaultBodyLimit::max(
-            state.config.resources.pdf.max_bytes + schema::MAX_SCHEMA_BYTES + 128 * 1024,
-        ))
+        .layer(DefaultBodyLimit::max(upload_limit(&state)))
         .with_state(state)
+}
+fn upload_limit(state: &AppState) -> usize {
+    state.config.resources.pdf.max_bytes + schema::MAX_SCHEMA_BYTES + 128 * 1024
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -212,6 +215,52 @@ impl Clock for JobClock {
 
 type Upload = (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>);
 
+// Answering while the client is still uploading and then closing the connection shows
+// up on the client as a reset rather than the response, and a client cannot tell a
+// reset from a request that reached the provider. Reading the rest of the upload first
+// lets the rejection arrive. It is skipped where it cannot help or would only cost:
+// a client waiting for 100-continue has sent nothing and gets the answer cleanly, a
+// declared length over the limit ends in a reset anyway, and rejected uploads already
+// being read must not hold any number of connections.
+const MAX_DISCARDS: usize = 4;
+
+async fn reject_upload(request: Request, state: &AppState, response: Response) -> Response {
+    let limit = upload_limit(state);
+    let headers = request.headers();
+    let declared = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    if headers.contains_key(header::EXPECT) || declared.is_some_and(|n| n > limit as u64) {
+        return response;
+    }
+    let Ok(_slot) = state.discards.clone().try_acquire_owned() else {
+        return response;
+    };
+    discard_upload(
+        request.into_body(),
+        limit,
+        Duration::from_millis(state.config.upload_timeout_ms),
+    )
+    .await;
+    response
+}
+
+async fn discard_upload(body: axum::body::Body, limit: usize, deadline: Duration) {
+    use axum::body::HttpBody;
+    let mut body = std::pin::pin!(body);
+    let read = async {
+        let mut seen = 0usize;
+        while let Some(Ok(frame)) = std::future::poll_fn(|cx| body.as_mut().poll_frame(cx)).await {
+            seen = seen.saturating_add(frame.data_ref().map_or(0, |data| data.len()));
+            if seen > limit {
+                break;
+            }
+        }
+    };
+    let _ = tokio::time::timeout(deadline, read).await;
+}
+
 async fn bounded_upload(
     upload: impl std::future::Future<Output = Result<Upload, (StatusCode, &'static str)>>,
     deadline: Duration,
@@ -273,22 +322,27 @@ async fn extract(State(state): State<AppState>, request: Request) -> Response {
     if state.config.api_key.is_none() && request.headers().contains_key(header::ORIGIN) {
         return error(StatusCode::FORBIDDEN, "browser_authentication_required");
     }
-    let Ok(permit) = state.jobs.clone().try_acquire_owned() else {
-        return busy(2);
+    let rejection = match state.jobs.clone().try_acquire_owned() {
+        Err(_) => Err(busy(2)),
+        Ok(permit) => {
+            let admission = state.admission.lock().unwrap_or_else(|e| e.into_inner());
+            let remaining = admission.next.saturating_duration_since(Instant::now());
+            if admission.paused {
+                Err(error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "remote_paused_unknown_outcome",
+                ))
+            } else if !remaining.is_zero() {
+                Err(busy(remaining.as_secs().saturating_add(1)))
+            } else {
+                Ok(permit)
+            }
+        }
     };
-    {
-        let admission = state.admission.lock().unwrap_or_else(|e| e.into_inner());
-        if admission.paused {
-            return error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "remote_paused_unknown_outcome",
-            );
-        }
-        let remaining = admission.next.saturating_duration_since(Instant::now());
-        if !remaining.is_zero() {
-            return busy(remaining.as_secs().saturating_add(1));
-        }
-    }
+    let permit = match rejection {
+        Ok(permit) => permit,
+        Err(response) => return reject_upload(request, &state, response).await,
+    };
     let (pdf, definition, options) = match bounded_upload(
         read_upload(request, &state),
         Duration::from_millis(state.config.upload_timeout_ms),
@@ -517,7 +571,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admission_rejects_busy_cooldown_and_paused_before_reading_body() {
+    async fn admission_rejects_busy_cooldown_and_paused_before_parsing_upload() {
         let state = state();
         let permit = state.jobs.clone().try_acquire_owned().unwrap();
         let response = request(state.clone()).await;
@@ -544,6 +598,128 @@ mod tests {
         )
         .await;
         assert_eq!(state.jobs.available_permits(), 1);
+    }
+
+    async fn write_all(stream: &tokio::net::TcpStream, mut bytes: &[u8]) -> std::io::Result<()> {
+        while !bytes.is_empty() {
+            stream.writable().await?;
+            match stream.try_write(bytes) {
+                Ok(n) => bytes = &bytes[n..],
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    async fn read_head(stream: &tokio::net::TcpStream) -> String {
+        let mut head = Vec::new();
+        let mut buf = [0u8; 1024];
+        while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+            stream.readable().await.unwrap();
+            match stream.try_read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => head.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => panic!("{e}"),
+            }
+        }
+        String::from_utf8_lossy(&head).into_owned()
+    }
+
+    async fn busy_server(state: &AppState) -> tokio::net::TcpStream {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, router(state.clone())).into_future());
+        tokio::net::TcpStream::connect(address).await.unwrap()
+    }
+
+    fn upload_head(length: usize) -> String {
+        format!(
+            "POST /v1/extract HTTP/1.1\r\nhost: test\r\ncontent-type: multipart/form-data; boundary=b\r\ncontent-length: {length}\r\n\r\n"
+        )
+    }
+
+    fn busy_state(upload_timeout_ms: u64) -> AppState {
+        let mut config =
+            ServerConfig::fixture(include_bytes!("../../../examples/text-mock.json").to_vec())
+                .unwrap();
+        config.upload_timeout_ms = upload_timeout_ms;
+        AppState::new(config).unwrap()
+    }
+
+    async fn response_head(stream: &tokio::net::TcpStream) -> String {
+        tokio::time::timeout(Duration::from_secs(5), read_head(stream))
+            .await
+            .expect("no response")
+    }
+
+    #[tokio::test]
+    async fn busy_rejection_arrives_after_an_upload_near_the_limit() {
+        let state = busy_state(30_000);
+        let _permit = state.jobs.clone().try_acquire_owned().unwrap();
+        let body = vec![b'x'; upload_limit(&state) - 1024];
+        let stream = busy_server(&state).await;
+        write_all(&stream, upload_head(body.len()).as_bytes())
+            .await
+            .unwrap();
+        write_all(&stream, &body).await.unwrap();
+        let response = response_head(&stream).await;
+        assert!(response.starts_with("HTTP/1.1 429"), "{response}");
+        assert!(
+            response.to_ascii_lowercase().contains("retry-after: 2"),
+            "{response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn busy_rejection_of_a_stalled_upload_waits_for_the_upload_deadline() {
+        let state = busy_state(300);
+        let _permit = state.jobs.clone().try_acquire_owned().unwrap();
+        let stream = busy_server(&state).await;
+        write_all(&stream, upload_head(1024).as_bytes())
+            .await
+            .unwrap();
+        write_all(&stream, b"partial").await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), stream.readable())
+                .await
+                .is_err(),
+            "answered before the upload deadline"
+        );
+        let response = response_head(&stream).await;
+        assert!(response.starts_with("HTTP/1.1 429"), "{response}");
+    }
+
+    #[tokio::test]
+    async fn busy_rejection_skips_the_upload_it_cannot_help() {
+        let state = busy_state(30_000);
+        let _permit = state.jobs.clone().try_acquire_owned().unwrap();
+
+        let stream = busy_server(&state).await;
+        let head = upload_head(1024).replace("\r\n\r\n", "\r\nexpect: 100-continue\r\n\r\n");
+        write_all(&stream, head.as_bytes()).await.unwrap();
+        let response = response_head(&stream).await;
+        assert!(response.starts_with("HTTP/1.1 429"), "{response}");
+
+        let stream = busy_server(&state).await;
+        write_all(&stream, upload_head(upload_limit(&state) + 1).as_bytes())
+            .await
+            .unwrap();
+        let response = response_head(&stream).await;
+        assert!(response.starts_with("HTTP/1.1 429"), "{response}");
+
+        let _slots = state
+            .discards
+            .clone()
+            .try_acquire_many_owned(MAX_DISCARDS as u32)
+            .unwrap();
+        let stream = busy_server(&state).await;
+        write_all(&stream, upload_head(1024).as_bytes())
+            .await
+            .unwrap();
+        let response = response_head(&stream).await;
+        assert!(response.starts_with("HTTP/1.1 429"), "{response}");
     }
 
     #[tokio::test]

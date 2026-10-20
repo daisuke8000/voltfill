@@ -381,7 +381,7 @@ resources:
   max_render_output_bytes: 67108864
 ```
 
-All limits must be positive except `max_recovery_pages`, which may be zero. `serve.upload_timeout_ms` or `--upload-timeout-ms` controls upload time separately from extraction deadlines. `serve.model` or `--model` sets the default for requests that omit a model. The server admits one extraction job at a time so execution budgets and cooldown are not multiplied across jobs; `max_concurrency` controls Jev workers within that job. Parser-internal allocations remain outside these limits.
+All limits must be positive except `max_recovery_pages`, which may be zero. `serve.upload_timeout_ms` or `--upload-timeout-ms` controls upload time separately from extraction deadlines. `serve.model` or `--model` sets the default for requests that omit a model. The server admits one extraction job at a time so execution budgets and cooldown are not multiplied across jobs; `max_concurrency` controls Jev workers within that job. While a job runs, during the cooldown after it, or while remote work is paused, the server answers `429 server_busy` with `Retry-After` (or `503 remote_paused_unknown_outcome`) without starting an extraction; it first reads and discards the rest of the upload, within the upload size limit and upload deadline, so the client receives that response instead of a closed connection. A client sending `Expect: 100-continue` gets the response before uploading. An upload declared larger than the limit, or arriving while several rejected uploads are already being read, is answered without reading it, and the connection may close before the upload finishes. Parser-internal allocations remain outside these limits.
 
 ## Request control
 
@@ -399,6 +399,7 @@ Pass an optional JSON file with `--config FILE`. Specify only overrides; omitted
 | `context.max_request_tokens` | Estimated state plus all questions per request | `64000` |
 | `context.max_question_tokens` | Estimated state plus any one question | `32000` |
 | `context.image_tokens_per_image` | Planning allowance per occurrence of an image reference | `16000` |
+| `context.text_tokens_per_100_bytes` | Text tokens counted per 100 serialized UTF-8 bytes, 25–100 | `100` |
 | `total_deadline_ms` | Overall deadline, including waits and retries | `30000` |
 | `attempt_timeout_ms` | Timeout for one HTTP attempt | `10000` |
 | `initial_backoff_ms` | Initial retry delay | `250` |
@@ -419,7 +420,7 @@ Times use milliseconds (`1000` = one second). Context defaults follow the standa
 
 Before sending, VOLTFILL splits compatible questions by question count, serialized size and estimated input tokens, preserving page scope and dependencies. A single question with its page state that cannot fit is returned as `unsupported` with `input_token_limit_exceeded`; source text, candidates and images are never silently truncated.
 
-Estimation uses one token per serialized UTF-8 byte plus 256 framing tokens, and the configured image allowance for each image occurrence. This is a conservative text estimate, not a provider tokenizer or a guaranteed upper bound. The default image allowance is an application estimate, not a published image-token formula. Actual usage can exceed it. Each attempt reserves its own estimate; if received input usage exceeds that reservation, further admission stops while the original response remains available. Unknown usage retains the cost reservation. `request_planned` logs contain counts and estimates, never content.
+Estimation uses `context.text_tokens_per_100_bytes` tokens per 100 serialized UTF-8 bytes (one token per byte by default) plus 256 framing tokens, and the configured image allowance for each image occurrence. This is a conservative text estimate, not a provider tokenizer or a guaranteed upper bound. Lower `context.text_tokens_per_100_bytes` only to a value above the tokens per 100 bytes measured from the model's reported usage for your own inputs; the ratio varies with script and content. A value below it underestimates, which also loosens the token-rate and cost reservations. The default image allowance is an application estimate, not a published image-token formula. Actual usage can exceed it. Each attempt reserves its own estimate; if received input usage exceeds that reservation, further admission stops while the original response remains available. Unknown usage retains the cost reservation. `request_planned` logs contain counts and estimates, never content.
 
 Retries use the same limits. VOLTFILL does not manage traffic from other processes. The `organization` fields validate configured rates; they do not coordinate external clients.
 
