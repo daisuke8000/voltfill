@@ -342,14 +342,16 @@ fn render_pdfium(
         .bounding_box()
         .map_err(|_| RenderError::UnsupportedGeometry)?;
     let crop = geometry.crop_box;
-    // The epsilon accommodates native f32 page metrics; it is not a semantic
+    // The tolerance accommodates native f32 page metrics; it is not a semantic
     // padding allowance and does not replace pixel-marker fixture comparisons.
-    if !near(native_page.width() as f64, bounds.width())
-        || !near(native_page.height() as f64, bounds.height())
-        || !near(native_box.left, crop.left)
-        || !near(native_box.bottom, crop.top)
-        || !near(native_box.right, crop.right)
-        || !near(native_box.top, crop.bottom)
+    let points = native_tolerance(page_extent(geometry));
+    let at = |a, b| near_within(a, b, points);
+    if !at(native_page.width() as f64, bounds.width())
+        || !at(native_page.height() as f64, bounds.height())
+        || !at(native_box.left, crop.left)
+        || !at(native_box.bottom, crop.top)
+        || !at(native_box.right, crop.right)
+        || !at(native_box.top, crop.bottom)
     {
         return Err(RenderError::UnsupportedGeometry);
     }
@@ -421,7 +423,32 @@ fn dimension(points: f64, scale: f64) -> Result<u32, RenderError> {
 }
 
 fn near(a: f64, b: f64) -> bool {
-    a.is_finite() && b.is_finite() && (a - b).abs() <= 1e-4
+    near_within(a, b, 1e-4)
+}
+
+fn near_within(a: f64, b: f64, tolerance: f64) -> bool {
+    a.is_finite() && b.is_finite() && (a - b).abs() <= tolerance
+}
+
+// PDFium keeps page metrics and its device matrix in f32, so its rounding error
+// grows with the magnitude of the page coordinates it maps, including a CropBox
+// far from the origin; a fixed bound rejects ordinary pages at some scales. The
+// factor of 16 rounding steps covers the chain of f32 operations. The ceiling keeps
+// a PDF from widening the check through its own coordinates: a page that would need
+// more, such as a small CropBox far from the origin rendered at a high scale, is
+// rejected rather than checked loosely. A rotated or reflected map still fails the
+// corner checks; a shift up to the ceiling can pass.
+const NATIVE_TOLERANCE_CEILING: f64 = 0.1;
+
+fn native_tolerance(extent: f64) -> f64 {
+    (f64::from(f32::EPSILON) * 16.0 * extent).clamp(1e-4, NATIVE_TOLERANCE_CEILING)
+}
+
+fn page_extent(geometry: &PageGeometry) -> f64 {
+    let crop = geometry.crop_box;
+    [crop.left, crop.top, crop.right, crop.bottom]
+        .iter()
+        .fold(crop.width().max(crop.height()), |m, v| m.max(v.abs()))
 }
 
 fn image_transform(
@@ -455,20 +482,26 @@ fn image_transform(
     let actual = mapping
         .map_rect(bounds)
         .map_err(|_| RenderError::UnsupportedGeometry)?;
+    let pixels_per_point =
+        (f64::from(width) / bounds.width()).max(f64::from(height) / bounds.height());
+    let pixels = native_tolerance(
+        f64::from(width.max(height)).max(page_extent(geometry) * pixels_per_point),
+    );
+    let at = |a, b| near_within(a, b, pixels);
     if mapping.a <= 0.0
         || mapping.d <= 0.0
         || !near(mapping.b, 0.0)
         || !near(mapping.c, 0.0)
-        || !near(mapping.e, 0.0)
-        || !near(mapping.f, 0.0)
-        || !near(right.x, f64::from(width))
-        || !near(right.y, 0.0)
-        || !near(bottom.x, 0.0)
-        || !near(bottom.y, f64::from(height))
-        || !near(actual.left, raster.left)
-        || !near(actual.top, raster.top)
-        || !near(actual.right, raster.right)
-        || !near(actual.bottom, raster.bottom)
+        || !at(mapping.e, 0.0)
+        || !at(mapping.f, 0.0)
+        || !at(right.x, f64::from(width))
+        || !at(right.y, 0.0)
+        || !at(bottom.x, 0.0)
+        || !at(bottom.y, f64::from(height))
+        || !at(actual.left, raster.left)
+        || !at(actual.top, raster.top)
+        || !at(actual.right, raster.right)
+        || !at(actual.bottom, raster.bottom)
     {
         return Err(RenderError::UnsupportedGeometry);
     }
@@ -557,6 +590,111 @@ mod tests {
             );
         }
     }
+    // Mirrors how the PDFium binding derives its map: device corners are mapped to
+    // page space in f32 and the result is inverted in f64.
+    fn f32_native_map(points: (f64, f64), pixels: (u32, u32)) -> impl Fn(Point) -> Point {
+        let (w, h) = (pixels.0 as f32, pixels.1 as f32);
+        let top = points.1 as f32;
+        let right = f64::from(w * (points.0 as f32 / w));
+        let bottom = f64::from(top - h * (points.1 as f32 / h));
+        let (a, d) = (
+            right / f64::from(w),
+            (bottom - f64::from(top)) / f64::from(h),
+        );
+        move |p| Point {
+            x: p.x / a,
+            y: (p.y - f64::from(top)) / d,
+        }
+    }
+
+    #[test]
+    fn native_f32_error_is_accepted_at_common_sizes_and_scales() {
+        let mut worst: f64 = 0.0;
+        for (w, h) in [
+            (595.276, 841.89),
+            (612., 792.),
+            (841.89, 595.276),
+            (419.528, 595.276),
+        ] {
+            let bounds = Rect::new(0., 0., w, h).unwrap();
+            let geometry = PageGeometry::new(bounds, bounds, Rotation::Deg0, 1.).unwrap();
+            for scale in [1.5, 1.6, 1.7, 1.75, 1.8, 1.84, 1.85, 1.86] {
+                let (width, height) = ((w * scale).round() as u32, (h * scale).round() as u32);
+                if width.max(height) > 1568 {
+                    continue;
+                }
+                let map = f32_native_map((w, h), (width, height));
+                let corner = map(Point { x: w, y: 0. });
+                worst = worst
+                    .max((corner.x - f64::from(width)).abs())
+                    .max((corner.y - f64::from(height)).abs());
+                let transform = image_transform(&geometry, map, width, height).unwrap();
+                assert_eq!(transform.display_to_raster.b, 0.);
+                assert_eq!(transform.display_to_raster.e, 0.);
+            }
+        }
+        assert!(
+            worst > 1e-4,
+            "the emulation must exceed a fixed 1e-4 bound: {worst}"
+        );
+    }
+
+    #[test]
+    fn offsets_beyond_f32_error_are_rejected() {
+        let bounds = Rect::new(0., 0., 595.276, 841.89).unwrap();
+        let geometry = PageGeometry::new(bounds, bounds, Rotation::Deg0, 1.).unwrap();
+        let (width, height) = (1012, 1431);
+        let shifted = |offset: f64, shear: f64| {
+            move |p: Point| Point {
+                x: p.x * f64::from(width) / 595.276 + offset + shear * (841.89 - p.y),
+                y: (841.89 - p.y) * f64::from(height) / 841.89,
+            }
+        };
+        assert!(image_transform(&geometry, shifted(5e-4, 0.), width, height).is_ok());
+        for (offset, shear) in [(0.01, 0.), (0., 1e-5)] {
+            assert_eq!(
+                image_transform(&geometry, shifted(offset, shear), width, height).unwrap_err(),
+                RenderError::UnsupportedGeometry
+            );
+        }
+    }
+
+    #[test]
+    fn distant_crop_origin_widens_the_pixel_bound() {
+        let media = Rect::new(0., 0., 5100., 5100.).unwrap();
+        let crop = Rect::new(5000., 5000., 5100., 5100.).unwrap();
+        let geometry = PageGeometry::new(media, crop, Rotation::Deg0, 1.).unwrap();
+        let shifted = |offset: f64| {
+            move |p: Point| Point {
+                x: (p.x - 5000.) * 1.7 + offset,
+                y: (5100. - p.y) * 1.7,
+            }
+        };
+        assert!(image_transform(&geometry, shifted(4e-4), 170, 170).is_ok());
+        assert_eq!(
+            image_transform(&geometry, shifted(0.05), 170, 170).unwrap_err(),
+            RenderError::UnsupportedGeometry
+        );
+    }
+
+    #[test]
+    fn an_extreme_crop_origin_cannot_widen_the_bound_past_its_ceiling() {
+        let media = Rect::new(0., 0., 1e9, 1e9).unwrap();
+        let crop = Rect::new(1e9 - 100., 1e9 - 100., 1e9, 1e9).unwrap();
+        let geometry = PageGeometry::new(media, crop, Rotation::Deg0, 1.).unwrap();
+        let shifted = |offset: f64| {
+            move |p: Point| Point {
+                x: (p.x - (1e9 - 100.)) * 1.7 + offset,
+                y: (1e9 - p.y) * 1.7,
+            }
+        };
+        assert!(image_transform(&geometry, shifted(0.09), 170, 170).is_ok());
+        assert_eq!(
+            image_transform(&geometry, shifted(0.11), 170, 170).unwrap_err(),
+            RenderError::UnsupportedGeometry
+        );
+    }
+
     #[test]
     fn reflected_and_swapped_native_maps_cannot_become_valid_ledgers() {
         let bounds = Rect::new(0., 0., 100., 100.).unwrap();
