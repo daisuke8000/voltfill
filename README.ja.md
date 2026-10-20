@@ -426,7 +426,7 @@ resources:
 | `jitter_ms` | 再送タイミングを分散するために加えるランダムな待ち時間の上限 | `250` |
 | `max_cost_nano_usd` | 推定費用の上限。単位は10億分の1米ドル | `200000000`（$0.20） |
 | `input_token_price_nano_usd` | 入力1トークンの推定単価。1〜1000000000 nano-USD | `42` |
-| `completion_gap_ms` | トークン予約・待機時間の下限。2000〜60000 ms。より大きい `Retry-After` は保持 | `2000` |
+| `completion_gap_ms` | トークン予約・待機時間の下限。1000〜60000 ms。より大きい `Retry-After` は保持 | `2000` |
 | `max_json_bytes` | リクエスト・レスポンスJSONのバイト上限。1〜1048576 | `1048576` |
 | `max_total_body_bytes` | 1つの計画済みリクエストの全試行で送る本文バイト合計。1〜33554432 | `33554432` |
 | `organization.requests_per_second` | `requests_per_second` に設定できる値の上限 | `80` |

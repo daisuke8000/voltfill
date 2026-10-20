@@ -408,7 +408,7 @@ Pass an optional JSON file with `--config FILE`. Specify only overrides; omitted
 | `jitter_ms` | Maximum random addition to retry delay | `250` |
 | `max_cost_nano_usd` | Estimated cost budget in billionths of a USD | `200000000` ($0.20) |
 | `input_token_price_nano_usd` | Estimated input-token unit price, 1–1000000000 nano-USD | `42` |
-| `completion_gap_ms` | Token reservation/cooldown floor, 2000–60000 ms; larger `Retry-After` is retained | `2000` |
+| `completion_gap_ms` | Token reservation/cooldown floor, 1000–60000 ms; larger `Retry-After` is retained | `2000` |
 | `max_json_bytes` | Request/response JSON byte limit, 1–1048576 | `1048576` |
 | `max_total_body_bytes` | Total outbound body bytes across attempts for one planned request, 1–33554432 | `33554432` |
 | `organization.requests_per_second` | Upper bound for the configured request rate | `80` |

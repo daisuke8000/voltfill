@@ -157,6 +157,10 @@ fn invalid_allocations_are_rejected_before_any_attempt_is_reserved() {
             attempt_timeout_ms: base.total_deadline_ms + 1,
             ..base.clone()
         },
+        ExecutionConfig {
+            completion_gap_ms: voltfill_core::jev::transport::MIN_COMPLETION_GAP_MS - 1,
+            ..base.clone()
+        },
     ];
     for config in invalid {
         let budget = AttemptBudget::default();
@@ -164,6 +168,15 @@ fn invalid_allocations_are_rejected_before_any_attempt_is_reserved() {
         assert_eq!(budget.snapshot().posts, 0);
         assert_eq!(budget.snapshot().reserved, 0);
     }
+    assert_eq!(
+        base.completion_gap_ms,
+        voltfill_core::jev::transport::DEFAULT_COMPLETION_GAP_MS
+    );
+    let shortest = ExecutionConfig {
+        completion_gap_ms: voltfill_core::jev::transport::MIN_COMPLETION_GAP_MS,
+        ..base
+    };
+    assert!(AttemptBudget::default().configure(&shortest).is_ok());
     // Typos must not silently fall back to an unrelated default.
     assert!(serde_json::from_str::<ExecutionConfig>(r#"{"max_concurency":4}"#).is_err());
 }
