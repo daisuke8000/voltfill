@@ -1,0 +1,18 @@
+[package]
+name = "pdf-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+pdf-probe = { path = "../pdf-probe" }
+thiserror.workspace = true
+firecrawl-pdfium = { version = "=0.1.0", optional = true }
+png = { version = "0.18", optional = true }
+hayro = { version = "=0.8.0", default-features = false, features = ["embed-cmaps", "simd"], optional = true }
+
+[features]
+default = []
+pdfium = ["dep:firecrawl-pdfium", "dep:png"]
+hayro = ["dep:hayro", "dep:png"]

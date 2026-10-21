@@ -231,7 +231,7 @@ impl FormDefinition {
             return Err(SchemaError::Limit);
         }
         if let Some(context) = &self.shared_context
-            && (!context.entry(false) || !jev::fits_in_state("shared_context", context))
+            && (!jev::entry(context, false) || !jev::fits_in_state("shared_context", context))
         {
             return Err(SchemaError::Contract);
         }
@@ -252,7 +252,7 @@ impl FormDefinition {
                 if !identifier(&q.id) || questions.insert(&q.id, q).is_some() {
                     return Err(SchemaError::Identifier);
                 }
-                if !q.instructions.entry(false) {
+                if !jev::entry(&q.instructions, false) {
                     return Err(SchemaError::Contract);
                 }
                 if let Some(source) = &q.candidate_source {

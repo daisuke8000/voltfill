@@ -2283,3 +2283,41 @@ mod tests {
         assert_eq!(rescaled.timings.render_calls, 1);
     }
 }
+
+#[cfg(test)]
+mod cache_key_compatibility {
+    use super::*;
+    #[test]
+    fn cache_key_matches_before_foundation_split() {
+        let mut options = ExtractOptions::default();
+        let mut keys = vec![DocumentCache::key(b"synthetic cache contract", &options)];
+        options.max_concurrency = 3;
+        keys.push(DocumentCache::key(b"synthetic cache contract", &options));
+        options.pdf_limits.max_pages = 7;
+        keys.push(DocumentCache::key(b"synthetic cache contract", &options));
+        #[cfg(any(feature = "pdfium", feature = "hayro"))]
+        {
+            options.render_config = Some(crate::render::RenderConfig::hayro());
+            keys.push(DocumentCache::key(b"synthetic cache contract", &options));
+            options.render_config = Some(crate::render::RenderConfig::new("/synthetic/libpdfium"));
+            keys.push(DocumentCache::key(b"synthetic cache contract", &options));
+        }
+        let name = if cfg!(any(feature = "pdfium", feature = "hayro")) {
+            "cache-key-render.json"
+        } else {
+            "cache-key-default.json"
+        };
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name);
+        if std::env::var_os("VOLTFILL_CAPTURE_BASELINE").is_some() {
+            assert!(!path.exists());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, serde_json::to_vec_pretty(&keys).unwrap()).unwrap();
+        } else {
+            let expected: Vec<String> =
+                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            assert_eq!(keys, expected);
+        }
+    }
+}

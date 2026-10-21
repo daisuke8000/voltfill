@@ -169,7 +169,7 @@ fn retry_after(value: &str, now: SystemTime) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jev::{Limits, multipart::Body, parse_request, transport::Secret};
+    use crate::{Limits, multipart::Body, parse_request, transport::Secret};
     const ENDPOINT: &str = "https://synthetic.example.invalid/custom/extract";
     #[test]
     fn builds_bearer_and_json_without_sending() {

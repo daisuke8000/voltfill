@@ -887,11 +887,23 @@ mod concurrent_tests {
         .with_max_concurrency(2)
         .unwrap()
     }
+    fn set_input_quota<T, C, O>(remote: &RemoteEvaluator<T, C, O>, tokens: u64) {
+        let old = remote.budget.snapshot();
+        let mut config = remote.config.clone();
+        config.input_tokens_per_second = tokens;
+        config.organization.input_tokens_per_second =
+            config.organization.input_tokens_per_second.max(tokens);
+        config.input_tokens_per_attempt = config.input_tokens_per_attempt.min(tokens);
+        remote.budget.configure(&config).unwrap();
+        remote
+            .budget
+            .set_limits(old.max_posts, old.max_cost_nano_usd);
+    }
     #[test]
     fn worker_count_accepts_any_positive_value() {
         assert!(remote(false, 1).with_max_concurrency(0).is_err());
         let mut remote = remote(false, 1).with_max_concurrency(usize::MAX).unwrap();
-        remote.budget.set_test_input_quota(128_000);
+        set_input_quota(&remote, 128_000);
         let request = request();
         let results = remote.evaluate_many(&calls(&request, 2, 30_000));
         assert_eq!(results.len(), 2);
@@ -900,7 +912,7 @@ mod concurrent_tests {
     #[test]
     fn actual_workers_overlap_under_sufficient_test_allocation_and_keep_scopes_separate() {
         let mut remote = remote(true, 1);
-        remote.budget.set_test_input_quota(128_000);
+        set_input_quota(&remote, 128_000);
         let request = request();
         let results = remote.evaluate_many(&calls(&request, 2, 30_000));
         assert_eq!(results.len(), 2);
@@ -931,7 +943,8 @@ mod concurrent_tests {
     fn token_quota_serializes_two_actual_request_reservations() {
         let mut remote = remote(false, 1);
         let request = request();
-        remote.budget.set_test_input_quota(
+        set_input_quota(
+            &remote,
             jev::planning::estimate(&request, &Default::default()).request_tokens,
         );
         let start = Instant::now();
@@ -944,7 +957,7 @@ mod concurrent_tests {
     #[test]
     fn concurrent_usage_overflow_is_flagged_as_lower_bound_and_stops_future_admission() {
         let mut remote = remote(true, u64::MAX);
-        remote.budget.set_test_input_quota(128_000);
+        set_input_quota(&remote, 128_000);
         let request = request();
         let results = remote.evaluate_many(&calls(&request, 2, 30_000));
         assert!(results.iter().all(|result| result.result.is_ok()));
@@ -1048,7 +1061,7 @@ mod concurrent_tests {
         .unwrap()
         .with_max_concurrency(2)
         .unwrap();
-        remote.budget.set_test_input_quota(128_000);
+        set_input_quota(&remote, 128_000);
         let request = request();
         let results = remote.evaluate_many(&calls(&request, 3, 30_000));
         assert_eq!(results.len(), 2);

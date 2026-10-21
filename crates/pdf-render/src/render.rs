@@ -1,11 +1,11 @@
 //! Optional page rendering with explicit backend selection. Resource ceilings
 //! cover the requested raster and PNG output, not parser-internal allocations.
-use crate::geometry::{
-    AffineTransform, ImageTransform, Padding, PageGeometry, Point, Rect, Rotation,
-};
-use crate::pdf::metadata;
 #[cfg(feature = "pdfium")]
 use firecrawl_pdfium::{PagePoint, Pdfium, PixelFormat};
+use pdf_probe::geometry::{
+    AffineTransform, ImageTransform, Padding, PageGeometry, Point, Rect, Rotation,
+};
+use pdf_probe::metadata;
 use std::io::Write;
 use std::path::PathBuf;
 use thiserror::Error;
