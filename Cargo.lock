@@ -1254,6 +1254,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "jev-client"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "httpdate",
+ "log",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "jiff"
 version = "0.2.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1564,6 +1578,28 @@ dependencies = [
  "ttf-parser",
  "unicode-bidi",
  "unicode-normalization",
+]
+
+[[package]]
+name = "pdf-probe"
+version = "0.1.0"
+dependencies = [
+ "lopdf",
+ "pdf-inspector",
+ "serde",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "pdf-render"
+version = "0.1.0"
+dependencies = [
+ "firecrawl-pdfium",
+ "hayro",
+ "pdf-probe",
+ "png",
+ "thiserror",
 ]
 
 [[package]]
@@ -2645,18 +2681,14 @@ dependencies = [
 name = "voltfill-core"
 version = "0.1.0"
 dependencies = [
- "bytes",
- "firecrawl-pdfium",
- "hayro",
- "httpdate",
+ "jev-client",
  "log",
  "lopdf",
  "opentelemetry",
  "opentelemetry-proto",
  "opentelemetry_sdk",
- "pdf-inspector",
- "png",
- "reqwest",
+ "pdf-probe",
+ "pdf-render",
  "serde",
  "serde_json",
  "sha2",

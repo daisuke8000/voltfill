@@ -70,6 +70,53 @@ curl --fail-with-body --silent --show-error http://127.0.0.1:3000/v1/extract \
   --form 'schema=@examples/text-form.json;type=application/json'
 ```
 
+## Foundation crates
+
+The foundation crates work without an extraction schema or Evidence. Their supported public APIs are:
+
+| Crate | Public API |
+|---|---|
+| `pdf-probe` | `inspect`, `DocumentSnapshot`, `PdfLimits`, `PdfError`, `InspectionTimings`, source `SourceFragment` / `PageDiagnostic` / `Quality`, `geometry` and `metadata` |
+| `pdf-render` | With `hayro` or `pdfium`: `render`, `RenderConfig`, `RenderBackend`, `RenderedImage`, `RenderError` |
+| `jev-client` | `build_request`, `parse_request`, `parse_response`, `RequestDraft`, `Request`, `Content`, `Question`, `Asset`, `Limits`, `Answer`, `Response`, `Error`, `PngImage`, `Endpoint`, `HttpTransport`, `Secret`, `Policy`, `ExecutionConfig`, `RecordingTransport`, `ResponseRecord`, `ResponseBody`; `transport` traits, shared budgets and `execute` / `execute_observed`; `planning` and `multipart` |
+
+`voltfill-core` depends on all three; `pdf-render` also depends on `pdf-probe`. No foundation crate depends on core, and `jev-client` has no PDF dependency. Core owns Evidence, extraction fields/results, aggregate `Timings` / `UsageSummary` and field/page-associated `JevResponse`. PDF inspection returns its own `InspectionTimings`. Existing core paths (`pdf`, `geometry`, `render`, `jev`, `model`) remain supported through reexports and compatibility adapters; field/page-scoped observer APIs remain in `voltfill_core::jev::transport`.
+
+All default feature sets remain empty. Enable `pdf-render/hayro` for this example, or `pdf-render/pdfium` with an explicit caller-supplied library path. Core forwards both features; backend selection and native-library policy are unchanged. The page must produce a PNG within Jev's 280–1568-pixel side limits. This prepares a request without sending it:
+
+Use path dependencies on a source checkout from an independent project:
+
+```toml
+[dependencies]
+pdf-probe = { path = "/path/to/voltfill/crates/pdf-probe" }
+pdf-render = { path = "/path/to/voltfill/crates/pdf-render", features = ["hayro"] }
+jev-client = { path = "/path/to/voltfill/crates/jev-client" }
+```
+
+```rust
+use std::collections::BTreeMap;
+use jev_client::{Asset, Content, Limits, PngImage, Question, RequestDraft, build_request};
+
+fn prepare(pdf: &[u8]) -> Result<jev_client::multipart::Body, Box<dyn std::error::Error>> {
+    let doc = pdf_probe::inspect(pdf, pdf_probe::PdfLimits::default())?;
+    let image = pdf_render::render(pdf, doc.pages[0].page, &pdf_render::RenderConfig::hayro())?;
+    let png = PngImage::new("page".into(), image.png)?;
+    let request = build_request(RequestDraft {
+        model: "jev-1.14.0".into(),
+        state: Content::Text("Inspect <page>".into()),
+        questions: BTreeMap::from([("visible".into(), Question::Noul {
+            instructions: Content::Text("Is a red image visible?".into()), criteria: None,
+        })]),
+        assets: BTreeMap::from([("<page>".into(), Asset { part: "page".into() })]),
+    }, Limits::default())?;
+    Ok(jev_client::multipart::encode(&request, &[png], "example-boundary")?)
+}
+```
+
+For transmission, use `transport::execute` or `execute_observed` with explicit permission, a caller-injected `Secret`, validated limits and a `Clock`. Wrap the transport with `RecordingTransport::new(&mut transport, |record| records.push(record))` to retain received bodies and safe outcome metadata. The sink runs once per send, in completion order, before parsing and observer callbacks, including errors and incomplete bodies. Attach request context in the sink when sharing it across calls/workers. It receives no authentication data or HTTP headers. Logs retain the compatible `voltfill_core::jev` target and do not replace response data.
+
+The [independent consumer](tests/foundation-consumer/src/main.rs) uses only the three foundations and an image-only synthetic PDF. Run `python3 tests/run-foundation-consumer.py`; it copies the consumer outside this workspace, checks the dependency graph and locked external versions, runs Hayro without sending, then removes temporary build output. For native verification use `--pdfium-library /absolute/path/to/library`; no library is downloaded. OCR is unsupported. Extraction reports remain evaluation-only.
+
 ## Documentation
 
 [Configuration](docs/configuration.en.md) · [HTTP server](docs/server.en.md) · [Development](docs/development.en.md) · [Benchmarks](docs/benchmarks.en.md)

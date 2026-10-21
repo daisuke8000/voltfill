@@ -399,45 +399,6 @@ impl<O: transport::AttemptObserver> transport::AttemptObserver for UsageObserver
         observed
     }
 }
-struct RecordingTransport<'a, T> {
-    inner: &'a mut T,
-    responses: &'a std::sync::Mutex<Vec<crate::model::JevResponse>>,
-    context: &'a EvaluationContext<'a>,
-    question_ids: Vec<String>,
-}
-impl<T: transport::Transport> transport::Transport for RecordingTransport<'_, T> {
-    fn send(
-        &mut self,
-        request: transport::HttpRequest<'_>,
-    ) -> Result<transport::HttpResponse, transport::TransportError> {
-        let result = self.inner.send(request);
-        let (http_status, body, retry_after_ms, transport_error) = match &result {
-            Ok(response) => (
-                Some(response.status),
-                Some(response.body.clone().into()),
-                response.retry_after_ms,
-                response.body_error,
-            ),
-            Err(error) => (None, None, None, Some(*error)),
-        };
-        let record = crate::model::JevResponse {
-            field_id: self.context.field_id.into(),
-            page: self.context.page,
-            question_ids: self.question_ids.clone(),
-            http_status,
-            body_complete: body.is_some() && transport_error.is_none(),
-            body,
-            retry_after_ms,
-            transport_error,
-        };
-        self.responses
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .push(record);
-        result
-    }
-}
-
 impl<T: transport::Transport, C: Clock, O: transport::AttemptObserver> Evaluator
     for RemoteEvaluator<T, C, O>
 {
@@ -473,12 +434,22 @@ impl<T: transport::Transport, C: Clock, O: transport::AttemptObserver> Evaluator
             inner: &mut self.observer,
             usage: &mut self.usage,
         };
-        let mut recording = RecordingTransport {
-            inner: &mut self.transport,
-            responses: &self.responses,
-            context,
-            question_ids: request.draft().questions.keys().cloned().collect(),
-        };
+        let question_ids: Vec<String> = request.draft().questions.keys().cloned().collect();
+        let mut recording = transport::RecordingTransport::new(&mut self.transport, |record| {
+            self.responses
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(crate::model::JevResponse {
+                    field_id: context.field_id.into(),
+                    page: context.page,
+                    question_ids: question_ids.clone(),
+                    http_status: record.http_status,
+                    body: record.body,
+                    body_complete: record.body_complete,
+                    retry_after_ms: record.retry_after_ms,
+                    transport_error: record.transport_error,
+                });
+        });
         let result = transport::execute_in_scope(
             request,
             images,
@@ -887,11 +858,23 @@ mod concurrent_tests {
         .with_max_concurrency(2)
         .unwrap()
     }
+    fn set_input_quota<T, C, O>(remote: &RemoteEvaluator<T, C, O>, tokens: u64) {
+        let old = remote.budget.snapshot();
+        let mut config = remote.config.clone();
+        config.input_tokens_per_second = tokens;
+        config.organization.input_tokens_per_second =
+            config.organization.input_tokens_per_second.max(tokens);
+        config.input_tokens_per_attempt = config.input_tokens_per_attempt.min(tokens);
+        remote.budget.configure(&config).unwrap();
+        remote
+            .budget
+            .set_limits(old.max_posts, old.max_cost_nano_usd);
+    }
     #[test]
     fn worker_count_accepts_any_positive_value() {
         assert!(remote(false, 1).with_max_concurrency(0).is_err());
         let mut remote = remote(false, 1).with_max_concurrency(usize::MAX).unwrap();
-        remote.budget.set_test_input_quota(128_000);
+        set_input_quota(&remote, 128_000);
         let request = request();
         let results = remote.evaluate_many(&calls(&request, 2, 30_000));
         assert_eq!(results.len(), 2);
@@ -900,7 +883,7 @@ mod concurrent_tests {
     #[test]
     fn actual_workers_overlap_under_sufficient_test_allocation_and_keep_scopes_separate() {
         let mut remote = remote(true, 1);
-        remote.budget.set_test_input_quota(128_000);
+        set_input_quota(&remote, 128_000);
         let request = request();
         let results = remote.evaluate_many(&calls(&request, 2, 30_000));
         assert_eq!(results.len(), 2);
@@ -931,7 +914,8 @@ mod concurrent_tests {
     fn token_quota_serializes_two_actual_request_reservations() {
         let mut remote = remote(false, 1);
         let request = request();
-        remote.budget.set_test_input_quota(
+        set_input_quota(
+            &remote,
             jev::planning::estimate(&request, &Default::default()).request_tokens,
         );
         let start = Instant::now();
@@ -944,7 +928,7 @@ mod concurrent_tests {
     #[test]
     fn concurrent_usage_overflow_is_flagged_as_lower_bound_and_stops_future_admission() {
         let mut remote = remote(true, u64::MAX);
-        remote.budget.set_test_input_quota(128_000);
+        set_input_quota(&remote, 128_000);
         let request = request();
         let results = remote.evaluate_many(&calls(&request, 2, 30_000));
         assert!(results.iter().all(|result| result.result.is_ok()));
@@ -1048,7 +1032,7 @@ mod concurrent_tests {
         .unwrap()
         .with_max_concurrency(2)
         .unwrap();
-        remote.budget.set_test_input_quota(128_000);
+        set_input_quota(&remote, 128_000);
         let request = request();
         let results = remote.evaluate_many(&calls(&request, 3, 30_000));
         assert_eq!(results.len(), 2);
