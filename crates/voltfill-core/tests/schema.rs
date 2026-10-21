@@ -206,3 +206,33 @@ fn multiple_candidates_require_bounded_text_array_and_one_independent_question()
     f["fields"][0]["questions"].as_array_mut().unwrap().push(q);
     assert!(check(f).is_err());
 }
+
+#[test]
+fn shared_context_keeps_exact_state_envelope_byte_and_leaf_depth_limits() {
+    use voltfill_core::{
+        jev::{Content, Limits},
+        schema,
+    };
+    let mut form = schema::parse(include_bytes!("../../../examples/text-form.json")).unwrap();
+    let overhead = serde_json::to_vec(&serde_json::json!({"state":{"shared_context":""}}))
+        .unwrap()
+        .len();
+    for (extra, accepted) in [(0, true), (1, false)] {
+        form.shared_context = Some(Content::Text(
+            "x".repeat(Limits::default().max_bytes - overhead + extra),
+        ));
+        assert_eq!(form.validate().is_ok(), accepted);
+    }
+    for (arrays, accepted) in [(30, true), (31, false)] {
+        let mut content = Content::Text("x".into());
+        for _ in 0..arrays {
+            content = Content::Array(vec![content]);
+        }
+        form.shared_context = Some(content);
+        assert_eq!(form.validate().is_ok(), accepted);
+    }
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        form.shared_context = Some(Content::Array(vec![Content::Float(value)]));
+        assert!(form.validate().is_err());
+    }
+}

@@ -570,3 +570,23 @@ pub fn parse_response(bytes: &[u8], request: &Request, limits: Limits) -> Result
         diagnostics,
     })
 }
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum ResponseBody {
+    Text(String),
+    Bytes(Vec<u8>),
+}
+
+impl From<Vec<u8>> for ResponseBody {
+    fn from(bytes: Vec<u8>) -> Self {
+        match String::from_utf8(bytes) {
+            Ok(text) => Self::Text(text),
+            Err(error) => Self::Bytes(error.into_bytes()),
+        }
+    }
+}
+
+pub use http::{Endpoint, HttpTransport};
+pub use multipart::PngImage;
+pub use transport::{ExecutionConfig, Policy, RecordingTransport, ResponseRecord, Secret};

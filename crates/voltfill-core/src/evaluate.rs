@@ -399,45 +399,6 @@ impl<O: transport::AttemptObserver> transport::AttemptObserver for UsageObserver
         observed
     }
 }
-struct RecordingTransport<'a, T> {
-    inner: &'a mut T,
-    responses: &'a std::sync::Mutex<Vec<crate::model::JevResponse>>,
-    context: &'a EvaluationContext<'a>,
-    question_ids: Vec<String>,
-}
-impl<T: transport::Transport> transport::Transport for RecordingTransport<'_, T> {
-    fn send(
-        &mut self,
-        request: transport::HttpRequest<'_>,
-    ) -> Result<transport::HttpResponse, transport::TransportError> {
-        let result = self.inner.send(request);
-        let (http_status, body, retry_after_ms, transport_error) = match &result {
-            Ok(response) => (
-                Some(response.status),
-                Some(response.body.clone().into()),
-                response.retry_after_ms,
-                response.body_error,
-            ),
-            Err(error) => (None, None, None, Some(*error)),
-        };
-        let record = crate::model::JevResponse {
-            field_id: self.context.field_id.into(),
-            page: self.context.page,
-            question_ids: self.question_ids.clone(),
-            http_status,
-            body_complete: body.is_some() && transport_error.is_none(),
-            body,
-            retry_after_ms,
-            transport_error,
-        };
-        self.responses
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .push(record);
-        result
-    }
-}
-
 impl<T: transport::Transport, C: Clock, O: transport::AttemptObserver> Evaluator
     for RemoteEvaluator<T, C, O>
 {
@@ -473,12 +434,22 @@ impl<T: transport::Transport, C: Clock, O: transport::AttemptObserver> Evaluator
             inner: &mut self.observer,
             usage: &mut self.usage,
         };
-        let mut recording = RecordingTransport {
-            inner: &mut self.transport,
-            responses: &self.responses,
-            context,
-            question_ids: request.draft().questions.keys().cloned().collect(),
-        };
+        let question_ids: Vec<String> = request.draft().questions.keys().cloned().collect();
+        let mut recording = transport::RecordingTransport::new(&mut self.transport, |record| {
+            self.responses
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(crate::model::JevResponse {
+                    field_id: context.field_id.into(),
+                    page: context.page,
+                    question_ids: question_ids.clone(),
+                    http_status: record.http_status,
+                    body: record.body,
+                    body_complete: record.body_complete,
+                    retry_after_ms: record.retry_after_ms,
+                    transport_error: record.transport_error,
+                });
+        });
         let result = transport::execute_in_scope(
             request,
             images,

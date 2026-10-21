@@ -2310,14 +2310,7 @@ mod cache_key_compatibility {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures")
             .join(name);
-        if std::env::var_os("VOLTFILL_CAPTURE_BASELINE").is_some() {
-            assert!(!path.exists());
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, serde_json::to_vec_pretty(&keys).unwrap()).unwrap();
-        } else {
-            let expected: Vec<String> =
-                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-            assert_eq!(keys, expected);
-        }
+        let expected: Vec<String> = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(keys, expected);
     }
 }

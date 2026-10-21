@@ -85,12 +85,6 @@ fn extraction_matches_before_foundation_split() {
     let actual = json!({"log_targets":*LOG_TARGETS.lock().unwrap(),"mock":stable(serde_json::to_value(mock).unwrap()),"remote":stable(serde_json::to_value(report).unwrap())});
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/foundation-baseline.json");
-    if std::env::var_os("VOLTFILL_CAPTURE_BASELINE").is_some() {
-        assert!(!path.exists(), "baseline must never be overwritten");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, serde_json::to_vec_pretty(&actual).unwrap()).unwrap();
-    } else {
-        let expected: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        assert_eq!(actual, expected);
-    }
+    let expected: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(actual, expected);
 }

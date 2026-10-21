@@ -125,21 +125,7 @@ impl UsageSummary {
     }
 }
 
-#[derive(Debug, Serialize)]
-#[serde(untagged)]
-pub enum ResponseBody {
-    Text(String),
-    Bytes(Vec<u8>),
-}
-
-impl From<Vec<u8>> for ResponseBody {
-    fn from(bytes: Vec<u8>) -> Self {
-        match String::from_utf8(bytes) {
-            Ok(text) => Self::Text(text),
-            Err(error) => Self::Bytes(error.into_bytes()),
-        }
-    }
-}
+pub use jev_client::ResponseBody;
 
 #[derive(Debug, Serialize)]
 pub struct JevResponse {

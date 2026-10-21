@@ -50,6 +50,50 @@ pub enum TransportError {
 pub trait Transport {
     fn send(&mut self, request: HttpRequest<'_>) -> Result<HttpResponse, TransportError>;
 }
+#[derive(Debug, serde::Serialize)]
+pub struct ResponseRecord {
+    pub http_status: Option<u16>,
+    pub retry_after_ms: Option<u64>,
+    pub transport_error: Option<TransportError>,
+    pub body: Option<super::ResponseBody>,
+    pub body_complete: bool,
+}
+
+/// Calls the sink once per send, before parsing or observer callbacks. The sink
+/// receives original body bytes and safe outcome metadata, never headers or secrets.
+/// Records arrive in send-completion order; the caller can attach its own context.
+pub struct RecordingTransport<'a, T, F> {
+    inner: &'a mut T,
+    sink: F,
+}
+impl<'a, T, F: FnMut(ResponseRecord)> RecordingTransport<'a, T, F> {
+    pub fn new(inner: &'a mut T, sink: F) -> Self {
+        Self { inner, sink }
+    }
+}
+impl<T: Transport, F: FnMut(ResponseRecord)> Transport for RecordingTransport<'_, T, F> {
+    fn send(&mut self, request: HttpRequest<'_>) -> Result<HttpResponse, TransportError> {
+        let result = self.inner.send(request);
+        let (http_status, body, retry_after_ms, transport_error) = match &result {
+            Ok(response) => (
+                Some(response.status),
+                Some(response.body.clone().into()),
+                response.retry_after_ms,
+                response.body_error,
+            ),
+            Err(error) => (None, None, None, Some(*error)),
+        };
+        (self.sink)(ResponseRecord {
+            http_status,
+            body_complete: body.is_some() && transport_error.is_none(),
+            body,
+            retry_after_ms,
+            transport_error,
+        });
+        result
+    }
+}
+
 pub trait Clock {
     /// Monotonic milliseconds, relative to an arbitrary origin.
     fn now_ms(&self) -> u64;

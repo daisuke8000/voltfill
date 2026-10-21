@@ -14,3 +14,11 @@ Read README.md and the relevant source/tests before changing behavior. Keep work
 - Keep public documentation focused on usage, supported behavior and architecture. Exclude account-specific settings, local environment details, investigation reports and conversation history. Use system fonts without external font assets.
 - OCR is outside scope. Do not add OCR code or dependencies.
 - Track `ttf-parser` maintenance advisory RUSTSEC-2026-0192 through `pdf-inspector`. Review official releases and adopt compatible fixes after text, geometry and Evidence regression checks. Do not suppress the advisory or equate an unmaintained warning with a confirmed vulnerability. Prefer upstream fixes over a permanent fork; any temporary patch must state its scope, downstream Cargo requirements and removal condition, and be removed when an equivalent official release is adopted.
+
+## Crate responsibility boundaries
+
+- `pdf-probe` owns PDF inspection, source diagnostics and geometry; `pdf-render` owns optional page rendering and may depend on `pdf-probe`. Neither requires an extraction schema or Evidence.
+- `jev-client` owns Jev protocol, transport, bounded execution and received-body recording. It must not depend on PDF crates or `voltfill-core`, or require extraction field/page context.
+- `voltfill-core` owns Evidence, extraction fields/results, aggregate timings/usage and field/page response associations. Keep existing public paths through reexports or narrow compatibility adapters; foundation crates must never depend on core.
+- Preserve every received attempt body before parsing or observer failure, including retries and incomplete bodies. Recording sinks carry safe outcome metadata, never credentials or headers; logs do not replace response data.
+- Keep reports evaluation-only and validate configured limits across workers and retries. OCR remains outside scope; retain the existing RUSTSEC-2026-0192 tracking and native-library restrictions above.
