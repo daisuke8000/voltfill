@@ -150,6 +150,8 @@ pub enum Failure {
     Transport(TransportError),
     Protocol(Error),
     Observer,
+    /// Image preparation failed before sending.
+    ImagesUnavailable,
 }
 pub const INPUT_RESERVATION: u64 = 64_000;
 pub const ATTEMPT_RESERVATION_NANO_USD: u64 = INPUT_RESERVATION * 42;
@@ -618,6 +620,23 @@ impl AttemptBudget {
             clock.sleep_ms(wait);
         }
     }
+    // Keep the post counted to preserve unique slot IDs and the post cap.
+    fn release_unsent(&self, id: u32) -> Result<(), Failure> {
+        let mut s = self.lock();
+        let index = (s.tokens.iter())
+            .position(|t| t.id == id && !t.committed && t.expires.is_none())
+            .ok_or(Failure::Config)?;
+        let token = s.tokens.remove(index);
+        let cost = token
+            .tokens
+            .saturating_mul(s.config.input_token_price_nano_usd);
+        let Some(reserved) = s.value.reserved.checked_sub(cost) else {
+            s.value.stopped = true;
+            return Err(Failure::Config);
+        };
+        s.value.reserved = reserved;
+        Ok(())
+    }
     fn complete_slot(
         &self,
         id: u32,
@@ -835,6 +854,67 @@ pub fn execute_observed<T: Transport, C: Clock, O: AttemptObserver>(
     budget: &mut AttemptBudget,
     observer: &mut O,
 ) -> Execution {
+    execute_with(
+        request,
+        Images::Ready(images),
+        boundary,
+        secret,
+        policy,
+        limits,
+        transport,
+        clock,
+        budget,
+        observer,
+    )
+}
+
+/// Prepare images at most once after admission; retries reuse the body.
+/// If `make_images` fails, releases the unsent slot and returns [`Failure::ImagesUnavailable`].
+#[allow(clippy::too_many_arguments)]
+pub fn execute_deferred<T: Transport, C: Clock, O: AttemptObserver>(
+    request: &Request,
+    make_images: &mut dyn FnMut() -> Result<Vec<PngImage>, ()>,
+    boundary: &str,
+    secret: Option<&Secret>,
+    policy: Policy,
+    limits: Limits,
+    transport: &mut T,
+    clock: &mut C,
+    budget: &mut AttemptBudget,
+    observer: &mut O,
+) -> Execution {
+    execute_with(
+        request,
+        Images::Deferred(make_images),
+        boundary,
+        secret,
+        policy,
+        limits,
+        transport,
+        clock,
+        budget,
+        observer,
+    )
+}
+
+enum Images<'a> {
+    Ready(&'a [PngImage]),
+    Deferred(&'a mut dyn FnMut() -> Result<Vec<PngImage>, ()>),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_with<T: Transport, C: Clock, O: AttemptObserver>(
+    request: &Request,
+    mut images: Images<'_>,
+    boundary: &str,
+    secret: Option<&Secret>,
+    policy: Policy,
+    limits: Limits,
+    transport: &mut T,
+    clock: &mut C,
+    budget: &mut AttemptBudget,
+    observer: &mut O,
+) -> Execution {
     let started = clock.now_ms();
     let mut attempts = Vec::<Attempt>::new();
     let result = (|| {
@@ -853,22 +933,36 @@ pub fn execute_observed<T: Transport, C: Clock, O: AttemptObserver>(
         if request.bytes().len() > limits.max_bytes {
             return Err(Failure::Protocol(Error::Bytes));
         }
-        let body = if images.is_empty() {
-            Body::json(request)
-        } else {
-            if !policy.allow_preview_images {
+        let prepare = |images: &[PngImage]| {
+            let body = if images.is_empty() {
+                Body::json(request)
+            } else {
+                if !policy.allow_preview_images {
+                    return Err(Failure::PreviewDisabled);
+                }
+                multipart::encode(request, images, boundary)
+            }
+            .map_err(Failure::Protocol)?;
+            Ok((body, input_summary(request, images)))
+        };
+        let mut prepared = match &images {
+            Images::Ready(images) => Some(prepare(images)?),
+            Images::Deferred(_) if !policy.allow_preview_images => {
                 return Err(Failure::PreviewDisabled);
             }
-            multipart::encode(request, images, boundary)
-        }
-        .map_err(Failure::Protocol)?;
+            Images::Deferred(_) => None,
+        };
         let config = budget.lock().config.clone();
         let estimate = super::planning::estimate(request, &config.context);
         if !estimate.fits(&config.context, policy.estimated_input_tokens_per_attempt) {
             return Err(Failure::Protocol(Error::Request));
         }
-        let input = input_summary(request, images);
-        log::info!(target:"voltfill_core::jev","{}",serde_json::json!({"event":"request_planned","input_kind":input.input_kind,"question_count":input.question_count,"image_count":images.len(),"estimated_input_tokens":estimate.request_tokens,"estimated_largest_question_tokens":estimate.largest_question_tokens,"reserved_input_tokens":policy.estimated_input_tokens_per_attempt}));
+        let planned = |input: &InputSummary| {
+            log::info!(target:"voltfill_core::jev","{}",serde_json::json!({"event":"request_planned","input_kind":input.input_kind,"question_count":input.question_count,"image_count":input.image_dimensions.len(),"estimated_input_tokens":estimate.request_tokens,"estimated_largest_question_tokens":estimate.largest_question_tokens,"reserved_input_tokens":policy.estimated_input_tokens_per_attempt}));
+        };
+        if let Some((_, input)) = &prepared {
+            planned(input);
+        }
         let question_ids: Vec<_> = request.draft().questions.keys().cloned().collect();
         let session_deadline = budget.session_deadline(started);
         let deadline = started
@@ -903,9 +997,11 @@ pub fn execute_observed<T: Transport, C: Clock, O: AttemptObserver>(
             if remaining == 0 {
                 return Err(Failure::Deadline);
             }
-            body_spent = body_spent
-                .checked_add(body.bytes().len() as u64)
-                .ok_or(Failure::Budget)?;
+            if let Some((body, _)) = &prepared {
+                body_spent = body_spent
+                    .checked_add(body.bytes().len() as u64)
+                    .ok_or(Failure::Budget)?;
+            }
             tokens = tokens
                 .checked_add(policy.estimated_input_tokens_per_attempt)
                 .ok_or(Failure::Budget)?;
@@ -927,16 +1023,47 @@ pub fn execute_observed<T: Transport, C: Clock, O: AttemptObserver>(
                 admitted_ms: clock.now_ms(),
                 wall: std::time::Instant::now(),
             };
+            if prepared.is_none() {
+                let made = match &mut images {
+                    Images::Deferred(make) => make().map_err(|()| Failure::ImagesUnavailable),
+                    Images::Ready(_) => Err(Failure::Config),
+                };
+                let ready = made
+                    .and_then(|made| prepare(&made))
+                    .and_then(|(body, input)| {
+                        body_spent = body.bytes().len() as u64;
+                        match body_spent > policy.max_total_body_bytes {
+                            true => Err(Failure::Budget),
+                            false => Ok((body, input)),
+                        }
+                    });
+                match ready {
+                    Ok(ready) => {
+                        planned(&ready.1);
+                        prepared = Some(ready);
+                    }
+                    Err(failure) => {
+                        // If release fails, Drop settles the reservation as possibly sent.
+                        if budget.release_unsent(slot).is_ok() {
+                            ticket.done = true;
+                        }
+                        return Err(failure);
+                    }
+                }
+            }
+            let Some((body, input)) = &prepared else {
+                return Err(Failure::Config);
+            };
 
             log::info!(target:"voltfill_core::jev","{}",serde_json::json!({"event":"attempt_reserved","session_attempt":slot,"attempt_in_batch":index+1,"batch_cap":policy.max_attempts,"input_kind":input.input_kind,"question_count":input.question_count,"image_count":input.image_dimensions.len(),"image_dimensions":input.image_dimensions}));
             let trace = AttemptContext {
                 slot,
                 question_ids: &question_ids,
-                input: &input,
+                input,
             };
             observer
                 .before_send(
-                    &body,
+                    body,
                     budget,
                     remaining.min(policy.attempt_timeout_ms),
                     &trace,
@@ -961,7 +1088,7 @@ pub fn execute_observed<T: Transport, C: Clock, O: AttemptObserver>(
             let attempt_started = clock.now_ms();
             let wire = transport.send(HttpRequest {
                 secret,
-                body: &body,
+                body,
                 timeout_ms: timeout,
                 max_response_bytes: limits.max_bytes,
             });

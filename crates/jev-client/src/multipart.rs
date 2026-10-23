@@ -253,7 +253,14 @@ pub fn encode(request: &Request, images: &[PngImage], boundary: &str) -> Result<
     if collision(request.bytes()) || images.iter().any(|i| collision(&i.bytes)) {
         return Err(Error::Multipart);
     }
-    let mut bytes = Vec::new();
+    let headers = 256 * (images.len() + 2);
+    let payload = images.iter().map(|i| i.bytes.len()).sum::<usize>();
+    let mut bytes = Vec::with_capacity(
+        (request.bytes().len())
+            .saturating_add(payload)
+            .saturating_add(headers)
+            .min(MAX_BODY_BYTES),
+    );
     let mut append = |data: &[u8]| -> Result<(), Error> {
         if data.len() > MAX_BODY_BYTES.saturating_sub(bytes.len()) {
             return Err(Error::Bytes);
