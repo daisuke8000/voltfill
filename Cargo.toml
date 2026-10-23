@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/pdf-probe", "crates/pdf-render", "crates/jev-client", "crates/voltfill-core", "crates/voltfill-cli", "crates/voltfill-server"]
+members = ["crates/pdf-probe", "crates/pdf-render", "crates/jev-client", "crates/otel-log", "crates/voltfill-core", "crates/voltfill-cli", "crates/voltfill-server"]
 resolver = "3"
 
 [workspace.package]
