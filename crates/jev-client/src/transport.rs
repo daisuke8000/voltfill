@@ -157,9 +157,11 @@ pub const INPUT_RESERVATION: u64 = 64_000;
 pub const ATTEMPT_RESERVATION_NANO_USD: u64 = INPUT_RESERVATION * 42;
 // Provider limits are per second, so a completed attempt's tokens are held for at least
 // that long before they stop counting against the next admission. One second leaves no
-// margin for how the provider aligns its window; raise it if 429 responses appear.
+// margin for how the provider aligns its window, so each 429 multiplies the gap a budget
+// holds by `completion_gap_backoff`, up to `max_completion_gap_ms`.
 pub const MIN_COMPLETION_GAP_MS: u64 = 1_000;
 pub const DEFAULT_COMPLETION_GAP_MS: u64 = 2_000;
+pub const DEFAULT_MAX_COMPLETION_GAP_MS: u64 = 60_000;
 pub const SESSION_DEADLINE_MS: u64 = 600_000;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -192,6 +194,9 @@ pub struct ExecutionConfig {
     /// Estimated cost per input token; not a provider billing guarantee.
     pub input_token_price_nano_usd: u64,
     pub completion_gap_ms: u64,
+    /// Factor applied to the gap on a 429; 1 keeps the gap fixed.
+    pub completion_gap_backoff: u32,
+    pub max_completion_gap_ms: u64,
     pub max_json_bytes: usize,
     pub max_total_body_bytes: u64,
     pub requests_per_second: u32,
@@ -216,6 +221,8 @@ impl Default for ExecutionConfig {
             max_cost_nano_usd: 200_000_000,
             input_token_price_nano_usd: 42,
             completion_gap_ms: DEFAULT_COMPLETION_GAP_MS,
+            completion_gap_backoff: 2,
+            max_completion_gap_ms: DEFAULT_MAX_COMPLETION_GAP_MS,
             max_json_bytes: Limits::default().max_bytes,
             max_total_body_bytes: 32 * 1024 * 1024,
             requests_per_second: 80,
@@ -227,6 +234,12 @@ impl Default for ExecutionConfig {
     }
 }
 impl ExecutionConfig {
+    /// The gap after a 429: exponential backoff from the gap in use.
+    pub fn backed_off_gap(&self, gap_ms: u64) -> u64 {
+        gap_ms
+            .saturating_mul(u64::from(self.completion_gap_backoff))
+            .min(self.max_completion_gap_ms)
+    }
     pub fn json_limits(&self) -> Limits {
         Limits {
             max_bytes: self.max_json_bytes,
@@ -251,7 +264,9 @@ impl ExecutionConfig {
             || self.max_cost_nano_usd == 0
             || self.max_cost_nano_usd > 100_000_000_000
             || !(1..=1_000_000_000).contains(&self.input_token_price_nano_usd)
-            || !(MIN_COMPLETION_GAP_MS..=60_000).contains(&self.completion_gap_ms)
+            || self.completion_gap_ms < MIN_COMPLETION_GAP_MS
+            || !(self.completion_gap_ms..=SESSION_DEADLINE_MS).contains(&self.max_completion_gap_ms)
+            || !(1..=16).contains(&self.completion_gap_backoff)
             || !(1..=Limits::default().max_bytes).contains(&self.max_json_bytes)
             || !(1..=32 * 1024 * 1024).contains(&self.max_total_body_bytes)
             || self.organization.requests_per_second == 0
@@ -344,6 +359,10 @@ struct BudgetState {
     tokens: Vec<TokenReservation>,
     starts: std::collections::VecDeque<u64>,
     cooldown_until: u64,
+    gap_ms: u64,
+    /// Until when the last doubled gap is held. Workers in flight together get
+    /// their 429s together; those are one signal and double the gap once.
+    backoff_until: u64,
     rng: u64,
 }
 #[derive(Clone)]
@@ -387,6 +406,8 @@ impl AttemptBudget {
                 cooldown_until: value
                     .last_completion
                     .map_or(0, |at| at.saturating_add(DEFAULT_COMPLETION_GAP_MS)),
+                gap_ms: DEFAULT_COMPLETION_GAP_MS,
+                backoff_until: 0,
                 rng: hasher.finish(),
             })),
         }
@@ -429,6 +450,7 @@ impl AttemptBudget {
                 .map_or(0, |at| at.saturating_add(config.completion_gap_ms)),
         );
         s.config = config.clone();
+        s.gap_ms = config.completion_gap_ms;
         s.value.max_posts = config.max_requests;
         s.value.max_cost_nano_usd = config.max_cost_nano_usd;
         Ok(())
@@ -646,7 +668,11 @@ impl AttemptBudget {
         retry_after_ms: u64,
     ) -> Result<(), Failure> {
         let mut s = self.lock();
-        let expiry = now.saturating_add(s.config.completion_gap_ms.max(retry_after_ms));
+        if failure == Some(Failure::Http(429)) && now >= s.backoff_until {
+            s.gap_ms = s.config.backed_off_gap(s.gap_ms);
+            s.backoff_until = now.saturating_add(s.gap_ms);
+        }
+        let expiry = now.saturating_add(s.gap_ms.max(retry_after_ms));
         let token = s
             .tokens
             .iter_mut()
@@ -690,6 +716,11 @@ impl AttemptBudget {
             if input > reservation || known.saturating_add(reserved) > s.value.max_cost_nano_usd {
                 s.value.stopped = true;
                 return Err(Failure::Budget);
+            }
+            // The provider's per-second window counts billed usage, so the gap holds the
+            // reported usage; estimates run well above it and would admit far fewer.
+            if let Some(token) = s.tokens.iter_mut().find(|t| t.id == id) {
+                token.tokens = input;
             }
         }
         Ok(())
@@ -1268,6 +1299,108 @@ mod admission_commit_tests {
             budget.commit_start(delayed, &mut clock, 30_000, &mut NoopObserver),
             Err(Failure::Cancelled)
         );
+    }
+    #[test]
+    fn the_gap_backoff_and_its_cap_are_configured() {
+        let config = ExecutionConfig {
+            completion_gap_ms: MIN_COMPLETION_GAP_MS,
+            completion_gap_backoff: 3,
+            max_completion_gap_ms: 5_000,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+        assert_eq!(config.backed_off_gap(1_000), 3_000);
+        assert_eq!(config.backed_off_gap(3_000), 5_000);
+        let fixed = ExecutionConfig {
+            completion_gap_backoff: 1,
+            ..Default::default()
+        };
+        assert_eq!(fixed.backed_off_gap(2_000), 2_000);
+        let below_start = ExecutionConfig {
+            max_completion_gap_ms: 1_500,
+            ..Default::default()
+        };
+        assert!(below_start.validate().is_err());
+    }
+    #[test]
+    fn a_completed_attempt_holds_its_reported_usage_not_its_reservation() {
+        let budget = AttemptBudget::default();
+        budget.set_test_input_quota(10_000);
+        let mut clock = TestClock::default();
+        let send = |clock: &mut TestClock, tokens, input| {
+            let (id, _) = budget
+                .reserve_tokens(clock, 30_000, &mut NoopObserver, tokens)
+                .unwrap();
+            budget
+                .commit_start(id, clock, 30_000, &mut NoopObserver)
+                .unwrap();
+            budget
+                .complete_slot(id, clock.now_ms(), input, None, 0)
+                .unwrap();
+        };
+        send(&mut clock, 8_000, Some(4_000));
+        send(&mut clock, 6_000, Some(4_000));
+        assert_eq!(clock.now_ms(), 0);
+        // Usage that was never reported keeps its whole reservation for the gap.
+        send(&mut clock, 2_000, None);
+        send(&mut clock, 8_000, Some(4_000));
+        assert_eq!(clock.now_ms(), DEFAULT_COMPLETION_GAP_MS);
+    }
+    #[test]
+    fn each_rate_limit_response_doubles_the_completion_gap() {
+        let budget = AttemptBudget::default();
+        let config = ExecutionConfig {
+            completion_gap_ms: MIN_COMPLETION_GAP_MS,
+            input_tokens_per_second: 10_000,
+            input_tokens_per_attempt: 10_000,
+            ..Default::default()
+        };
+        budget.configure(&config).unwrap();
+        let mut clock = TestClock::default();
+        let send = |clock: &mut TestClock, input, failure| {
+            let (id, _) = budget
+                .reserve_tokens(clock, 30_000, &mut NoopObserver, 8_000)
+                .unwrap();
+            budget
+                .commit_start(id, clock, 30_000, &mut NoopObserver)
+                .unwrap();
+            budget
+                .complete_slot(id, clock.now_ms(), input, failure, 0)
+                .unwrap();
+        };
+        send(&mut clock, None, Some(Failure::Http(429)));
+        send(&mut clock, Some(8_000), None);
+        assert_eq!(clock.now_ms(), 2 * MIN_COMPLETION_GAP_MS);
+        send(&mut clock, Some(4_000), None);
+        assert_eq!(clock.now_ms(), 4 * MIN_COMPLETION_GAP_MS);
+    }
+    #[test]
+    fn rate_limit_responses_within_one_backoff_double_the_gap_once() {
+        let budget = AttemptBudget::default();
+        let config = ExecutionConfig {
+            completion_gap_ms: MIN_COMPLETION_GAP_MS,
+            max_concurrency: 4,
+            ..Default::default()
+        };
+        budget.configure(&config).unwrap();
+        let mut clock = TestClock::default();
+        let ids: Vec<_> = (0..4)
+            .map(|_| {
+                let (id, _) = budget
+                    .reserve_tokens(&mut clock, 30_000, &mut NoopObserver, 8_000)
+                    .unwrap();
+                budget
+                    .commit_start(id, &mut clock, 30_000, &mut NoopObserver)
+                    .unwrap();
+                id
+            })
+            .collect();
+        for id in ids {
+            budget
+                .complete_slot(id, clock.now_ms(), None, Some(Failure::Http(429)), 0)
+                .unwrap();
+        }
+        assert_eq!(budget.lock().gap_ms, 2 * MIN_COMPLETION_GAP_MS);
     }
     #[test]
     fn delayed_callbacks_cannot_bunch_actual_start_authorizations() {

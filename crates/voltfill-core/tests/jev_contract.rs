@@ -347,6 +347,11 @@ fn multipart_encodes_exact_parts_and_bounds_image_metadata() {
     for (width, height) in [(279, 280), (280, 1569)] {
         assert!(multipart::PngImage::new("image-1".into(), png(width, height)).is_err());
     }
+    let sides = 200..=2000;
+    assert!(
+        multipart::PngImage::with_sides("image-1".into(), png(200, 2000), sides.clone()).is_ok()
+    );
+    assert!(multipart::PngImage::with_sides("image-1".into(), png(199, 280), sides).is_err());
     assert!(multipart::PngImage::new("bad\r\nname".into(), png(280, 280)).is_err());
     assert!(multipart::PngImage::new("request".into(), png(280, 280)).is_err());
     assert!(multipart::Body::json(&request).is_err());
