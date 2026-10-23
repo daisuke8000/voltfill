@@ -77,7 +77,7 @@ The foundation crates work without an extraction schema or Evidence. Their suppo
 | Crate | Public API |
 |---|---|
 | `pdf-probe` | `inspect`, `DocumentSnapshot`, `PdfLimits`, `PdfError`, `InspectionTimings`, source `SourceFragment` / `PageDiagnostic` / `Quality`, `geometry` and `metadata` |
-| `pdf-render` | With `hayro` or `pdfium`: `render`, `RenderConfig`, `RenderBackend`, `RenderedImage`, `RenderError` |
+| `pdf-render` | With `hayro` or `pdfium`: `render`, `RenderDocument` (open once, render several pages with the same checks and images), `RenderConfig`, `RenderBackend`, `RenderedImage`, `RenderError` |
 | `jev-client` | `build_request`, `parse_request`, `parse_response`, `RequestDraft`, `Request`, `Content`, `Question`, `Asset`, `Limits`, `Answer`, `Response`, `Error`, `PngImage`, `Endpoint`, `HttpTransport`, `Secret`, `Policy`, `ExecutionConfig`, `RecordingTransport`, `ResponseRecord`, `ResponseBody`; `transport` traits, shared budgets and `execute` / `execute_observed`; `planning` and `multipart` |
 
 `voltfill-core` depends on all three; `pdf-render` also depends on `pdf-probe`. No foundation crate depends on core, and `jev-client` has no PDF dependency. Core owns Evidence, extraction fields/results, aggregate `Timings` / `UsageSummary` and field/page-associated `JevResponse`. PDF inspection returns its own `InspectionTimings`. Existing core paths (`pdf`, `geometry`, `render`, `jev`, `model`) remain supported through reexports and compatibility adapters; field/page-scoped observer APIs remain in `voltfill_core::jev::transport`.

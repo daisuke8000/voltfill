@@ -77,7 +77,7 @@ curl --fail-with-body --silent --show-error http://127.0.0.1:3000/v1/extract \
 | crate | 公開 API |
 |---|---|
 | `pdf-probe` | `inspect`、`DocumentSnapshot`、`PdfLimits`、`PdfError`、`InspectionTimings`、原文の `SourceFragment` / `PageDiagnostic` / `Quality`、`geometry`、`metadata` |
-| `pdf-render` | `hayro` または `pdfium` 有効時の `render`、`RenderConfig`、`RenderBackend`、`RenderedImage`、`RenderError` |
+| `pdf-render` | `hayro` または `pdfium` 有効時の `render`、`RenderDocument`（1 回開いて複数ページを描く。検査と画像は `render` と同じ）、`RenderConfig`、`RenderBackend`、`RenderedImage`、`RenderError` |
 | `jev-client` | `build_request`、`parse_request`、`parse_response`、`RequestDraft`、`Request`、`Content`、`Question`、`Asset`、`Limits`、`Answer`、`Response`、`Error`、`PngImage`、`Endpoint`、`HttpTransport`、`Secret`、`Policy`、`ExecutionConfig`、`RecordingTransport`、`ResponseRecord`、`ResponseBody`。`transport` の trait・共有予算・`execute` / `execute_observed`、`planning`、`multipart` |
 
 `voltfill-core` は3つすべてに依存し、`pdf-render` は `pdf-probe` にも依存します。基盤から core への依存はなく、`jev-client` は PDF 系にも依存しません。Evidence、抽出フィールド・結果、全体の `Timings` / `UsageSummary`、field/page を付けた `JevResponse` は core が持ちます。PDF 調査は独立した `InspectionTimings` を返します。既存の core の利用パス（`pdf`・`geometry`・`render`・`jev`・`model`）は再公開と互換アダプターで維持し、field/page 付き observer API は `voltfill_core::jev::transport` に残します。
