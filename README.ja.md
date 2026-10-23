@@ -120,6 +120,8 @@ fn prepare(pdf: &[u8]) -> Result<jev_client::multipart::Body, Box<dyn std::error
 
 ## ドキュメント
 
+CI の検査、依存関係監査、シークレット検出、ワークフローのセキュリティ検査は[開発ガイド](docs/development.md)を参照してください。
+
 [設定](docs/configuration.md) · [HTTPサーバー](docs/server.md) · [開発](docs/development.md) · [ベンチマーク](docs/benchmarks.md)
 
 [アーキテクチャ・C4](https://daisuke8000.github.io/voltfill/) · [MITライセンス](LICENSE)
