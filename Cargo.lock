@@ -1562,6 +1562,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "otel-log"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "opentelemetry",
+ "opentelemetry-proto",
+ "opentelemetry_sdk",
+ "serde_json",
+]
+
+[[package]]
 name = "pdf-inspector"
 version = "1.25.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2684,9 +2695,7 @@ dependencies = [
  "jev-client",
  "log",
  "lopdf",
- "opentelemetry",
- "opentelemetry-proto",
- "opentelemetry_sdk",
+ "otel-log",
  "pdf-probe",
  "pdf-render",
  "serde",

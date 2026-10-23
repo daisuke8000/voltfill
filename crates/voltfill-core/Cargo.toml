@@ -9,6 +9,7 @@ license.workspace = true
 pdf-probe = { path = "../pdf-probe" }
 pdf-render = { path = "../pdf-render" }
 jev-client = { path = "../jev-client" }
+otel-log = { path = "../otel-log" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -16,9 +17,6 @@ sha2.workspace = true
 lopdf = { version = "=0.45.0", default-features = false }
 log.workspace = true
 unicode-normalization.workspace = true
-opentelemetry = { version = "0.33", default-features = false, features = ["logs", "trace"] }
-opentelemetry_sdk = { version = "0.33", default-features = false, features = ["logs", "trace"] }
-opentelemetry-proto = { version = "0.33", default-features = false, features = ["gen-tonic-messages", "logs", "with-serde"] }
 
 [features]
 default = []
