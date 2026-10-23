@@ -19,6 +19,7 @@ Read README.md and the relevant source/tests before changing behavior. Keep work
 
 - `pdf-probe` owns PDF inspection, source diagnostics and geometry; `pdf-render` owns optional page rendering and may depend on `pdf-probe`. Neither requires an extraction schema or Evidence.
 - `jev-client` owns Jev protocol, transport, bounded execution and received-body recording. It must not depend on PDF crates or `voltfill-core`, or require extraction field/page context.
+- `otel-log` owns the OpenTelemetry log writer with its OTLP JSON output and `log` target filtering. It must not depend on PDF crates, `jev-client` or `voltfill-core`.
 - `voltfill-core` owns Evidence, extraction fields/results, aggregate timings/usage and field/page response associations. Keep existing public paths through reexports or narrow compatibility adapters; foundation crates must never depend on core.
 - Preserve every received attempt body before parsing or observer failure, including retries and incomplete bodies. Recording sinks carry safe outcome metadata, never credentials or headers; logs do not replace response data.
 - Keep reports evaluation-only and validate configured limits across workers and retries. OCR remains outside scope; retain the existing RUSTSEC-2026-0192 tracking and native-library restrictions above.
