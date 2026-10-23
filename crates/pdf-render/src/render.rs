@@ -8,6 +8,7 @@ use pdf_probe::geometry::{
 use pdf_probe::metadata;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -146,8 +147,98 @@ pub fn render(
     let id = tree
         .get((page - 1) as usize)
         .ok_or(RenderError::InvalidPdf)?;
-    let m = metadata::page_metadata(&metadata_doc, *id)
-        .map_err(|_| RenderError::UnsupportedGeometry)?;
+    let geometry = page_geometry(metadata::page_metadata(&metadata_doc, *id))?;
+    let (width, height) = raster_size(&geometry, config)?;
+    let page_count = tree.len();
+    drop(metadata_doc);
+    let native = Native::open(bytes, page_count, config)?;
+    let (png, transform) = native.render(page, &geometry, width, height, config)?;
+    Ok(RenderedImage {
+        png,
+        width,
+        height,
+        transform,
+        geometry,
+    })
+}
+
+/// Reuses a parsed PDF across page renders, initializing the backend lazily.
+pub struct RenderDocument<'a> {
+    bytes: &'a [u8],
+    config: RenderConfig,
+    pages: Vec<Result<PageGeometry, RenderError>>,
+    native: OnceLock<Result<Native, RenderError>>,
+}
+
+impl<'a> RenderDocument<'a> {
+    pub fn open(bytes: &'a [u8], config: &RenderConfig) -> Result<Self, RenderError> {
+        config.validate()?;
+        if bytes.len() > config.max_input_bytes {
+            return Err(RenderError::LimitExceeded);
+        }
+        let metadata_doc = metadata::load(bytes).map_err(|_| RenderError::InvalidPdf)?;
+        if metadata_doc.trailer.has(b"Encrypt") {
+            return Err(RenderError::InvalidPdf);
+        }
+        let tree = metadata::page_tree(&metadata_doc, config.max_pages)
+            .map_err(|_| RenderError::InvalidPdf)?;
+        let pages = (tree.iter())
+            .map(|id| page_geometry(metadata::page_metadata(&metadata_doc, *id)))
+            .collect();
+        Ok(Self {
+            bytes,
+            config: config.clone(),
+            pages,
+            native: OnceLock::new(),
+        })
+    }
+
+    pub fn page_count(&self) -> usize {
+        self.pages.len()
+    }
+
+    /// Render a 1-based page at the configured scale.
+    pub fn render(&self, page: u32) -> Result<RenderedImage, RenderError> {
+        self.render_at(page, self.config.pixels_per_point)
+    }
+
+    /// Render a 1-based page at the supplied pixels-per-point scale.
+    pub fn render_at(
+        &self,
+        page: u32,
+        pixels_per_point: f64,
+    ) -> Result<RenderedImage, RenderError> {
+        let config = RenderConfig {
+            pixels_per_point,
+            ..self.config.clone()
+        };
+        config.validate()?;
+        if page == 0 {
+            return Err(RenderError::InvalidPdf);
+        }
+        let geometry = (self.pages.get((page - 1) as usize))
+            .ok_or(RenderError::InvalidPdf)?
+            .clone()?;
+        let (width, height) = raster_size(&geometry, &config)?;
+        let native = (self.native)
+            .get_or_init(|| Native::open(self.bytes, self.pages.len(), &self.config))
+            .as_ref()
+            .map_err(|e| *e)?;
+        let (png, transform) = native.render(page, &geometry, width, height, &config)?;
+        Ok(RenderedImage {
+            png,
+            width,
+            height,
+            transform,
+            geometry,
+        })
+    }
+}
+
+fn page_geometry(
+    m: Result<metadata::PageMetadata, metadata::Fault>,
+) -> Result<PageGeometry, RenderError> {
+    let m = m.map_err(|_| RenderError::UnsupportedGeometry)?;
     if m.crop_intersected {
         return Err(RenderError::UnsupportedGeometry);
     }
@@ -161,13 +252,16 @@ pub fn render(
         270 => Rotation::Deg270,
         _ => return Err(RenderError::UnsupportedGeometry),
     };
-    let geometry = PageGeometry::new(
+    PageGeometry::new(
         r(m.media.value)?,
         r(m.crop.value)?,
         rotation,
         m.user_unit.value,
     )
-    .map_err(|_| RenderError::UnsupportedGeometry)?;
+    .map_err(|_| RenderError::UnsupportedGeometry)
+}
+
+fn raster_size(geometry: &PageGeometry, config: &RenderConfig) -> Result<(u32, u32), RenderError> {
     let bounds = geometry
         .display_bounds()
         .map_err(|_| RenderError::UnsupportedGeometry)?;
@@ -184,38 +278,61 @@ pub fn render(
     {
         return Err(RenderError::LimitExceeded);
     }
-    let page_count = tree.len();
-    drop(metadata_doc);
-    let (png, transform) = match &config.backend {
-        #[cfg(feature = "pdfium")]
-        RenderBackend::Pdfium(path) => render_pdfium(
-            bytes, page, path, &geometry, width, height, page_count, config,
-        )?,
-        #[cfg(feature = "hayro")]
-        RenderBackend::Hayro => {
-            render_hayro(bytes, page, &geometry, width, height, page_count, config)?
+    Ok((width, height))
+}
+
+enum Native {
+    #[cfg(feature = "pdfium")]
+    Pdfium(firecrawl_pdfium::PdfDocument),
+    #[cfg(feature = "hayro")]
+    Hayro(hayro::hayro_syntax::Pdf),
+}
+
+impl Native {
+    fn open(bytes: &[u8], page_count: usize, config: &RenderConfig) -> Result<Self, RenderError> {
+        match &config.backend {
+            #[cfg(feature = "pdfium")]
+            RenderBackend::Pdfium(path) => open_pdfium(bytes, path, page_count).map(Self::Pdfium),
+            #[cfg(feature = "hayro")]
+            RenderBackend::Hayro => open_hayro(bytes, page_count).map(Self::Hayro),
+            #[allow(unreachable_patterns)]
+            _ => Err(RenderError::BackendUnavailable),
         }
-        #[allow(unreachable_patterns)]
-        _ => return Err(RenderError::BackendUnavailable),
-    };
-    Ok(RenderedImage {
-        png,
-        width,
-        height,
-        transform,
-        geometry,
-    })
+    }
+
+    fn render(
+        &self,
+        page: u32,
+        geometry: &PageGeometry,
+        width: u32,
+        height: u32,
+        config: &RenderConfig,
+    ) -> Result<(Vec<u8>, ImageTransform), RenderError> {
+        match self {
+            #[cfg(feature = "pdfium")]
+            Self::Pdfium(doc) => render_pdfium(doc, page, geometry, width, height, config),
+            #[cfg(feature = "hayro")]
+            Self::Hayro(doc) => render_hayro(doc, page, geometry, width, height, config),
+        }
+    }
 }
 
 #[cfg(feature = "hayro")]
-#[allow(clippy::too_many_arguments)]
+fn open_hayro(bytes: &[u8], page_count: usize) -> Result<hayro::hayro_syntax::Pdf, RenderError> {
+    let doc = hayro::hayro_syntax::Pdf::new(bytes.to_vec()).map_err(|_| RenderError::InvalidPdf)?;
+    if doc.pages().len() != page_count {
+        return Err(RenderError::UnsupportedGeometry);
+    }
+    Ok(doc)
+}
+
+#[cfg(feature = "hayro")]
 fn render_hayro(
-    bytes: &[u8],
+    doc: &hayro::hayro_syntax::Pdf,
     page: u32,
     geometry: &PageGeometry,
     width: u32,
     height: u32,
-    page_count: usize,
     config: &RenderConfig,
 ) -> Result<(Vec<u8>, ImageTransform), RenderError> {
     use hayro::hayro_interpret::InterpreterSettings;
@@ -229,10 +346,6 @@ fn render_hayro(
     // Vello's target dimensions are u16. Reject rather than truncate.
     let w = u16::try_from(width).map_err(|_| RenderError::LimitExceeded)?;
     let h = u16::try_from(height).map_err(|_| RenderError::LimitExceeded)?;
-    let doc = hayro::hayro_syntax::Pdf::new(bytes.to_vec()).map_err(|_| RenderError::InvalidPdf)?;
-    if doc.pages().len() != page_count {
-        return Err(RenderError::UnsupportedGeometry);
-    }
     let selected = doc
         .pages()
         .get((page - 1) as usize)
@@ -311,20 +424,11 @@ fn render_hayro(
 }
 
 #[cfg(feature = "pdfium")]
-#[allow(clippy::too_many_arguments)]
-fn render_pdfium(
+fn open_pdfium(
     bytes: &[u8],
-    page: u32,
     path: &std::path::Path,
-    geometry: &PageGeometry,
-    width: u32,
-    height: u32,
     page_count: usize,
-    config: &RenderConfig,
-) -> Result<(Vec<u8>, ImageTransform), RenderError> {
-    let bounds = geometry
-        .display_bounds()
-        .map_err(|_| RenderError::UnsupportedGeometry)?;
+) -> Result<firecrawl_pdfium::PdfDocument, RenderError> {
     let library = Pdfium::load_from_path(path).map_err(|error| match error {
         firecrawl_pdfium::Error::AlreadyLoaded { .. } => RenderError::LibraryConflict,
         _ => RenderError::InvalidLibrary,
@@ -335,6 +439,21 @@ fn render_pdfium(
     if doc.page_count() != page_count {
         return Err(RenderError::UnsupportedGeometry);
     }
+    Ok(doc)
+}
+
+#[cfg(feature = "pdfium")]
+fn render_pdfium(
+    doc: &firecrawl_pdfium::PdfDocument,
+    page: u32,
+    geometry: &PageGeometry,
+    width: u32,
+    height: u32,
+    config: &RenderConfig,
+) -> Result<(Vec<u8>, ImageTransform), RenderError> {
+    let bounds = geometry
+        .display_bounds()
+        .map_err(|_| RenderError::UnsupportedGeometry)?;
     let native_page = doc
         .page((page - 1) as usize)
         .map_err(|_| RenderError::NativeFailure)?;
@@ -403,6 +522,7 @@ fn encode_png(pixels: &[u8], width: u32, height: u32, limit: u64) -> Result<Vec<
         let mut encoder = png::Encoder::new(&mut output, width, height);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::Fast);
         let mut writer = encoder
             .write_header()
             .map_err(|_| RenderError::EncodingFailure)?;
@@ -725,5 +845,78 @@ mod tests {
             .unwrap_err(),
             RenderError::UnsupportedGeometry
         );
+    }
+}
+
+#[cfg(all(test, feature = "hayro"))]
+mod document_tests {
+    use super::*;
+
+    fn pdf(sizes: &[(u32, u32)]) -> Vec<u8> {
+        let n = sizes.len();
+        let kids: Vec<_> = (0..n).map(|i| format!("{} 0 R", 3 + i * 2)).collect();
+        let mut objects = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            format!("<< /Type /Pages /Kids [{}] /Count {n} >>", kids.join(" ")),
+        ];
+        for (i, (w, h)) in sizes.iter().enumerate() {
+            objects.push(format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w} {h}] /Contents {} 0 R >>",
+                4 + i * 2
+            ));
+            let content = format!("0 0 1 rg {} {} 40 60 re f", 10 + i * 30, 20 + i * 10);
+            objects.push(format!(
+                "<< /Length {} >>\nstream\n{content}\nendstream",
+                content.len()
+            ));
+        }
+        let mut out = b"%PDF-1.5\n".to_vec();
+        let mut xref = format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1);
+        for (i, body) in objects.iter().enumerate() {
+            xref += &format!("{:010} 00000 n \n", out.len());
+            out.extend(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+        }
+        let start = out.len();
+        out.extend(xref.as_bytes());
+        out.extend(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{start}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        out
+    }
+
+    #[test]
+    fn an_opened_document_renders_each_page_as_render_does() {
+        let bytes = pdf(&[(200, 300), (300, 200), (250, 250)]);
+        let mut config = RenderConfig::hayro();
+        config.pixels_per_point = 1.5;
+        let document = RenderDocument::open(&bytes, &config).unwrap();
+        assert_eq!(document.page_count(), 3);
+        for page in [2, 1, 3, 2] {
+            let once = render(&bytes, page, &config).unwrap();
+            let opened = document.render(page).unwrap();
+            assert_eq!(
+                (opened.png, opened.width, opened.height),
+                (once.png, once.width, once.height)
+            );
+            assert_eq!(
+                format!("{:?}", opened.transform),
+                format!("{:?}", once.transform)
+            );
+        }
+        let mut scaled = config.clone();
+        scaled.pixels_per_point = 0.75;
+        let once = render(&bytes, 3, &scaled).unwrap();
+        let opened = document.render_at(3, 0.75).unwrap();
+        assert_eq!((opened.png, opened.width), (once.png, once.width));
+        for page in [0, 4] {
+            assert_eq!(
+                document.render(page).unwrap_err(),
+                render(&bytes, page, &config).unwrap_err()
+            );
+        }
     }
 }
