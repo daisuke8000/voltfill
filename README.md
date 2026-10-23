@@ -120,6 +120,8 @@ The [independent consumer](tests/foundation-consumer/src/main.rs) uses only the 
 
 ## Documentation
 
+See [Development](docs/development.en.md) for CI checks, dependency audits, secret scanning and workflow security checks.
+
 [Configuration](docs/configuration.en.md) · [HTTP server](docs/server.en.md) · [Development](docs/development.en.md) · [Benchmarks](docs/benchmarks.en.md)
 
 [Architecture and C4](https://daisuke8000.github.io/voltfill/) · [MIT license](LICENSE)
