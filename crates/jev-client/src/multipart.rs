@@ -100,6 +100,8 @@ pub(crate) fn validate_assets(request: &RequestDraft) -> Result<(), Error> {
 
 pub const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+/// Jev's accepted image side lengths in pixels.
+pub const IMAGE_SIDE_PX: std::ops::RangeInclusive<u32> = 280..=1568;
 
 /// Encoded PNG; dimensions are read from its IHDR, never supplied separately.
 /// This checks PNG chunk framing, not full pixel decoding or server acceptance.
@@ -133,6 +135,14 @@ impl PngImage {
         self.dimensions
     }
     pub fn new(part: String, bytes: Vec<u8>) -> Result<Self, Error> {
+        Self::with_sides(part, bytes, IMAGE_SIDE_PX)
+    }
+    /// For a caller whose model accepts other side lengths than Jev's default.
+    pub fn with_sides(
+        part: String,
+        bytes: Vec<u8>,
+        sides: std::ops::RangeInclusive<u32>,
+    ) -> Result<Self, Error> {
         if bytes.len() > MAX_IMAGE_BYTES
             || !safe_name(&part)
             || part == "request"
@@ -164,7 +174,7 @@ impl PngImage {
                     u32::from_be_bytes(chunk[8..12].try_into().map_err(|_| Error::Multipart)?);
                 let height =
                     u32::from_be_bytes(chunk[12..16].try_into().map_err(|_| Error::Multipart)?);
-                if !(280..=1568).contains(&width) || !(280..=1568).contains(&height) {
+                if !sides.contains(&width) || !sides.contains(&height) {
                     return Err(Error::Multipart);
                 }
                 first = false;

@@ -83,7 +83,7 @@ curl --fail-with-body --silent --show-error http://127.0.0.1:3000/v1/extract \
 
 `voltfill-core` は4つすべてに依存し、`pdf-render` は `pdf-probe` にも依存します。基盤から core への依存はなく、`jev-client` は PDF 系にも依存しません。Evidence、抽出フィールド・結果、全体の `Timings` / `UsageSummary`、field/page を付けた `JevResponse` は core が持ちます。PDF 調査は独立した `InspectionTimings` を返します。既存の core の利用パス（`pdf`・`geometry`・`render`・`jev`・`model`・`logging`）は再公開と互換アダプターで維持し、field/page 付き observer API は `voltfill_core::jev::transport` に残します。
 
-default feature はすべて空です。次の例には `pdf-render/hayro` を有効にします。PDFium なら `pdf-render/pdfium` を有効にし、呼び出し元が用意したライブラリの絶対パスを渡します。core は両 feature を転送し、バックエンドの選択と native library の扱いは従来どおりです。ページから作る PNG の各辺は Jev の280〜1568ピクセルに収める必要があります。この例は構築のみで、送信しません。
+default feature はすべて空です。次の例には `pdf-render/hayro` を有効にします。PDFium なら `pdf-render/pdfium` を有効にし、呼び出し元が用意したライブラリの絶対パスを渡します。core は両 feature を転送し、バックエンドの選択と native library の扱いは従来どおりです。`PngImage::new` は PNG の各辺を `multipart::IMAGE_SIDE_PX`（280〜1568ピクセル）で検査します。ライブラリの呼び出し元は、利用モデルが受け付ける範囲を `PngImage::with_sides` に渡せます。CLI・サーバーの画像制限は変わらず、サーバーでの受理を保証するものではありません。この例は構築のみで、送信しません。
 
 独立したプロジェクトからソース checkout を path 依存として指定できます。
 
@@ -116,7 +116,9 @@ fn prepare(pdf: &[u8]) -> Result<jev_client::multipart::Body, Box<dyn std::error
 
 送信には、明示的な許可、呼び出し元が注入した `Secret`、検証済みの上限、`Clock` とともに `transport::execute` または `execute_observed` を使います。`execute_deferred` は、送信枠を確保してからページ画像を作り、作れなかったときは送らずに枠を返します。`RecordingTransport::new(&mut transport, |record| records.push(record))` で包むと、受信本文と機密情報を含まない通信結果を保持できます。sink は解析と observer の前に、エラーや不完全な本文を含む各 send で1回、完了順に呼ばれます。複数の呼び出し・worker で共有するときは sink でリクエストの文脈を付けます。認証情報や HTTP ヘッダーは渡しません。ログ target は互換用の `voltfill_core::jev` を維持し、ログは応答データの代わりにはしません。
 
-[独立した consumer](tests/foundation-consumer/src/main.rs) は PDF と Jev の基盤3 crate（`otel-log` は使わない）と画像だけの合成 PDF を使用します。`python3 tests/run-foundation-consumer.py` で、workspace 外へコピーし、依存グラフと固定済み外部依存のバージョンを確認して、Hayro で無送信の検証を実行し、一時ビルド出力を削除します。native の検証には `--pdfium-library /absolute/path/to/library` を指定します。ライブラリは自動取得しません。OCR は対象外で、抽出レポートは従来どおり評価専用です。
+各試行は送信前に推定入力トークンを予約します。完了後は、報告された使用量を完了後の保持時間（completion gap）の間、毎秒の入力トークン上限に数え続けます。使用量が不明なら予約全量を保持します。保持時間の既定の開始値は2秒です。Jev の HTTP 429 で `completion_gap_backoff`（既定2、1〜16、1なら固定）倍にし、`max_completion_gap_ms`（既定60秒）で制限します。直前のバックオフ期間内の429は1回だけ倍率を適用します。`completion_gap_ms` は1秒以上かつ上限以下、上限は最大600秒に設定できます。費用の会計、使用量が予約を超えた場合の停止、期限は引き続き適用します。
+
+[独立した consumer](tests/foundation-consumer/src/main.rs) は PDF と Jev の基盤3 crate（`otel-log` は使わない）と画像だけの合成 PDF を使用します。`cargo run --locked -p xtask -- foundation-consumer` で、workspace 外へコピーし、依存グラフと固定済み外部依存のバージョンを確認して、Hayro で無送信の検証を実行し、一時ビルド出力を削除します。native の検証には `--pdfium-library /absolute/path/to/library` を指定します。ライブラリは自動取得しません。OCR は対象外で、抽出レポートは従来どおり評価専用です。
 
 ## ドキュメント
 
