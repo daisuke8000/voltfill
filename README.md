@@ -83,6 +83,8 @@ The foundation crates work without an extraction schema or Evidence. Their suppo
 
 `voltfill-core` depends on all four; `pdf-render` also depends on `pdf-probe`. No foundation crate depends on core, and `jev-client` has no PDF dependency. Core owns Evidence, extraction fields/results, aggregate `Timings` / `UsageSummary` and field/page-associated `JevResponse`. PDF inspection returns its own `InspectionTimings`. Existing core paths (`pdf`, `geometry`, `render`, `jev`, `model`, `logging`) remain supported through reexports and compatibility adapters; field/page-scoped observer APIs remain in `voltfill_core::jev::transport`.
 
+Within one extraction, rendering opens a document only when a page needs an uncached image and reuses it across pages. Candidate lookups for a single page use a page index while preserving source order. Rendering budgets, geometry checks and Evidence remain unchanged.
+
 All default feature sets remain empty. Enable `pdf-render/hayro` for this example, or `pdf-render/pdfium` with an explicit caller-supplied library path. Core forwards both features; backend selection and native-library policy are unchanged. `PngImage::new` checks PNG sides against `multipart::IMAGE_SIDE_PX` (280–1568 pixels). Library callers can use `PngImage::with_sides` with the range accepted by their model; this does not change the CLI/server image limits or confirm server acceptance. This prepares a request without sending it:
 
 Use path dependencies on a source checkout from an independent project:

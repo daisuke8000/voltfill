@@ -83,6 +83,8 @@ curl --fail-with-body --silent --show-error http://127.0.0.1:3000/v1/extract \
 
 `voltfill-core` は4つすべてに依存し、`pdf-render` は `pdf-probe` にも依存します。基盤から core への依存はなく、`jev-client` は PDF 系にも依存しません。Evidence、抽出フィールド・結果、全体の `Timings` / `UsageSummary`、field/page を付けた `JevResponse` は core が持ちます。PDF 調査は独立した `InspectionTimings` を返します。既存の core の利用パス（`pdf`・`geometry`・`render`・`jev`・`model`・`logging`）は再公開と互換アダプターで維持し、field/page 付き observer API は `voltfill_core::jev::transport` に残します。
 
+1回の抽出処理では、未キャッシュのページ画像が必要になった時点で描画用の文書を開き、ページ間で再利用します。単一ページの候補検索はページ別の索引を使い、原文の順序を保持します。描画の予算、座標検証、Evidenceの契約は変わりません。
+
 default feature はすべて空です。次の例には `pdf-render/hayro` を有効にします。PDFium なら `pdf-render/pdfium` を有効にし、呼び出し元が用意したライブラリの絶対パスを渡します。core は両 feature を転送し、バックエンドの選択と native library の扱いは従来どおりです。`PngImage::new` は PNG の各辺を `multipart::IMAGE_SIDE_PX`（280〜1568ピクセル）で検査します。ライブラリの呼び出し元は、利用モデルが受け付ける範囲を `PngImage::with_sides` に渡せます。CLI・サーバーの画像制限は変わらず、サーバーでの受理を保証するものではありません。この例は構築のみで、送信しません。
 
 独立したプロジェクトからソース checkout を path 依存として指定できます。

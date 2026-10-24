@@ -532,14 +532,24 @@ fn prepare_batch(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prepare_image(
-    bytes: &[u8],
+#[cfg_attr(
+    not(any(feature = "pdfium", feature = "hayro")),
+    allow(
+        clippy::needless_lifetimes,
+        reason = "renderer borrows the PDF when enabled"
+    )
+)]
+fn prepare_image<'a>(
+    bytes: &'a [u8],
     page: u32,
     geometry: &crate::geometry::PageGeometry,
     options: &ExtractOptions,
     evaluator: &impl Evaluator,
     timings: &mut crate::model::Timings,
     reused: Option<&mut BTreeMap<u32, crate::evaluate::EvaluationImage>>,
+    #[cfg(any(feature = "pdfium", feature = "hayro"))] render_document: &mut Option<
+        crate::render::RenderDocument<'a>,
+    >,
 ) -> Result<PreparedImage, &'static str> {
     let _ = (bytes, options, &timings, &reused);
     let image = if let Some(image) = evaluator.fixture_image(page) {
@@ -557,8 +567,24 @@ fn prepare_image(
                 image.clone()
             } else {
                 timings.render_calls += 1;
-                let image =
-                    crate::render::render(bytes, page, config).map_err(|_| "render_unavailable")?;
+                if render_document.is_none() {
+                    *render_document = Some(
+                        crate::render::RenderDocument::open(bytes, config)
+                            .map_err(|_| "render_unavailable")?,
+                    );
+                }
+                let rendered = render_document
+                    .as_ref()
+                    .ok_or("render_unavailable")?
+                    .render(page);
+                let image = match rendered {
+                    Ok(image) => image,
+                    Err(_) => {
+                        // Preserve a fresh open on the next page after a failure.
+                        *render_document = None;
+                        return Err("render_unavailable");
+                    }
+                };
                 let image = crate::evaluate::EvaluationImage {
                     png: image.png,
                     width: image.width,
@@ -809,6 +835,10 @@ fn evaluate_waves(
         }
     }
     let namespaced = evaluator.supports_batching();
+    // Open only when an admitted page needs a new image; retain one document
+    // across windows, without retaining their raster buffers.
+    #[cfg(any(feature = "pdfium", feature = "hayro"))]
+    let mut render_document = None;
     let mut rest = requested.as_slice();
     while !rest.is_empty() {
         // Every page in a window is rendered and held until the window ends, so pages
@@ -872,6 +902,8 @@ fn evaluate_waves(
                     evaluator,
                     timings,
                     reused_images.as_deref_mut(),
+                    #[cfg(any(feature = "pdfium", feature = "hayro"))]
+                    &mut render_document,
                 );
                 timings.render_ms += image_started.elapsed().as_secs_f64() * 1000.0;
                 images.insert(page, image);
@@ -2221,6 +2253,91 @@ mod tests {
         reuse_run(&bytes, &options, &mut cache);
         let again = reuse_run(&bytes, &options, &mut cache);
         assert!(again.timings.parser_load_calls > 0);
+    }
+
+    #[cfg(feature = "hayro")]
+    #[test]
+    fn multi_page_render_reuse_matches_individually_rendered_images() {
+        let mut pdf = lopdf::Document::load_mem(&pdf_with_text("ALPHA")).unwrap();
+        let first = pdf.get_pages()[&1];
+        let page = pdf.get_object(first).unwrap().as_dict().unwrap().clone();
+        let parent = page.get(b"Parent").unwrap().as_reference().unwrap();
+        let second = pdf.add_object(page.clone());
+        let third = pdf.add_object(page);
+        let pages = pdf.get_object_mut(parent).unwrap().as_dict_mut().unwrap();
+        pages.set(
+            "Kids",
+            vec![lopdf::Object::Reference(first), second.into(), third.into()],
+        );
+        pages.set("Count", 3);
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let mut form =
+            crate::schema::parse(include_bytes!("../../../examples/vision-form.json")).unwrap();
+        form.fields[0].pages = vec![1, 2, 3];
+        let mut config = crate::render::RenderConfig::hayro();
+        config.pixels_per_point = 0.5;
+        let options = ExtractOptions {
+            strategy: Strategy::VisionFirst,
+            render_config: Some(config.clone()),
+            max_concurrency: 1, // Reuse must span multiple evaluation windows.
+            ..Default::default()
+        };
+        let original: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../../../examples/vision-mock.json")).unwrap();
+        let mut answers = serde_json::Map::new();
+        let mut images = serde_json::Map::new();
+        for page in 1..=3 {
+            for question in ["present", "location"] {
+                answers.insert(
+                    format!("reference.{question}.{page}"),
+                    original["answers"][format!("reference.{question}.1")].clone(),
+                );
+            }
+            let image = crate::render::render(&bytes, page, &config).unwrap();
+            images.insert(
+                page.to_string(),
+                json!({
+                    "png": image.png, "width": image.width, "height": image.height,
+                    "transform": image.transform,
+                }),
+            );
+        }
+        let run = |images| {
+            let mut evaluator = evaluate::FixtureEvaluator::from_bytes(
+                &serde_json::to_vec(&json!({
+                    "fixture_kind": "synthetic", "answers": answers, "images": images,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            extract(&bytes, &form, &options, &mut evaluator).unwrap()
+        };
+        let baseline = run(images);
+        let reused = run(serde_json::Map::new());
+        assert_eq!(baseline.timings.render_calls, 0);
+        assert_eq!(reused.timings.render_calls, 3);
+        assert!(!reused.evidence.is_empty());
+        // A scalar field found on several pages remains ambiguous.
+        assert_eq!(reused.fields[0].status, Status::Ambiguous);
+        assert_eq!(
+            serde_json::to_value((
+                &reused.fields,
+                &reused.evidence,
+                &reused.pages,
+                &reused.usage,
+                &reused.jev_responses
+            ))
+            .unwrap(),
+            serde_json::to_value((
+                &baseline.fields,
+                &baseline.evidence,
+                &baseline.pages,
+                &baseline.usage,
+                &baseline.jev_responses
+            ))
+            .unwrap()
+        );
     }
 
     #[cfg(feature = "hayro")]
