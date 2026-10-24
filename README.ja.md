@@ -118,7 +118,7 @@ fn prepare(pdf: &[u8]) -> Result<jev_client::multipart::Body, Box<dyn std::error
 
 各試行は送信前に推定入力トークンを予約します。完了後は、報告された使用量を完了後の保持時間（completion gap）の間、毎秒の入力トークン上限に数え続けます。使用量が不明なら予約全量を保持します。保持時間の既定の開始値は2秒です。Jev の HTTP 429 で `completion_gap_backoff`（既定2、1〜16、1なら固定）倍にし、`max_completion_gap_ms`（既定60秒）で制限します。直前のバックオフ期間内の429は1回だけ倍率を適用します。`completion_gap_ms` は1秒以上かつ上限以下、上限は最大600秒に設定できます。費用の会計、使用量が予約を超えた場合の停止、期限は引き続き適用します。
 
-[独立した consumer](tests/foundation-consumer/src/main.rs) は PDF と Jev の基盤3 crate（`otel-log` は使わない）と画像だけの合成 PDF を使用します。`python3 tests/run-foundation-consumer.py` で、workspace 外へコピーし、依存グラフと固定済み外部依存のバージョンを確認して、Hayro で無送信の検証を実行し、一時ビルド出力を削除します。native の検証には `--pdfium-library /absolute/path/to/library` を指定します。ライブラリは自動取得しません。OCR は対象外で、抽出レポートは従来どおり評価専用です。
+[独立した consumer](tests/foundation-consumer/src/main.rs) は PDF と Jev の基盤3 crate（`otel-log` は使わない）と画像だけの合成 PDF を使用します。`cargo run --locked -p xtask -- foundation-consumer` で、workspace 外へコピーし、依存グラフと固定済み外部依存のバージョンを確認して、Hayro で無送信の検証を実行し、一時ビルド出力を削除します。native の検証には `--pdfium-library /absolute/path/to/library` を指定します。ライブラリは自動取得しません。OCR は対象外で、抽出レポートは従来どおり評価専用です。
 
 ## ドキュメント
 

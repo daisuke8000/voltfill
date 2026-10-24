@@ -1,0 +1,10 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+serde_json.workspace = true
+toml = { version = "=1.1.8", default-features = false, features = ["parse", "serde", "std"] }

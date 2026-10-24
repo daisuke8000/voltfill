@@ -78,18 +78,22 @@ jobs:
         with:
           persist-credentials: false
       - name: Install pinned workflow checkers
+        shell: bash
         env:
           GOBIN: ${{ runner.temp }}/workflow-bin
           GOMODCACHE: ${{ runner.temp }}/workflow-go-mod
           GOCACHE: ${{ runner.temp }}/workflow-go-build
+          CARGO_TARGET_DIR: ${{ runner.temp }}/workflow-rust-target
         run: |
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-          python3 -m venv "$RUNNER_TEMP/workflow-python"
-          "$RUNNER_TEMP/workflow-python/bin/python" -m pip install 'zizmor==1.30.1'
+          toolchain=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)
+          test -n "$toolchain"
+          rustup toolchain install "$toolchain" --profile minimal
+          cargo install zizmor --locked --version 1.30.1 --root "$RUNNER_TEMP/workflow-rust"
       - name: Check workflow syntax and shell scripts
         run: '"$RUNNER_TEMP/workflow-bin/actionlint" -color'
       - name: Check workflow security
-        run: '"$RUNNER_TEMP/workflow-python/bin/zizmor" --offline .github/workflows'
+        run: '"$RUNNER_TEMP/workflow-rust/bin/zizmor" --offline .github/workflows'
   audit:
     name: Dependency vulnerabilities
     runs-on: ubuntu-24.04
