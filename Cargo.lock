@@ -1391,6 +1391,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "lopdf"
+version = "0.46.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d43f64cb8c0d673ff84245a6de9e0172c0cc05dc5dd9d263660b5b4a02b6c4ae"
+dependencies = [
+ "aes",
+ "bitflags 2.13.2",
+ "brotli-decompressor",
+ "cbc",
+ "ecb",
+ "encoding_rs",
+ "flate2",
+ "getrandom 0.4.3",
+ "indexmap",
+ "itoa",
+ "log",
+ "md-5",
+ "nom",
+ "rand 0.10.3",
+ "rangemap",
+ "sha2",
+ "stringprep",
+ "thiserror",
+ "weezl",
+]
+
+[[package]]
 name = "lru-slab"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1581,7 +1608,7 @@ dependencies = [
  "env_logger",
  "include_dir",
  "log",
- "lopdf",
+ "lopdf 0.45.0",
  "once_cell",
  "rayon",
  "regex",
@@ -1595,7 +1622,7 @@ dependencies = [
 name = "pdf-probe"
 version = "0.1.0"
 dependencies = [
- "lopdf",
+ "lopdf 0.46.0",
  "pdf-inspector",
  "serde",
  "sha2",
@@ -2694,7 +2721,7 @@ version = "0.1.0"
 dependencies = [
  "jev-client",
  "log",
- "lopdf",
+ "lopdf 0.46.0",
  "otel-log",
  "pdf-probe",
  "pdf-render",
