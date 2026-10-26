@@ -16,6 +16,62 @@ fn fragment(id: &str, page: u32, text: &str, x: f64) -> SourceFragment {
         quality: Quality::Usable,
     }
 }
+
+#[test]
+fn page_queries_preserve_snapshot_order_limits_and_rectangle_errors() {
+    // Deliberately interleave pages and put IDs out of lexical order.
+    let raw = [
+        fragment("z", 2, "same", 0.),
+        fragment("b", 1, "same", 0.),
+        fragment("a", 2, "same", 20.),
+        fragment("c", 1, "same", 20.),
+    ];
+    let index = CandidateIndex::new(&raw).unwrap();
+    for pages in [vec![], vec![2], vec![9], vec![2, 1], vec![2, 2]] {
+        let expected: Vec<_> = index
+            .candidates()
+            .iter()
+            .filter(|c| pages.contains(&c.page))
+            .collect();
+        assert_eq!(index.scoped(&pages, expected.len()).unwrap(), expected);
+        if !expected.is_empty() {
+            assert!(index.scoped(&pages, expected.len() - 1).is_err());
+        }
+    }
+    for page in [1, 2, 9] {
+        for bbox in [
+            Rect::new(0., 0., 30., 10.).unwrap(),
+            Rect::new(10., 0., 20., 10.).unwrap(), // Edges only: no overlap.
+            Rect::new(5., 0., 25., 10.).unwrap(),  // Partial runs must fail in_box.
+        ] {
+            let expected: Vec<_> = index
+                .candidates()
+                .iter()
+                .filter(|c| {
+                    c.page == page
+                        && bbox.left < c.bbox.right
+                        && c.bbox.left < bbox.right
+                        && bbox.top < c.bbox.bottom
+                        && c.bbox.top < bbox.bottom
+                })
+                .collect();
+            assert_eq!(index.overlapping(page, bbox).unwrap(), expected);
+            if expected.iter().all(|c| bbox.contains(c.bbox)) {
+                assert_eq!(index.in_box(page, bbox).unwrap(), expected);
+            } else {
+                assert!(index.in_box(page, bbox).is_err());
+            }
+        }
+        let invalid = Rect {
+            left: f64::NAN,
+            top: 0.,
+            right: 30.,
+            bottom: 10.,
+        };
+        assert!(index.overlapping(page, invalid).is_err());
+        assert!(index.in_box(page, invalid).is_err());
+    }
+}
 #[test]
 fn identical_values_at_distinct_locations_keep_provenance_and_overflow_is_not_truncation() {
     let raw = [

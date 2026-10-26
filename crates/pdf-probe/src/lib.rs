@@ -199,6 +199,8 @@ pub fn inspect(bytes: &[u8], limits: PdfLimits) -> Result<DocumentSnapshot, PdfE
     }
     timings.positions_ms = elapsed_ms(position_start);
     let document_id = hex(&Sha256::digest(bytes));
+    let mut document_hash = Sha256::new();
+    document_hash.update(document_id.as_bytes());
     let mut fragments = Vec::new();
     for page in &mut pages {
         let Some(geometry) = geometries.get(&page.page) else {
@@ -232,6 +234,8 @@ pub fn inspect(bytes: &[u8], limits: PdfLimits) -> Result<DocumentSnapshot, PdfE
         };
         page.quality = base_quality;
         let first_fragment = fragments.len();
+        let mut page_hash = document_hash.clone();
+        page_hash.update(page.page.to_be_bytes());
         for (item_index, item) in items.into_iter().enumerate() {
             if !matches!(item.item_type, ItemType::Text) || item.text.trim().is_empty() {
                 continue;
@@ -269,9 +273,7 @@ pub fn inspect(bytes: &[u8], limits: PdfLimits) -> Result<DocumentSnapshot, PdfE
             } else if quality == Quality::Unknown && page.quality == Quality::Usable {
                 page.quality = Quality::Unknown;
             }
-            let mut hash = Sha256::new();
-            hash.update(document_id.as_bytes());
-            hash.update(page.page.to_be_bytes());
+            let mut hash = page_hash.clone();
             hash.update((item_index as u64).to_be_bytes());
             fragments.push(SourceFragment {
                 id: hex(&hash.finalize()),
@@ -316,7 +318,13 @@ fn elapsed_ms(start: Instant) -> f64 {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut result = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        result.push(DIGITS[(byte >> 4) as usize] as char);
+        result.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    result
 }
 
 fn suspect_character(c: char) -> bool {

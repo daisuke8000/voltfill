@@ -8,6 +8,7 @@ pub struct CandidateIndex<'a> {
     fragments: BTreeMap<&'a str, &'a SourceFragment>,
     candidates: Vec<Candidate>,
     candidate_positions: BTreeMap<&'a str, usize>,
+    page_positions: BTreeMap<u32, Vec<usize>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -23,6 +24,7 @@ impl<'a> CandidateIndex<'a> {
         let mut by_id = BTreeMap::new();
         let mut candidates = Vec::new();
         let mut candidate_positions = BTreeMap::new();
+        let mut page_positions: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
         for f in fragments {
             if by_id.insert(f.id.as_str(), f).is_some() {
                 return Err(CandidateError::Provenance);
@@ -32,6 +34,10 @@ impl<'a> CandidateIndex<'a> {
             }
             f.bbox.validate().map_err(|_| CandidateError::Provenance)?;
             candidate_positions.insert(f.id.as_str(), candidates.len());
+            page_positions
+                .entry(f.page)
+                .or_default()
+                .push(candidates.len());
             candidates.push(Candidate {
                 id: format!("c_{}", f.id),
                 page: f.page,
@@ -47,6 +53,7 @@ impl<'a> CandidateIndex<'a> {
             fragments: by_id,
             candidates,
             candidate_positions,
+            page_positions,
         })
     }
 
@@ -55,6 +62,13 @@ impl<'a> CandidateIndex<'a> {
     }
 
     pub fn scoped(&self, pages: &[u32], limit: usize) -> Result<Vec<&Candidate>, CandidateError> {
+        if let [page] = pages {
+            let positions = self.page_positions.get(page).map_or(&[][..], Vec::as_slice);
+            if positions.len() > limit {
+                return Err(CandidateError::Limit);
+            }
+            return Ok(positions.iter().map(|&i| &self.candidates[i]).collect());
+        }
         let found: Vec<_> = self
             .candidates
             .iter()
@@ -133,12 +147,10 @@ impl<'a> CandidateIndex<'a> {
     pub fn overlapping(&self, page: u32, bbox: Rect) -> Result<Vec<&Candidate>, CandidateError> {
         bbox.validate().map_err(|_| CandidateError::Provenance)?;
         Ok(self
-            .candidates
-            .iter()
+            .on_page(page)
             .filter(|c| {
                 let r = c.bbox;
-                c.page == page
-                    && bbox.left < r.right
+                bbox.left < r.right
                     && r.left < bbox.right
                     && bbox.top < r.bottom
                     && r.top < bbox.bottom
@@ -153,7 +165,7 @@ impl<'a> CandidateIndex<'a> {
             bbox.left < r.right && r.left < bbox.right && bbox.top < r.bottom && r.top < bbox.bottom
         };
         let mut result = Vec::new();
-        for c in self.candidates.iter().filter(|c| c.page == page) {
+        for c in self.on_page(page) {
             if intersects(c.bbox) {
                 if !bbox.contains(c.bbox) {
                     return Err(CandidateError::Provenance);
@@ -162,5 +174,13 @@ impl<'a> CandidateIndex<'a> {
             }
         }
         Ok(result)
+    }
+
+    fn on_page(&self, page: u32) -> impl Iterator<Item = &Candidate> {
+        self.page_positions
+            .get(&page)
+            .into_iter()
+            .flatten()
+            .map(|&i| &self.candidates[i])
     }
 }
