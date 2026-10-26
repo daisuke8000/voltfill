@@ -1,9 +1,9 @@
 //! Environment defaults for application launchers. Core APIs use explicit values.
-use std::{collections::BTreeMap, io::Read};
-use voltfill_core::{
-    jev::{http::Endpoint, transport::Secret},
-    resources::ResourceLimits,
-};
+use std::collections::BTreeMap;
+use std::path::Path;
+use voltfill_core::jev::http::Endpoint;
+use voltfill_core::jev::transport::Secret;
+use voltfill_core::resources::ResourceLimits;
 
 pub const COMMON: &[(&str, &str)] = &[
     ("--log-level", "VOLTFILL_LOG_LEVEL"),
@@ -35,7 +35,7 @@ pub fn defaults(
 }
 pub fn endpoint() -> Result<Endpoint, &'static str> {
     let value = environment("VOLTFILL_JEV_ENDPOINT")?.ok_or("jev_endpoint_required")?;
-    Endpoint::new(&value).map_err(|_| "invalid_jev_endpoint")
+    Endpoint::try_new(&value).map_err(|_| "invalid_jev_endpoint")
 }
 
 /// Runtime-only credential injection from a value or one explicitly named file.
@@ -65,11 +65,13 @@ pub fn secret(name: &str, file_name: &str) -> Result<Option<Secret>, &'static st
     if value.len() > 8192 {
         return Err("invalid_credential");
     }
-    Secret::new(value)
+    Secret::try_new(value)
         .map(Some)
         .map_err(|_| "invalid_credential")
 }
 fn read_file(path: &std::path::Path, limit: usize) -> Result<Vec<u8>, &'static str> {
+    use std::io::Read;
+
     if !std::fs::metadata(path)
         .map_err(|_| "input_read_failed")?
         .is_file()
@@ -89,12 +91,23 @@ fn read_file(path: &std::path::Path, limit: usize) -> Result<Vec<u8>, &'static s
     }
     Ok(bytes)
 }
+/// Compatibility entry point for callers holding an optional owned path string.
+/// New callers can pass any borrowed path to [`resources_from_path`].
 pub fn resources(
     path: Option<&String>,
     configured: Option<ResourceLimits>,
 ) -> Result<ResourceLimits, &'static str> {
+    resources_from_path(path.map(Path::new), configured)
+}
+
+/// Load an explicitly selected JSON file, otherwise validate configured or default limits.
+/// File size is capped at 64 KiB; configured limits cannot exceed supported ceilings.
+pub fn resources_from_path(
+    path: Option<&Path>,
+    configured: Option<ResourceLimits>,
+) -> Result<ResourceLimits, &'static str> {
     let limits = if let Some(path) = path {
-        let bytes = read_file(std::path::Path::new(path), 64 * 1024)?;
+        let bytes = read_file(path, 64 * 1024)?;
         let value = voltfill_core::jev::json::parse(&bytes, voltfill_core::jev::Limits::default())
             .map_err(|_| "invalid_resource_limits")?;
         serde_json::from_value(value).map_err(|_| "invalid_resource_limits")?

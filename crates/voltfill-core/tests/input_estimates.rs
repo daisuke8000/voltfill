@@ -1,11 +1,13 @@
 use serde_json::json;
-use voltfill_core::jev::{
-    self,
-    planning::{self, ContextLimits},
-};
+use voltfill_core::jev;
+use voltfill_core::jev::planning::{self, ContextLimits};
 
 fn request(value: serde_json::Value) -> jev::Request {
-    jev::parse_request(&serde_json::to_vec(&value).unwrap(), jev::Limits::default()).unwrap()
+    jev::parse_request(
+        &serde_json::to_vec(&value).expect("request fixture must serialize"),
+        jev::Limits::default(),
+    )
+    .expect("estimate fixture must be a valid Jev request")
 }
 
 #[test]
@@ -94,18 +96,23 @@ fn a_measured_byte_ratio_divides_only_the_text_estimate() {
 fn the_byte_ratio_is_read_validated_and_left_out_of_the_default_identity() {
     use voltfill_core::jev::transport::ExecutionConfig;
     let parse = |value: serde_json::Value| serde_json::from_value::<ExecutionConfig>(value);
-    let config = parse(json!({"context":{"text_tokens_per_100_bytes":25}})).unwrap();
+    let config = parse(json!({"context":{"text_tokens_per_100_bytes":25}}))
+        .expect("minimum supported text ratio must deserialize");
     assert_eq!(config.context.text_tokens_per_100_bytes, 25);
     assert!(config.validate().is_ok());
     for value in [0, 24, 101] {
-        let config = parse(json!({"context":{"text_tokens_per_100_bytes":value}})).unwrap();
+        let config = parse(json!({"context":{"text_tokens_per_100_bytes":value}}))
+            .expect("numeric ratios must deserialize before range validation");
         assert!(config.validate().is_err());
     }
     assert!(parse(json!({"context":{"text_tokens_per_100_byte":60}})).is_err());
-    let omitted = serde_json::to_value(ExecutionConfig::default()).unwrap();
-    let explicit =
-        serde_json::to_value(parse(json!({"context":{"text_tokens_per_100_bytes":100}})).unwrap())
-            .unwrap();
+    let omitted = serde_json::to_value(ExecutionConfig::default())
+        .expect("default execution configuration must serialize");
+    let explicit = serde_json::to_value(
+        parse(json!({"context":{"text_tokens_per_100_bytes":100}}))
+            .expect("explicit default text ratio must deserialize"),
+    )
+    .expect("explicit default execution configuration must serialize");
     assert_eq!(omitted, explicit);
     assert!(
         omitted["context"]
@@ -113,7 +120,7 @@ fn the_byte_ratio_is_read_validated_and_left_out_of_the_default_identity() {
             .is_none()
     );
     assert_eq!(
-        serde_json::to_value(&config).unwrap()["context"]["text_tokens_per_100_bytes"],
+        serde_json::to_value(&config).expect("non-default text ratio must serialize")["context"]["text_tokens_per_100_bytes"],
         25
     );
 }

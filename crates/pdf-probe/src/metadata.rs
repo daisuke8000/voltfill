@@ -6,7 +6,7 @@ use std::collections::HashSet;
 pub const MAX_DEPTH: usize = 32;
 pub const MAX_STREAM_BYTES: usize = 1024 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fault {
     MissingObject(ObjectId),
     ReferenceCycle(ObjectId),

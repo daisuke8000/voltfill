@@ -1,24 +1,23 @@
 //! Best-effort extraction from a single bounded source snapshot. All acceptance
 //! profiles here are evaluation policies, never calibrated production claims.
-use crate::{
-    candidates::CandidateIndex,
-    evaluate::{self, EvaluationCall, EvaluationContext, Evaluator},
-    geometry::Rect,
-    jev::{self, Answer, Content, Question, RequestDraft, multipart::PngImage},
-    model::{
-        Candidate, Evidence, ExtractionReport, FieldResult, Quality, Status, Strategy, UsageSummary,
-    },
-    pdf::{self, PdfLimits},
-    schema::{FieldDefinition, FormDefinition, Modality, OutputType, QuestionDefinition, Resolver},
-    validate,
+use crate::candidates::CandidateIndex;
+use crate::evaluate::{self, EvaluationCall, EvaluationContext, Evaluator};
+use crate::geometry::Rect;
+use crate::jev::multipart::PngImage;
+use crate::jev::{self, Answer, Content, Question, RequestDraft};
+use crate::model::{
+    Candidate, Evidence, ExtractionReport, FieldResult, Quality, Status, Strategy, UsageSummary,
 };
+use crate::pdf::{self, PdfLimits};
+use crate::schema::{
+    FieldDefinition, FormDefinition, Modality, OutputType, QuestionDefinition, Resolver,
+};
+use crate::validate;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
-use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
-    time::{Duration, Instant},
-};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::time::{Duration, Instant};
 
+/// Evaluation-only acceptance thresholds; these are not calibrated probabilities.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvaluationProfile {
@@ -29,6 +28,7 @@ pub struct EvaluationProfile {
 impl EvaluationProfile {
     /// Deliberately synthetic thresholds for deterministic fixture exercises.
     /// They are not a validated Jev/PDF quality or confidence calibration.
+    #[must_use]
     pub fn synthetic() -> Self {
         Self {
             min_confidence: 0.99,
@@ -52,6 +52,8 @@ impl EvaluationProfile {
         }
     }
 }
+/// Extraction strategy and resource ceilings shared across fields and batches.
+/// Rendering requires an explicit configuration and an enabled backend feature.
 #[derive(Debug, Clone)]
 pub struct ExtractOptions {
     pub model: String,
@@ -124,6 +126,7 @@ pub enum EngineError {
     },
 }
 impl EngineError {
+    #[must_use]
     pub fn jev_responses(&self) -> &[crate::model::JevResponse] {
         match self {
             Self::WithResponses { jev_responses, .. } => jev_responses,
@@ -171,9 +174,11 @@ impl Default for DocumentCache {
     }
 }
 impl DocumentCache {
+    #[must_use]
     pub fn with_ttl(ttl: Duration) -> Self {
         Self { entry: None, ttl }
     }
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entry.is_none()
     }
@@ -242,6 +247,9 @@ impl DocumentCache {
     }
 }
 
+/// Extract from one PDF snapshot using the supplied evaluator and resource policy.
+/// Reports are evaluation-only. Received attempt bodies are retained in the report
+/// or exposed through [`EngineError::jev_responses`] if extraction fails.
 pub fn extract(
     bytes: &[u8],
     form: &FormDefinition,
@@ -251,6 +259,9 @@ pub fn extract(
     extract_reusing(bytes, form, options, evaluator, None)
 }
 
+/// Extract with optional reuse of source inspection and prepared images.
+/// The cache does not store field answers; evaluation is performed for each call.
+/// Like [`extract`], failure retains received bodies through the returned error.
 pub fn extract_reusing(
     bytes: &[u8],
     form: &FormDefinition,
@@ -301,7 +312,7 @@ fn extract_inner(
         None => (pdf::inspect(bytes, options.pdf_limits)?, BTreeMap::new()),
     };
     let candidate_start = Instant::now();
-    let index = match CandidateIndex::new(&snapshot.fragments) {
+    let index = match CandidateIndex::try_new(&snapshot.fragments) {
         Ok(index) => index,
         Err(_) => {
             if let Some(cache) = cache {
@@ -335,7 +346,7 @@ fn extract_inner(
         - snapshot.timings.render_ms)
         .max(0.0);
     let resolve_started = Instant::now();
-    let fields = form
+    let fields: Vec<FieldResult> = form
         .fields
         .iter()
         .zip(outcomes)
@@ -403,7 +414,8 @@ fn wire_question(
             .scoped(&[page], source.max_candidates)
             .map_err(|_| "candidate_limit_exceeded")?;
         let mut criteria = BTreeMap::new();
-        for candidate in candidates.into_iter().filter(|c| !selected.contains(&c.id)) {
+        let remaining_candidates = candidates.into_iter().filter(|c| !selected.contains(&c.id));
+        for candidate in remaining_candidates {
             criteria.insert(
                 candidate.id.clone(),
                 Content::Text(
@@ -434,19 +446,28 @@ struct PageJob {
     notes: BTreeSet<&'static str>,
     outcome: Option<PageResult>,
 }
+#[derive(Clone, Copy)]
+struct QuestionJob {
+    job: usize,
+    question: usize,
+}
+struct AnswerTarget {
+    job: usize,
+    question_id: String,
+}
 struct PreparedBatch {
     request: jev::Request,
     page: u32,
     field: usize,
     cross_field: bool,
     image: bool,
-    reverse: BTreeMap<String, (usize, String)>,
+    reverse: BTreeMap<String, AnswerTarget>,
 }
 
 // Build at most one request at a time. Oversized groups are split by the caller;
 // an invalid individual question affects its field/page, never unrelated jobs.
 fn prepare_batch(
-    members: &[(usize, usize)],
+    members: &[QuestionJob],
     jobs: &[PageJob],
     form: &FormDefinition,
     index: &CandidateIndex<'_>,
@@ -454,13 +475,13 @@ fn prepare_batch(
     namespaced: bool,
     options: &ExtractOptions,
 ) -> Result<PreparedBatch, &'static str> {
-    let first = &jobs[members[0].0];
-    let modality = form.fields[first.field].questions[members[0].1]
+    let first = &jobs[members[0].job];
+    let modality = form.fields[first.field].questions[members[0].question]
         .input
         .modality;
     let mut questions = BTreeMap::new();
     let mut reverse = BTreeMap::new();
-    for &(job, question) in members {
+    for &QuestionJob { job, question } in members {
         let field = &form.fields[jobs[job].field];
         let q = &field.questions[question];
         let id = if namespaced {
@@ -472,7 +493,13 @@ fn prepare_batch(
             id.clone(),
             wire_question(q, first.page, index, &jobs[job].selected)?,
         );
-        reverse.insert(id, (job, q.id.clone()));
+        reverse.insert(
+            id,
+            AnswerTarget {
+                job,
+                question_id: q.id.clone(),
+            },
+        );
     }
     let mut state = BTreeMap::new();
     let mut assets = BTreeMap::new();
@@ -525,7 +552,7 @@ fn prepare_batch(
         field: first.field,
         cross_field: members
             .iter()
-            .any(|(job, _)| jobs[*job].field != first.field),
+            .any(|member| jobs[member.job].field != first.field),
         image: modality != Modality::Text,
         reverse,
     })
@@ -616,7 +643,8 @@ fn prepare_image<'a>(
     {
         return Err("image_transform_invalid");
     }
-    let png = PngImage::new("image".into(), image.png).map_err(|_| "image_limits_or_encoding")?;
+    let png =
+        PngImage::try_new("image".into(), image.png).map_err(|_| "image_limits_or_encoding")?;
     let (width, height) = png.dimensions();
     if (width, height) != (image.width, image.height) {
         return Err("image_transform_invalid");
@@ -749,7 +777,8 @@ fn settle_complete_jobs(
     options: &ExtractOptions,
     timings: &mut crate::model::Timings,
 ) {
-    for job in jobs.iter_mut().filter(|job| job.outcome.is_none()) {
+    let unfinished_jobs = jobs.iter_mut().filter(|job| job.outcome.is_none());
+    for job in unfinished_jobs {
         let field = &form.fields[job.field];
         if job.answers.len() == field.questions.len() {
             let resolve_started = Instant::now();
@@ -789,7 +818,7 @@ fn evaluate_waves(
     mut reused_images: Option<&mut BTreeMap<u32, crate::evaluate::EvaluationImage>>,
 ) -> Vec<Vec<PageResult>> {
     let mut outcomes: Vec<Vec<PageResult>> = (0..form.fields.len()).map(|_| Vec::new()).collect();
-    let all_pages: BTreeSet<_> = pages.iter().map(|p| p.page).collect();
+    let all_pages: BTreeSet<u32> = pages.iter().map(|p| p.page).collect();
     let selected: Vec<BTreeSet<u32>> = form
         .fields
         .iter()
@@ -818,7 +847,7 @@ fn evaluate_waves(
             selected
         })
         .collect();
-    let requested: Vec<_> = all_pages.iter().copied().collect();
+    let requested: Vec<u32> = all_pages.iter().copied().collect();
     fn exhausted(
         options: &ExtractOptions,
         usage: &UsageSummary,
@@ -910,12 +939,12 @@ fn evaluate_waves(
             }
         }
         loop {
-            let mut ready: BTreeMap<(u32, u8, usize), Vec<(usize, usize)>> = BTreeMap::new();
-            for (job_index, job) in jobs
+            let mut ready: BTreeMap<(u32, u8, usize), Vec<QuestionJob>> = BTreeMap::new();
+            let unfinished_jobs = jobs
                 .iter_mut()
                 .enumerate()
-                .filter(|(_, job)| job.outcome.is_none())
-            {
+                .filter(|(_, job)| job.outcome.is_none());
+            for (job_index, job) in unfinished_jobs {
                 let field = &form.fields[job.field];
                 if let Some(reason) = images.get(&job.page).and_then(|image| image.as_ref().err())
                     && field
@@ -946,10 +975,11 @@ fn evaluate_waves(
                     }
                 }
                 let mut count = 0;
-                for (q_index, q) in field.questions.iter().enumerate().filter(|(_, q)| {
+                let ready_questions = field.questions.iter().enumerate().filter(|(_, q)| {
                     !job.answers.contains_key(&q.id)
                         && q.depends_on.iter().all(|id| job.answers.contains_key(id))
-                }) {
+                });
+                for (q_index, q) in ready_questions {
                     let modality = match q.input.modality {
                         Modality::Text => 0,
                         Modality::Image => 1,
@@ -958,7 +988,10 @@ fn evaluate_waves(
                     ready
                         .entry((job.page, modality, if namespaced { 0 } else { job.field }))
                         .or_default()
-                        .push((job_index, q_index));
+                        .push(QuestionJob {
+                            job: job_index,
+                            question: q_index,
+                        });
                     count += 1;
                 }
                 if count == 0 {
@@ -971,18 +1004,16 @@ fn evaluate_waves(
             if ready.is_empty() {
                 break;
             }
-            let mut pending: VecDeque<Vec<(usize, usize)>> = ready
-                .into_values()
-                .flat_map(|members| {
-                    members
-                        .chunks(options.max_batch_questions)
-                        .map(<[_]>::to_vec)
-                        .collect::<Vec<_>>()
-                })
-                .collect();
+            let mut pending: VecDeque<Vec<QuestionJob>> = VecDeque::new();
+            for members in ready.into_values() {
+                for batch in members.chunks(options.max_batch_questions) {
+                    pending.push_back(batch.to_vec());
+                }
+            }
             while !pending.is_empty() {
                 if let Some(reason) = exhausted(options, usage, started) {
-                    for job in jobs.iter_mut().filter(|job| job.outcome.is_none()) {
+                    let unfinished_jobs = jobs.iter_mut().filter(|job| job.outcome.is_none());
+                    for job in unfinished_jobs {
                         job.outcome = Some(PageResult::pending(Status::Error, reason));
                     }
                     break;
@@ -995,7 +1026,7 @@ fn evaluate_waves(
                     let Some(mut members) = pending.pop_front() else {
                         break;
                     };
-                    members.retain(|(job, _)| jobs[*job].outcome.is_none());
+                    members.retain(|member| jobs[member.job].outcome.is_none());
                     if members.is_empty() {
                         continue;
                     }
@@ -1016,7 +1047,8 @@ fn evaluate_waves(
                                 } else {
                                     Status::Unsupported
                                 };
-                            jobs[members[0].0].outcome = Some(PageResult::pending(status, reason));
+                            jobs[members[0].job].outcome =
+                                Some(PageResult::pending(status, reason));
                         }
                     }
                 }
@@ -1025,7 +1057,8 @@ fn evaluate_waves(
                 }
                 let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 if elapsed >= options.total_deadline_ms {
-                    for job in jobs.iter_mut().filter(|job| job.outcome.is_none()) {
+                    let unfinished_jobs = jobs.iter_mut().filter(|job| job.outcome.is_none());
+                    for job in unfinished_jobs {
                         job.outcome = Some(PageResult::pending(
                             Status::Error,
                             "total_deadline_exceeded",
@@ -1033,7 +1066,7 @@ fn evaluate_waves(
                     }
                     break;
                 }
-                let calls: Vec<_> = prepared
+                let calls: Vec<EvaluationCall<'_>> = prepared
                     .iter()
                     .enumerate()
                     .map(|(position, batch)| EvaluationCall {
@@ -1065,8 +1098,8 @@ fn evaluate_waves(
                 let results = evaluator.evaluate_many(&calls);
                 if results.len() != prepared.len() {
                     for batch in &prepared {
-                        for (job, _) in batch.reverse.values() {
-                            jobs[*job].outcome = Some(PageResult::pending(
+                        for target in batch.reverse.values() {
+                            jobs[target.job].outcome = Some(PageResult::pending(
                                 Status::Error,
                                 "evaluation_result_count_invalid",
                             ));
@@ -1076,7 +1109,8 @@ fn evaluate_waves(
                 }
                 let mut late_jobs = BTreeSet::new();
                 for (batch, result) in prepared.iter().zip(results) {
-                    usage.add(&result.usage);
+                    // Overflow remains in the report and is checked by exhausted().
+                    let _ = usage.add(&result.usage);
                     let late = started.elapsed().as_millis() >= options.total_deadline_ms as u128;
                     let failure = match &result.result {
                         Err(_) if late => Some("total_deadline_exceeded"),
@@ -1085,14 +1119,15 @@ fn evaluate_waves(
                         _ => None,
                     };
                     if let Some(reason) = failure {
-                        for (job, _) in batch.reverse.values() {
-                            jobs[*job].outcome = Some(PageResult::pending(Status::Error, reason));
+                        for target in batch.reverse.values() {
+                            jobs[target.job].outcome =
+                                Some(PageResult::pending(Status::Error, reason));
                         }
                         continue;
                     }
                     let Ok(response) = result.result else {
-                        for (job, _) in batch.reverse.values() {
-                            jobs[*job].outcome =
+                        for target in batch.reverse.values() {
+                            jobs[target.job].outcome =
                                 Some(PageResult::pending(Status::Error, "evaluation_failed"));
                         }
                         continue;
@@ -1103,30 +1138,32 @@ fn evaluate_waves(
                             .keys()
                             .any(|id| !response.answers.contains_key(id))
                     {
-                        for (job, _) in batch.reverse.values() {
-                            jobs[*job].outcome =
+                        for target in batch.reverse.values() {
+                            jobs[target.job].outcome =
                                 Some(PageResult::pending(Status::Error, "answer_id_mismatch"));
                         }
                         continue;
                     }
                     if late {
-                        late_jobs.extend(batch.reverse.values().map(|(job, _)| *job));
+                        late_jobs.extend(batch.reverse.values().map(|target| target.job));
                     }
                     for diagnostic in &response.diagnostics {
                         if let jev::Diagnostic::ProbabilitySumNotOne(id) = diagnostic
-                            && let Some((job, _)) = batch.reverse.get(id)
+                            && let Some(target) = batch.reverse.get(id)
                         {
-                            jobs[*job].notes.insert("probability_sum_not_one");
+                            jobs[target.job].notes.insert("probability_sum_not_one");
                         }
                     }
                     for (id, answer) in response.answers {
-                        let (job, question) = &batch.reverse[&id];
+                        let target = &batch.reverse[&id];
                         match answer {
                             Ok(answer) => {
-                                jobs[*job].answers.insert(question.clone(), answer);
+                                jobs[target.job]
+                                    .answers
+                                    .insert(target.question_id.clone(), answer);
                             }
                             Err(_) => {
-                                jobs[*job].outcome = Some(PageResult::pending(
+                                jobs[target.job].outcome = Some(PageResult::pending(
                                     Status::Error,
                                     "answer_contract_invalid",
                                 ));
@@ -1143,7 +1180,8 @@ fn evaluate_waves(
                     outcome.reason = "total_deadline_exceeded";
                 }
             }
-            for job in jobs.iter_mut().filter(|job| job.outcome.is_none()) {
+            let unfinished_jobs = jobs.iter_mut().filter(|job| job.outcome.is_none());
+            for job in unfinished_jobs {
                 let field = &form.fields[job.field];
                 job.outcome = early_outcome(field, &job.answers, options);
             }
@@ -1155,7 +1193,7 @@ fn evaluate_waves(
             });
             // Preserve every confirmed selection even when a later round fails.
             if !job.selected.is_empty() {
-                let selected: Vec<_> = index
+                let selected: Vec<&Candidate> = index
                     .candidates()
                     .iter()
                     .filter(|c| job.selected.contains(&c.id))
@@ -1585,6 +1623,8 @@ fn combine(
     result
 }
 fn hash(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+
     Sha256::digest(bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -1660,10 +1700,8 @@ fn unique_choice(answer: &Answer) -> bool {
 }
 
 fn run_id() -> String {
-    use std::{
-        sync::atomic::{AtomicU64, Ordering},
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let epoch = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1679,10 +1717,8 @@ fn run_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        geometry::{PageGeometry, Rotation},
-        model::{PageDiagnostic, SourceFragment, Timings},
-    };
+    use crate::geometry::{PageGeometry, Rotation};
+    use crate::model::{PageDiagnostic, SourceFragment, Timings};
     use serde_json::json;
 
     struct Script {
@@ -1704,8 +1740,10 @@ mod tests {
             _: &[PngImage],
             _context: &EvaluationContext<'_>,
         ) -> Result<jev::Response, evaluate::EvaluationError> {
-            self.requests
-                .push(serde_json::from_slice(request.bytes()).unwrap());
+            self.requests.push(
+                serde_json::from_slice(request.bytes())
+                    .expect("the engine must submit a validated JSON request"),
+            );
             let (choice, tied) = self.steps.pop_front().expect("unexpected request")?;
             let choice = if let Some(choice) = choice.strip_prefix("late:") {
                 std::thread::sleep(std::time::Duration::from_millis(_context.remaining_ms + 1));
@@ -1771,7 +1809,7 @@ mod tests {
             "id":"matches","label":"Matches","output_type":"string_array","pages":[1],
             "questions":[{"id":"pick","type":"choice","instructions":"Return every matching source run; choose one remaining match or none.","input":{"modality":"text"},"candidate_source":{"kind":"text_spans","none_option":"No remaining match"}}],
             "resolver":{"kind":"selected_candidates","question_id":"pick","max_selections":cap}
-        }]})).unwrap()).unwrap()
+        }]})).expect("the array-selection form must serialize as JSON")).expect("the array-selection form satisfies the schema")
     }
     fn run(
         form: &FormDefinition,
@@ -1793,18 +1831,22 @@ mod tests {
                     page,
                     item_index: i,
                     raw_text: if i < 3 { text } else { "other" }.into(),
-                    bbox: Rect::new(0.0, i as f64 * 10.0, 50.0, i as f64 * 10.0 + 5.0).unwrap(),
+                    bbox: Rect::try_new(0.0, i as f64 * 10.0, 50.0, i as f64 * 10.0 + 5.0)
+                        .expect("generated source rows have finite positive rectangles"),
                     quality: Quality::Usable,
                 })
             })
             .collect();
-        let index = CandidateIndex::new(&fragments).unwrap();
-        let bounds = Rect::new(0.0, 0.0, 100.0, 100.0).unwrap();
+        let index = CandidateIndex::try_new(&fragments)
+            .expect("generated source IDs and geometry must form a candidate index");
+        let bounds =
+            Rect::try_new(0.0, 0.0, 100.0, 100.0).expect("the square page bounds must be valid");
         let geometries = (1..=2)
             .map(|page| {
                 (
                     page,
-                    PageGeometry::new(bounds, bounds, Rotation::Deg0, 1.0).unwrap(),
+                    PageGeometry::try_new(bounds, bounds, Rotation::Deg0, 1.0)
+                        .expect("matching media and crop boxes with unit scale must validate"),
                 )
             })
             .collect();
@@ -1836,7 +1878,7 @@ mod tests {
             None,
         );
         let mut evidence = Vec::new();
-        let fields = form
+        let fields: Vec<FieldResult> = form
             .fields
             .iter()
             .zip(outcomes)
@@ -1861,7 +1903,10 @@ mod tests {
         assert_eq!(
             evidence
                 .iter()
-                .map(|e| e.candidate_id.as_deref().unwrap())
+                .map(|e| e
+                    .candidate_id
+                    .as_deref()
+                    .expect("candidate-derived evidence must retain its candidate ID"))
                 .collect::<Vec<_>>(),
             ["c_p1r1", "c_p1r2"]
         );
@@ -2050,7 +2095,10 @@ mod tests {
         let (fields, evidence, usage, script) = run(&form, &options, vec![Ok(("c_p1r1", false))]);
         assert_eq!(usage.attempts, 1);
         assert_eq!(
-            script.requests[0]["questions"].as_object().unwrap().len(),
+            script.requests[0]["questions"]
+                .as_object()
+                .expect("the batched request must contain a questions object")
+                .len(),
             2
         );
         assert!(fields.iter().all(|f| f.status == Status::Error
@@ -2065,7 +2113,7 @@ mod tests {
             "id":"boxed","label":"Boxed","output_type":"string","pages":[1,2],
             "questions":[{"id":"box","type":"box","instructions":"Locate the value","input":{"modality":"image"}},{"id":"present","type":"noul","instructions":"Is it present?","input":{"modality":"image"}}],
             "resolver":{"kind":"text_in_box","question_id":"box","presence_question_id":"present"}
-        }]})).unwrap()).unwrap();
+        }]})).expect("the box-and-presence form must serialize as JSON")).expect("the box-and-presence form satisfies the schema");
         form.fields.append(&mut boxed.fields);
         let options = ExtractOptions {
             max_requests: 1,
@@ -2107,11 +2155,8 @@ mod tests {
     }
 
     fn pdf_with_text(text: &str) -> Vec<u8> {
-        use lopdf::{
-            Document, Object, Stream,
-            content::{Content, Operation},
-            dictionary,
-        };
+        use lopdf::content::{Content, Operation};
+        use lopdf::{Document, Object, Stream, dictionary};
         let mut doc = Document::with_version("1.5");
         let pages_id = doc.new_object_id();
         // Type3 glyphs need no font file, which renderers refuse to substitute.
@@ -2165,7 +2210,12 @@ mod tests {
                 Operation::new("ET", vec![]),
             ],
         };
-        let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+        let content_id = doc.add_object(Stream::new(
+            dictionary! {},
+            content
+                .encode()
+                .expect("synthetic PDF text operations must encode"),
+        ));
         let page_id = doc.add_object(dictionary! {
             "Type" => "Page", "Parent" => pages_id, "Contents" => content_id,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
@@ -2180,11 +2230,13 @@ mod tests {
         let catalog_id = doc.add_object(dictionary! {"Type" => "Catalog", "Pages" => pages_id});
         doc.trailer.set("Root", catalog_id);
         let mut bytes = Vec::new();
-        doc.save_to(&mut bytes).unwrap();
+        doc.save_to(&mut bytes)
+            .expect("the synthetic PDF must serialize into memory");
         bytes
     }
     fn reuse_form() -> FormDefinition {
-        crate::schema::parse(include_bytes!("../../../examples/text-form.json")).unwrap()
+        crate::schema::parse(include_bytes!("../../../examples/text-form.json"))
+            .expect("the checked-in text form satisfies the schema")
     }
     fn reuse_run(
         bytes: &[u8],
@@ -2194,8 +2246,9 @@ mod tests {
         let mut evaluator = evaluate::FixtureEvaluator::from_bytes(include_bytes!(
             "../../../examples/text-mock.json"
         ))
-        .unwrap();
-        extract_reusing(bytes, &reuse_form(), options, &mut evaluator, Some(cache)).unwrap()
+        .expect("the checked-in text mock initializes the fixture evaluator");
+        extract_reusing(bytes, &reuse_form(), options, &mut evaluator, Some(cache))
+            .expect("the synthetic PDF must extract with document reuse")
     }
 
     #[test]
@@ -2208,8 +2261,10 @@ mod tests {
         assert!(first.timings.parser_load_calls > 0);
         assert_eq!(second.timings.parser_load_calls, 0);
         assert_eq!(
-            serde_json::to_value(&first.fields).unwrap(),
-            serde_json::to_value(&second.fields).unwrap()
+            serde_json::to_value(&first.fields)
+                .expect("the first extraction fields must serialize as JSON"),
+            serde_json::to_value(&second.fields)
+                .expect("the repeated extraction fields must serialize as JSON")
         );
         assert_eq!(first.document_id, second.document_id);
         assert_eq!(first.fields[0].status, Status::Extracted);
@@ -2258,22 +2313,37 @@ mod tests {
     #[cfg(feature = "hayro")]
     #[test]
     fn multi_page_render_reuse_matches_individually_rendered_images() {
-        let mut pdf = lopdf::Document::load_mem(&pdf_with_text("ALPHA")).unwrap();
+        let mut pdf = lopdf::Document::load_mem(&pdf_with_text("ALPHA"))
+            .expect("the generated PDF must load for adding duplicate pages");
         let first = pdf.get_pages()[&1];
-        let page = pdf.get_object(first).unwrap().as_dict().unwrap().clone();
-        let parent = page.get(b"Parent").unwrap().as_reference().unwrap();
+        let page = pdf
+            .get_object(first)
+            .expect("the first page reference must resolve")
+            .as_dict()
+            .expect("the first page object must be a dictionary")
+            .clone();
+        let parent = page
+            .get(b"Parent")
+            .expect("the generated page must contain a parent")
+            .as_reference()
+            .expect("the page parent must be an indirect reference");
         let second = pdf.add_object(page.clone());
         let third = pdf.add_object(page);
-        let pages = pdf.get_object_mut(parent).unwrap().as_dict_mut().unwrap();
+        let pages = pdf
+            .get_object_mut(parent)
+            .expect("the parent page-tree object must resolve")
+            .as_dict_mut()
+            .expect("the parent page-tree object must be a dictionary");
         pages.set(
             "Kids",
             vec![lopdf::Object::Reference(first), second.into(), third.into()],
         );
         pages.set("Count", 3);
         let mut bytes = Vec::new();
-        pdf.save_to(&mut bytes).unwrap();
-        let mut form =
-            crate::schema::parse(include_bytes!("../../../examples/vision-form.json")).unwrap();
+        pdf.save_to(&mut bytes)
+            .expect("the three-page PDF must serialize into memory");
+        let mut form = crate::schema::parse(include_bytes!("../../../examples/vision-form.json"))
+            .expect("the checked-in vision form satisfies the schema");
         form.fields[0].pages = vec![1, 2, 3];
         let mut config = crate::render::RenderConfig::hayro();
         config.pixels_per_point = 0.5;
@@ -2284,7 +2354,8 @@ mod tests {
             ..Default::default()
         };
         let original: serde_json::Value =
-            serde_json::from_slice(include_bytes!("../../../examples/vision-mock.json")).unwrap();
+            serde_json::from_slice(include_bytes!("../../../examples/vision-mock.json"))
+                .expect("the checked-in vision mock must be JSON");
         let mut answers = serde_json::Map::new();
         let mut images = serde_json::Map::new();
         for page in 1..=3 {
@@ -2294,7 +2365,8 @@ mod tests {
                     original["answers"][format!("reference.{question}.1")].clone(),
                 );
             }
-            let image = crate::render::render(&bytes, page, &config).unwrap();
+            let image = crate::render::render(&bytes, page, &config)
+                .expect("each generated page must render independently with hayro");
             images.insert(
                 page.to_string(),
                 json!({
@@ -2308,10 +2380,11 @@ mod tests {
                 &serde_json::to_vec(&json!({
                     "fixture_kind": "synthetic", "answers": answers, "images": images,
                 }))
-                .unwrap(),
+                .expect("the per-page image fixture must serialize as JSON"),
             )
-            .unwrap();
-            extract(&bytes, &form, &options, &mut evaluator).unwrap()
+            .expect("the per-page image fixture must initialize the evaluator");
+            extract(&bytes, &form, &options, &mut evaluator)
+                .expect("the generated multi-page PDF must extract with the image fixture")
         };
         let baseline = run(images);
         let reused = run(serde_json::Map::new());
@@ -2328,7 +2401,7 @@ mod tests {
                 &reused.usage,
                 &reused.jev_responses
             ))
-            .unwrap(),
+            .expect("the reused report contracts must serialize as JSON"),
             serde_json::to_value((
                 &baseline.fields,
                 &baseline.evidence,
@@ -2336,7 +2409,7 @@ mod tests {
                 &baseline.usage,
                 &baseline.jev_responses
             ))
-            .unwrap()
+            .expect("the baseline report contracts must serialize as JSON")
         );
     }
 
@@ -2344,14 +2417,15 @@ mod tests {
     #[test]
     fn rendered_pages_are_reused_and_a_different_render_config_renders_again() {
         let bytes = pdf_with_text("ALPHA");
-        let form =
-            crate::schema::parse(include_bytes!("../../../examples/vision-form.json")).unwrap();
+        let form = crate::schema::parse(include_bytes!("../../../examples/vision-form.json"))
+            .expect("the checked-in vision form satisfies the schema");
         let run = |options: &ExtractOptions, cache: Option<&mut DocumentCache>| {
             let mut evaluator = evaluate::FixtureEvaluator::from_bytes(include_bytes!(
                 "../../../examples/vision-mock.json"
             ))
-            .unwrap();
-            extract_reusing(&bytes, &form, options, &mut evaluator, cache).unwrap()
+            .expect("the checked-in vision mock initializes the evaluator");
+            extract_reusing(&bytes, &form, options, &mut evaluator, cache)
+                .expect("the rendered extraction must succeed with optional document reuse")
         };
         let options = |pixels_per_point| {
             let mut config = crate::render::RenderConfig::hayro();
@@ -2393,7 +2467,10 @@ mod tests {
                     serde_json::to_value(&plain.pages),
                 ),
             ] {
-                assert_eq!(a.unwrap(), b.unwrap());
+                assert_eq!(
+                    a.expect("the reused report component must serialize as JSON"),
+                    b.expect("the uncached report component must serialize as JSON")
+                );
             }
         }
         let rescaled = run(&options(0.75), Some(&mut cache));
@@ -2427,7 +2504,10 @@ mod cache_key_compatibility {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures")
             .join(name);
-        let expected: Vec<String> = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let expected: Vec<String> = serde_json::from_slice(
+            &std::fs::read(path).expect("read the checked-in document-cache key baseline"),
+        )
+        .expect("the document-cache key baseline must be a JSON string array");
         assert_eq!(keys, expected);
     }
 }

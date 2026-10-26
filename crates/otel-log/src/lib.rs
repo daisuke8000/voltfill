@@ -1,24 +1,17 @@
 //! OpenTelemetry SDK logs. Local output uses the official OTLP JSON mapping.
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
-use opentelemetry::{
-    InstrumentationScope,
-    logs::{AnyValue, LogRecord, Logger, LoggerProvider, Severity},
-};
-use opentelemetry_proto::{
-    tonic::{collector::logs::v1::ExportLogsServiceRequest, logs::v1::ResourceLogs},
-    transform::common::tonic::ResourceAttributesWithSchema,
-};
+use opentelemetry::InstrumentationScope;
+use opentelemetry::logs::{AnyValue, LogRecord, Logger, LoggerProvider, Severity};
+use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+use opentelemetry_proto::tonic::logs::v1::ResourceLogs;
+use opentelemetry_proto::transform::common::tonic::ResourceAttributesWithSchema;
 pub use opentelemetry_sdk;
-use opentelemetry_sdk::{
-    Resource,
-    logs::{LogProcessor, SdkLogRecord, SdkLogger, SdkLoggerProvider},
-};
+use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::logs::{LogProcessor, SdkLogRecord, SdkLogger, SdkLoggerProvider};
 use serde_json::Value;
-use std::{
-    io::Write,
-    sync::Mutex,
-    time::{Duration, SystemTime},
-};
+use std::io::Write;
+use std::sync::Mutex;
+use std::time::{Duration, SystemTime};
 
 struct JsonProcessor {
     writer: Mutex<Box<dyn Write + Send>>,
@@ -68,6 +61,7 @@ pub struct TelemetryLogger {
 impl TelemetryLogger {
     /// Emits records whose `log` target is one of `targets` or a module under it,
     /// under the instrumentation scope `scope`; every other record is dropped.
+    #[must_use]
     pub fn new(
         service: &'static str,
         scope: &'static str,
@@ -85,6 +79,7 @@ impl TelemetryLogger {
         Self::with_provider(provider, scope, targets, level)
     }
     /// Supply a provider with an OTLP exporter to integrate a collector.
+    #[must_use]
     pub fn with_provider(
         provider: SdkLoggerProvider,
         scope: &'static str,
@@ -175,16 +170,19 @@ fn any_value(value: Value) -> Option<AnyValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opentelemetry::{
-        Context,
-        trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState},
+    use opentelemetry::Context;
+    use opentelemetry::trace::{
+        SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState,
     };
     use std::sync::Arc;
     #[derive(Clone)]
     struct Capture(Arc<Mutex<Vec<u8>>>);
     impl Write for Capture {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
+            self.0
+                .lock()
+                .expect("the test capture writer must not have panicked")
+                .extend_from_slice(bytes);
             Ok(bytes.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
@@ -220,8 +218,11 @@ mod tests {
                 .build(),
         );
         logger.flush();
-        let bytes = bytes.lock().unwrap();
-        let request: ExportLogsServiceRequest = serde_json::from_slice(&bytes).unwrap();
+        let bytes = bytes
+            .lock()
+            .expect("the test capture writer must not have panicked");
+        let request: ExportLogsServiceRequest = serde_json::from_slice(&bytes)
+            .expect("logger output must deserialize as an OTLP export request");
         let record = &request.resource_logs[0].scope_logs[0].log_records[0];
         assert_eq!(record.severity_number, 9);
         assert!(
@@ -229,13 +230,14 @@ mod tests {
         );
         assert_eq!(record.trace_id, 123u128.to_be_bytes());
         assert_eq!(record.span_id, 456u64.to_be_bytes());
-        let json: Value = serde_json::from_slice(&bytes).unwrap();
+        let json: Value =
+            serde_json::from_slice(&bytes).expect("logger output must also be valid JSON");
         let record = &json["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0];
         assert_eq!(record["traceId"], "0000000000000000000000000000007b");
         assert!(
             record["body"]["kvlistValue"]["values"]
                 .as_array()
-                .unwrap()
+                .expect("an OTLP map body must contain a values array")
                 .iter()
                 .any(|p| p["key"] == "count" && p["value"]["intValue"] == "7")
         );

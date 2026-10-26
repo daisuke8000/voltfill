@@ -1,17 +1,16 @@
-use crate::{
-    geometry::Rect,
-    model::{Candidate, Evidence, Quality, SourceFragment, SourceSpan, Strategy},
-};
+use crate::geometry::Rect;
+use crate::model::{Candidate, Evidence, Quality, SourceFragment, SourceSpan, Strategy};
 use std::collections::BTreeMap;
 
-pub struct CandidateIndex<'a> {
-    fragments: BTreeMap<&'a str, &'a SourceFragment>,
+/// Borrows a source snapshot and indexes usable runs without changing their order or text.
+pub struct CandidateIndex<'source> {
+    fragments: BTreeMap<&'source str, &'source SourceFragment>,
     candidates: Vec<Candidate>,
-    candidate_positions: BTreeMap<&'a str, usize>,
+    candidate_positions: BTreeMap<&'source str, usize>,
     page_positions: BTreeMap<u32, Vec<usize>>,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, Copy, thiserror::Error)]
 pub enum CandidateError {
     #[error("candidate provenance is invalid")]
     Provenance,
@@ -19,8 +18,15 @@ pub enum CandidateError {
     Limit,
 }
 
-impl<'a> CandidateIndex<'a> {
-    pub fn new(fragments: &'a [SourceFragment]) -> Result<Self, CandidateError> {
+impl<'source> CandidateIndex<'source> {
+    /// Reject duplicate source IDs and invalid geometry on usable, nonempty runs.
+    /// Compatibility name for [`Self::try_new`].
+    pub fn new(fragments: &'source [SourceFragment]) -> Result<Self, CandidateError> {
+        Self::try_new(fragments)
+    }
+
+    /// Index usable source runs after validating IDs and geometry.
+    pub fn try_new(fragments: &'source [SourceFragment]) -> Result<Self, CandidateError> {
         let mut by_id = BTreeMap::new();
         let mut candidates = Vec::new();
         let mut candidate_positions = BTreeMap::new();
@@ -57,10 +63,13 @@ impl<'a> CandidateIndex<'a> {
         })
     }
 
+    #[must_use]
     pub fn candidates(&self) -> &[Candidate] {
         &self.candidates
     }
 
+    /// Select requested pages in source order, rejecting results larger than `limit`.
+    /// An empty page slice selects no candidates.
     pub fn scoped(&self, pages: &[u32], limit: usize) -> Result<Vec<&Candidate>, CandidateError> {
         if let [page] = pages {
             let positions = self.page_positions.get(page).map_or(&[][..], Vec::as_slice);
@@ -81,7 +90,8 @@ impl<'a> CandidateIndex<'a> {
         Ok(found)
     }
 
-    pub fn raw_fragments(&self, spans: &[SourceSpan]) -> Result<Vec<&'a str>, CandidateError> {
+    /// Borrow exact UTF-8 slices, rejecting missing, empty, or invalid source spans.
+    pub fn raw_fragments(&self, spans: &[SourceSpan]) -> Result<Vec<&'source str>, CandidateError> {
         spans
             .iter()
             .map(|s| {
@@ -98,6 +108,7 @@ impl<'a> CandidateIndex<'a> {
         Ok(self.raw_fragments(&candidate.spans)?.join("\n"))
     }
 
+    /// Create provenance only for an unchanged candidate from this index.
     pub fn evidence(
         &self,
         candidate: &Candidate,

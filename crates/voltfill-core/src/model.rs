@@ -22,6 +22,7 @@ pub enum Strategy {
 
 pub use pdf_probe::{Quality, SourceFragment};
 
+/// Byte offsets into one original source fragment; offsets must lie on UTF-8 boundaries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SourceSpan {
     pub fragment_id: String,
@@ -37,6 +38,8 @@ pub struct Candidate {
     pub bbox: Rect,
 }
 
+/// Source provenance for a field answer, retaining exact text slices and geometry.
+/// Image transforms describe the actual rendering path when an image was used.
 #[derive(Debug, Clone, Serialize)]
 pub struct Evidence {
     pub id: String,
@@ -53,6 +56,7 @@ pub struct Evidence {
     pub image_transform: Option<ImageTransform>,
 }
 
+/// Resolved field output; inspect status and reason codes even when a value is present.
 #[derive(Debug, Serialize)]
 pub struct FieldResult {
     pub field_id: String,
@@ -104,6 +108,9 @@ pub struct UsageSummary {
     pub totals_overflowed: bool,
 }
 impl UsageSummary {
+    /// Merge totals with saturation; return false if either summary has overflowed.
+    /// The overflow flag remains set even when the caller defers handling it.
+    #[must_use]
     pub fn add(&mut self, other: &Self) -> bool {
         macro_rules! add {
             ($field:ident) => {
@@ -141,6 +148,8 @@ pub struct JevResponse {
     pub body_complete: bool,
 }
 
+/// Evaluation-only output with original Evidence and every retained Jev attempt body.
+/// Confidence thresholds are evaluation settings, not calibrated correctness probabilities.
 #[derive(Debug, Serialize)]
 pub struct ExtractionReport {
     pub run_id: String,

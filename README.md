@@ -38,7 +38,7 @@ Text-first is the default; use `--strategy hybrid` for Hybrid. See `voltfill --h
 
 | Strategy | Behavior | Schema |
 |---|---|---|
-| `text` | Selects candidates from source text | [Text](examples/text-form.json) / [Multiple matches](examples/text-multi-form.json) |
+| `text` | Selects candidates from source text | [Text](examples/text-form.json) |
 | `vision` | Maps image Boxes to source text | [Vision](examples/vision-form.json) |
 | `hybrid` | Compares text candidates and Boxes | [Hybrid](examples/hybrid-form.json) |
 
@@ -85,7 +85,7 @@ The foundation crates work without an extraction schema or Evidence. Their suppo
 
 Within one extraction, rendering opens a document only when a page needs an uncached image and reuses it across pages. Candidate lookups for a single page use a page index while preserving source order. Rendering budgets, geometry checks and Evidence remain unchanged.
 
-All default feature sets remain empty. Enable `pdf-render/hayro` for this example, or `pdf-render/pdfium` with an explicit caller-supplied library path. Core forwards both features; backend selection and native-library policy are unchanged. `PngImage::new` checks PNG sides against `multipart::IMAGE_SIDE_PX` (280–1568 pixels). Library callers can use `PngImage::with_sides` with the range accepted by their model; this does not change the CLI/server image limits or confirm server acceptance. This prepares a request without sending it:
+All default feature sets remain empty. Enable `pdf-render/hayro` for this example, or `pdf-render/pdfium` with an explicit caller-supplied library path. Core forwards both features; backend selection and native-library policy are unchanged. `PngImage::try_new` checks PNG sides against `multipart::IMAGE_SIDE_PX` (280–1568 pixels). Library callers can use `PngImage::with_sides` with the range accepted by their model; this does not change the CLI/server image limits or confirm server acceptance. This prepares a request without sending it:
 
 Use path dependencies on a source checkout from an independent project:
 
@@ -98,13 +98,13 @@ jev-client = { path = "/path/to/voltfill/crates/jev-client" }
 
 ```rust
 use std::collections::BTreeMap;
-use jev_client::{Asset, Content, Limits, PngImage, Question, RequestDraft, build_request};
+use jev_client::{Asset, Content, Limits, PngImage, Question, RequestDraft};
 
 fn prepare(pdf: &[u8]) -> Result<jev_client::multipart::Body, Box<dyn std::error::Error>> {
     let doc = pdf_probe::inspect(pdf, pdf_probe::PdfLimits::default())?;
     let image = pdf_render::render(pdf, doc.pages[0].page, &pdf_render::RenderConfig::hayro())?;
-    let png = PngImage::new("page".into(), image.png)?;
-    let request = build_request(RequestDraft {
+    let png = PngImage::try_new("page".into(), image.png)?;
+    let request = jev_client::build_request(RequestDraft {
         model: "jev-1.14.0".into(),
         state: Content::Text("Inspect <page>".into()),
         questions: BTreeMap::from([("visible".into(), Question::Noul {
@@ -119,8 +119,6 @@ fn prepare(pdf: &[u8]) -> Result<jev_client::multipart::Body, Box<dyn std::error
 For transmission, use `transport::execute` or `execute_observed` (or `execute_deferred`, which makes the page images only once an admitted slot is held and returns the slot unsent if they cannot be made) with explicit permission, a caller-injected `Secret`, validated limits and a `Clock`. Wrap the transport with `RecordingTransport::new(&mut transport, |record| records.push(record))` to retain received bodies and safe outcome metadata. The sink runs once per send, in completion order, before parsing and observer callbacks, including errors and incomplete bodies. Attach request context in the sink when sharing it across calls/workers. It receives no authentication data or HTTP headers. Logs retain the compatible `voltfill_core::jev` target and do not replace response data.
 
 Each attempt reserves estimated input tokens before sending. After completion, the per-second input-token limit holds reported usage for the completion gap, or the full reservation when usage is unavailable. The gap starts at 2 seconds by default. Jev HTTP 429 responses multiply it by `completion_gap_backoff` (default 2, range 1–16; 1 keeps it fixed), capped by `max_completion_gap_ms` (default 60 seconds). Responses within the previous backoff window increase it only once. `completion_gap_ms` must be at least 1 second and no greater than the cap; the cap may be raised to 600 seconds. Cost accounting, stop-on-over-reservation checks and deadlines still apply.
-
-The [independent consumer](tests/foundation-consumer/src/main.rs) uses only the three PDF and Jev foundations (not `otel-log`) and an image-only synthetic PDF. Run `cargo run --locked -p xtask -- foundation-consumer`; it copies the consumer outside this workspace, checks the dependency graph and locked external versions, runs Hayro without sending, then removes temporary build output. For native verification use `--pdfium-library /absolute/path/to/library`; no library is downloaded. OCR is unsupported. Extraction reports remain evaluation-only.
 
 ## Documentation
 

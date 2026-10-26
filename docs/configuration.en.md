@@ -8,10 +8,10 @@ English · [日本語](configuration.md) · [README](../README.md)
 
 ```sh
 voltfill run --config examples/voltfill.yaml
-voltfill serve --config examples/voltfill.toml
+voltfill serve --config examples/voltfill.yaml
 ```
 
-Use the [YAML](../examples/voltfill.yaml), [TOML](../examples/voltfill.toml) or [JSON](../examples/voltfill.json) examples. They use fixed answers without Jev access; place `input.pdf` beside the file or override it on the CLI.
+The [YAML example](../examples/voltfill.yaml) uses fixed answers without Jev access. Place `input.pdf` beside it or override it on the CLI. TOML and JSON are also supported.
 
 Precedence: **CLI → selected file → environment → defaults**. `VOLTFILL_CONFIG` selects the file when `--config` is omitted. File paths are relative to the configuration directory; CLI/environment paths use the working directory.
 

@@ -1,10 +1,9 @@
-use std::{cell::Cell, rc::Rc};
-use voltfill_core::jev::{
-    self,
-    transport::{
-        AttemptBudget, Clock, ExecutionConfig, Failure, HttpRequest, HttpResponse, NoopObserver,
-        Policy, Secret, Transport, TransportError, execute_observed,
-    },
+use std::cell::Cell;
+use std::rc::Rc;
+use voltfill_core::jev;
+use voltfill_core::jev::transport::{
+    self, AttemptBudget, Clock, ExecutionConfig, Failure, HttpRequest, HttpResponse, NoopObserver,
+    Policy, Secret, Transport, TransportError,
 };
 
 #[derive(Clone, Default)]
@@ -50,15 +49,16 @@ fn run(policy: Policy, retry_after: Option<u64>) -> (Vec<u64>, Result<jev::Respo
         br#"{"model":"jev-1.14.0","state":"synthetic","questions":{"q":{"type":"noul","instructions":"Present?"}}}"#,
         jev::Limits::default(),
     )
-    .unwrap();
+    .expect("the synthetic noul request satisfies the wire contract");
     let mut clock = TestClock::default();
     let mut wire = Responses {
         clock: clock.clone(),
         starts: Vec::new(),
         retry_after,
     };
-    let secret = Secret::new("synthetic-test-only".into()).unwrap();
-    let execution = execute_observed(
+    let secret = Secret::new("synthetic-test-only".into())
+        .expect("the synthetic bearer contains only permitted characters");
+    let execution = transport::execute_observed(
         &request,
         &[],
         "unused-json-boundary",
@@ -114,7 +114,10 @@ fn provider_retry_after_is_not_truncated_by_backoff_cap_or_deadline() {
         },
         Some(9_000),
     );
-    assert_eq!(result.unwrap_err(), Failure::Deadline);
+    assert_eq!(
+        result.expect_err("Retry-After beyond the deadline must stop retries"),
+        Failure::Deadline
+    );
     assert_eq!(starts, [0]);
 }
 
@@ -206,10 +209,11 @@ fn overflowing_provider_usage_retains_reservation_and_stops_shared_admission() {
             Ok(HttpResponse { body_error: None, status:200, body:format!(r#"{{"model":"jev-1.14.0","answers":{{"q":{{"type":"noul","noul":1.0}}}},"usage":{{"input_tokens":{},"output_tokens":0}}}}"#,u64::MAX).into_bytes(), retry_after_ms:None })
         }
     }
-    let request=jev::parse_request(br#"{"model":"jev-1.14.0","state":"synthetic","questions":{"q":{"type":"noul","instructions":"Present?"}}}"#,jev::Limits::default()).unwrap();
-    let secret = Secret::new("synthetic-test-only".into()).unwrap();
+    let request=jev::parse_request(br#"{"model":"jev-1.14.0","state":"synthetic","questions":{"q":{"type":"noul","instructions":"Present?"}}}"#,jev::Limits::default()).expect("the overflow scenario starts with a valid noul request");
+    let secret = Secret::new("synthetic-test-only".into())
+        .expect("the synthetic bearer contains only permitted characters");
     for expected in [Failure::Budget, Failure::Cancelled] {
-        let result = execute_observed(
+        let result = transport::execute_observed(
             &request,
             &[],
             "boundary",
@@ -221,7 +225,12 @@ fn overflowing_provider_usage_retains_reservation_and_stops_shared_admission() {
             &mut budget,
             &mut NoopObserver,
         );
-        assert_eq!(result.result.unwrap_err(), expected);
+        assert_eq!(
+            result
+                .result
+                .expect_err("overflowing usage must stop this and subsequent admission"),
+            expected
+        );
         let after = budget.snapshot();
         assert!(after.stopped);
         assert!(after.reserved > 0);
@@ -232,22 +241,25 @@ fn overflowing_provider_usage_retains_reservation_and_stops_shared_admission() {
 
 #[test]
 fn configured_price_and_completion_gap_apply_to_every_attempt() {
-    let request = jev::parse_request(br#"{"model":"jev-1.14.0","state":"synthetic","questions":{"q":{"type":"noul","instructions":"Present?"}}}"#, jev::Limits::default()).unwrap();
-    let secret = Secret::new("synthetic-test-only".into()).unwrap();
+    let request = jev::parse_request(br#"{"model":"jev-1.14.0","state":"synthetic","questions":{"q":{"type":"noul","instructions":"Present?"}}}"#, jev::Limits::default()).expect("the price scenario starts with a valid noul request");
+    let secret = Secret::new("synthetic-test-only".into())
+        .expect("the synthetic bearer contains only permitted characters");
     let config = ExecutionConfig {
         input_token_price_nano_usd: 73,
         completion_gap_ms: 5_000,
         ..Default::default()
     };
     let mut budget = AttemptBudget::default();
-    budget.configure(&config).unwrap();
+    budget
+        .configure(&config)
+        .expect("the configured price and completion gap satisfy execution limits");
     let mut clock = TestClock::default();
     let mut wire = Responses {
         clock: clock.clone(),
         starts: vec![],
         retry_after: None,
     };
-    let result = execute_observed(
+    let result = transport::execute_observed(
         &request,
         &[],
         "boundary",
@@ -273,9 +285,9 @@ fn configured_price_and_completion_gap_apply_to_every_attempt() {
             max_cost_nano_usd: 64_000 * 73 - 1,
             ..config
         })
-        .unwrap();
+        .expect("a cost cap below one reservation is valid and must deny admission later");
     wire.starts.clear();
-    let result = execute_observed(
+    let result = transport::execute_observed(
         &request,
         &[],
         "boundary",
@@ -290,6 +302,11 @@ fn configured_price_and_completion_gap_apply_to_every_attempt() {
         &mut budget,
         &mut NoopObserver,
     );
-    assert_eq!(result.result.unwrap_err(), Failure::Budget);
+    assert_eq!(
+        result
+            .result
+            .expect_err("the cost ceiling cannot fund even one reservation"),
+        Failure::Budget
+    );
     assert!(wire.starts.is_empty());
 }

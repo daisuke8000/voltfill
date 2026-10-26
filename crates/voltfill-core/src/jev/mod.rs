@@ -1,9 +1,10 @@
+use std::collections::BTreeMap;
+
 pub use jev_client::*;
 pub mod transport;
 
-pub(crate) fn entry(value: &Content, nullable: bool) -> bool {
+pub(crate) fn entry(value: &Content) -> bool {
     match value {
-        Content::Null => nullable,
         Content::Text(s) => !s.trim().is_empty(),
         Content::Array(xs) => !xs.is_empty(),
         Content::Object(xs) => !xs.is_empty(),
@@ -24,11 +25,9 @@ pub(crate) fn fits_in_state(key: &str, value: &Content) -> bool {
         }
     }
     let limits = Limits::default();
-    let state = Content::Object(std::collections::BTreeMap::from([(
-        key.to_string(),
-        value.clone(),
-    )]));
-    check(&state, 1, limits.max_depth)
-        && serde_json::to_vec(&std::collections::BTreeMap::from([("state", &state)]))
+    let state = BTreeMap::from([(key, value)]);
+    // The request root and state object occupy the first two depth levels.
+    check(value, 2, limits.max_depth)
+        && serde_json::to_vec(&BTreeMap::from([("state", &state)]))
             .is_ok_and(|bytes| json::parse(&bytes, limits).is_ok())
 }

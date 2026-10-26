@@ -2,15 +2,11 @@
 //! callers use `transport::execute` with explicit remote permission and an
 //! injected secret. Development tests never execute a valid network request.
 use super::transport::{HttpRequest, HttpResponse, Transport, TransportError};
-use reqwest::{
-    blocking::{Client, Request},
-    header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue, RETRY_AFTER},
-    redirect,
-};
-use std::{
-    io::Read,
-    time::{Duration, SystemTime},
-};
+use reqwest::blocking::{Client, Request};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue, RETRY_AFTER};
+use reqwest::redirect;
+use std::io::Read;
+use std::time::{Duration, SystemTime};
 
 /// Hard transport ceiling in addition to each caller’s lower response limit.
 pub const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
@@ -21,7 +17,13 @@ pub const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 #[derive(Clone)]
 pub struct Endpoint(reqwest::Url);
 impl Endpoint {
+    /// Compatibility name for [`Self::try_new`].
     pub fn new(value: &str) -> Result<Self, TransportError> {
+        Self::try_new(value)
+    }
+
+    /// Validate the trusted HTTPS URL without sending a request.
+    pub fn try_new(value: &str) -> Result<Self, TransportError> {
         if value.len() > 2048
             || !value.starts_with("https://")
             || value
@@ -66,7 +68,13 @@ impl std::fmt::Debug for HttpTransport {
     }
 }
 impl HttpTransport {
+    /// Compatibility name for [`Self::try_new`].
     pub fn new(endpoint: Endpoint) -> Result<Self, TransportError> {
+        Self::try_new(endpoint)
+    }
+
+    /// Build a blocking client with proxies, redirects, and implicit retries disabled.
+    pub fn try_new(endpoint: Endpoint) -> Result<Self, TransportError> {
         let client = Client::builder()
             .no_proxy()
             .https_only(true)
@@ -169,21 +177,30 @@ fn retry_after(value: &str, now: SystemTime) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Limits, multipart::Body, parse_request, transport::Secret};
+    use crate::Limits;
+    use crate::multipart::Body;
+    use crate::transport::Secret;
     const ENDPOINT: &str = "https://synthetic.example.invalid/custom/extract";
     #[test]
     fn builds_bearer_and_json_without_sending() {
-        let transport = HttpTransport::new(Endpoint::new(ENDPOINT).unwrap()).unwrap();
-        let request=parse_request(br#"{"model":"jev-1.14.0","state":"synthetic","questions":{"q":{"type":"noul","instructions":"Present?"}}}"#,Limits::default()).unwrap();
-        let body = Body::json(&request).unwrap();
-        let secret = Secret::new("synthetic-token".into()).unwrap();
+        let transport = HttpTransport::try_new(
+            Endpoint::try_new(ENDPOINT)
+                .expect("the synthetic HTTPS endpoint contains no credentials or query"),
+        )
+        .expect("construct the HTTP client without sending a request");
+        let request=crate::parse_request(br#"{"model":"jev-1.14.0","state":"synthetic","questions":{"q":{"type":"noul","instructions":"Present?"}}}"#,Limits::default()).expect("the synthetic noul request satisfies the wire contract");
+        let body = Body::json(&request).expect("a validated request must encode as a JSON body");
+        let secret = Secret::try_new("synthetic-token".into())
+            .expect("the synthetic bearer uses permitted characters");
         let input = HttpRequest {
             secret: &secret,
             body: &body,
             timeout_ms: 1234,
             max_response_bytes: 100,
         };
-        let request = transport.prepare(&input).unwrap();
+        let request = transport
+            .prepare(&input)
+            .expect("valid HTTP input must prepare without network access");
         assert_eq!(request.method(), reqwest::Method::POST);
         assert_eq!(request.url().as_str(), ENDPOINT);
         assert_eq!(request.headers()[AUTHORIZATION], "Bearer synthetic-token");
@@ -195,20 +212,38 @@ mod tests {
                 .contains_key("TypeSafe-Danger-Zone-Images")
         );
         assert_eq!(request.timeout(), Some(&Duration::from_millis(1234)));
-        assert_eq!(request.body().unwrap().as_bytes(), Some(body.bytes()));
+        assert_eq!(
+            request
+                .body()
+                .expect("a prepared POST must retain its encoded body")
+                .as_bytes(),
+            Some(body.bytes())
+        );
         let retry = transport
             .prepare(&HttpRequest {
                 timeout_ms: 1000,
                 ..input
             })
-            .unwrap();
-        assert_eq!(retry.body().unwrap().as_bytes(), Some(body.bytes()));
+            .expect("a retry with a positive timeout must prepare without sending");
+        assert_eq!(
+            retry
+                .body()
+                .expect("a prepared retry must retain its encoded body")
+                .as_bytes(),
+            Some(body.bytes())
+        );
         assert_eq!(retry.headers(), request.headers());
         assert_eq!(retry.timeout(), Some(&Duration::from_millis(1000)));
         drop(body);
         assert_eq!(
-            retry.body().unwrap().as_bytes(),
-            request.body().unwrap().as_bytes()
+            retry
+                .body()
+                .expect("the retry owns its body after the source body is dropped")
+                .as_bytes(),
+            request
+                .body()
+                .expect("the initial request owns its body after the source body is dropped")
+                .as_bytes()
         );
     }
     #[test]
@@ -227,24 +262,29 @@ mod tests {
             "https://synthetic.invalid\\private",
             "https://synthetic.invalid:65536/path",
         ] {
-            assert_eq!(format!("{:?}", Endpoint::new(value)), "Err(BeforeSend)");
+            assert_eq!(format!("{:?}", Endpoint::try_new(value)), "Err(BeforeSend)");
         }
-        assert!(Endpoint::new(&format!("https://synthetic.invalid/{}", "x".repeat(2048))).is_err());
+        assert!(
+            Endpoint::try_new(&format!("https://synthetic.invalid/{}", "x".repeat(2048))).is_err()
+        );
         for value in [
             ENDPOINT,
             "https://synthetic.invalid:8443/v2/extract",
             "https://[::1]/custom",
         ] {
-            let endpoint = Endpoint::new(value).unwrap();
+            let endpoint =
+                Endpoint::try_new(value).expect("the allowlisted endpoint syntax must validate");
             assert_eq!(format!("{endpoint:?}"), "Endpoint([REDACTED])");
-            let transport = HttpTransport::new(endpoint.clone()).unwrap();
+            let transport = HttpTransport::try_new(endpoint.clone())
+                .expect("construct the client for a validated endpoint without sending");
             assert_eq!(transport.endpoint.0.as_str(), value);
             assert_eq!(transport.clone().endpoint.0, endpoint.0);
         }
     }
     #[test]
     fn retry_after_handles_seconds_dates_overflow_and_past() {
-        let now = httpdate::parse_http_date("Wed, 21 Oct 2015 07:28:00 GMT").unwrap();
+        let now = httpdate::parse_http_date("Wed, 21 Oct 2015 07:28:00 GMT")
+            .expect("the fixed HTTP-date is a valid GMT timestamp");
         assert_eq!(retry_after("12", now), Some(12_000));
         assert_eq!(
             retry_after("Wed, 21 Oct 2015 07:28:03 GMT", now),
@@ -267,10 +307,16 @@ mod tests {
     }
     #[test]
     fn preflight_rejects_weakened_policy_without_executing_network() {
-        let transport = HttpTransport::new(Endpoint::new(ENDPOINT).unwrap()).unwrap();
-        let request=parse_request(br#"{"model":"jev-1.14.0","state":"synthetic","questions":{"q":{"type":"noul","instructions":"Present?"}}}"#,Limits::default()).unwrap();
-        let mut body = Body::json(&request).unwrap();
-        let secret = Secret::new("synthetic-token".into()).unwrap();
+        let transport = HttpTransport::try_new(
+            Endpoint::try_new(ENDPOINT)
+                .expect("the synthetic HTTPS endpoint contains no credentials or query"),
+        )
+        .expect("construct the HTTP client without sending a request");
+        let request=crate::parse_request(br#"{"model":"jev-1.14.0","state":"synthetic","questions":{"q":{"type":"noul","instructions":"Present?"}}}"#,Limits::default()).expect("the synthetic noul request satisfies the wire contract");
+        let mut body =
+            Body::json(&request).expect("a validated request must encode as a JSON body");
+        let secret = Secret::try_new("synthetic-token".into())
+            .expect("the synthetic bearer uses permitted characters");
         for scenario in 0..3 {
             let mut input = HttpRequest {
                 secret: &secret,

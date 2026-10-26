@@ -1,24 +1,23 @@
 use serde_json::{Value, json};
-use voltfill_core::{
-    model::Strategy,
-    schema::{self, SchemaError},
-};
+use voltfill_core::model::Strategy;
+use voltfill_core::schema::{self, SchemaError};
 fn form() -> Value {
-    serde_json::from_slice(include_bytes!("../../../examples/text-form.json")).unwrap()
+    serde_json::from_slice(include_bytes!("../../../examples/text-form.json"))
+        .expect("example form must be valid JSON")
 }
 fn check(value: Value) -> Result<schema::FormDefinition, SchemaError> {
-    schema::parse(&serde_json::to_vec(&value).unwrap())
+    schema::parse(&serde_json::to_vec(&value).expect("schema fixture must serialize to JSON"))
 }
 #[test]
 fn valid_dynamic_schema_preserves_question_and_limits_strategy() {
-    let form = check(form()).unwrap();
+    let form = check(form()).expect("example text form must satisfy the schema contract");
     assert_eq!(form.fields[0].id, "reference");
     assert!(form.validate_strategy(Strategy::TextFirst).is_ok());
     assert_eq!(
         form.validate_strategy(Strategy::VisionFirst),
         Err(SchemaError::Strategy)
     );
-    let serialized = serde_json::to_value(form).unwrap();
+    let serialized = serde_json::to_value(form).expect("validated form must serialize");
     assert_eq!(
         serialized["fields"][0]["questions"][0]["instructions"],
         json!("Choose the reference printed on the page, or none if absent.")
@@ -26,17 +25,27 @@ fn valid_dynamic_schema_preserves_question_and_limits_strategy() {
 }
 #[test]
 fn shared_context_is_optional_and_must_not_be_empty() {
-    let plain = serde_json::to_vec(&check(form()).unwrap()).unwrap();
+    let plain = serde_json::to_vec(
+        &check(form()).expect("example text form must satisfy the schema contract"),
+    )
+    .expect("validated form must serialize");
     let mut f = form();
     f["shared_context"] = Value::Null;
-    assert_eq!(serde_json::to_vec(&check(f).unwrap()).unwrap(), plain);
+    assert_eq!(
+        serde_json::to_vec(&check(f).expect("null shared context must behave like omission"))
+            .expect("validated form must serialize"),
+        plain
+    );
     let mut f = form();
     f["shared_context"] = json!({"a": "Alpha", "b": "Beta"});
     assert!(check(f).is_ok());
     for invalid in [json!(""), json!({}), json!([]), json!(5), json!(true)] {
         let mut f = form();
         f["shared_context"] = invalid;
-        assert_eq!(check(f).unwrap_err(), SchemaError::Contract);
+        assert_eq!(
+            check(f).expect_err("invalid shared-context values must fail the content contract"),
+            SchemaError::Contract
+        );
     }
     // A request adds the root and `state` around the value, so 31 nested arrays parse as a
     // schema but could not be sent.
@@ -46,7 +55,10 @@ fn shared_context_is_optional_and_must_not_be_empty() {
     assert!(check(f).is_ok());
     let mut f = form();
     f["shared_context"] = nested(31);
-    assert_eq!(check(f).unwrap_err(), SchemaError::Contract);
+    assert_eq!(
+        check(f).expect_err("shared context deeper than the wire limit must be rejected"),
+        SchemaError::Contract
+    );
 }
 #[test]
 fn duplicate_keys_unknown_fields_and_unbounded_input_rejected() {
@@ -56,9 +68,13 @@ fn duplicate_keys_unknown_fields_and_unbounded_input_rejected() {
     assert!(check(f).is_err());
     let mut f = form();
     f["schema_version"] = json!(2);
-    assert_eq!(check(f).unwrap_err(), SchemaError::Version);
     assert_eq!(
-        schema::parse(&vec![b' '; schema::MAX_SCHEMA_BYTES + 1]).unwrap_err(),
+        check(f).expect_err("an unsupported schema version must be rejected"),
+        SchemaError::Version
+    );
+    assert_eq!(
+        schema::parse(&vec![b' '; schema::MAX_SCHEMA_BYTES + 1])
+            .expect_err("schema bytes above the limit must be rejected before parsing"),
         SchemaError::Limit
     );
 }
@@ -79,11 +95,15 @@ fn field_count_is_capped() {
         f
     };
     assert_eq!(
-        check(fields(schema::MAX_FIELDS)).unwrap().fields.len(),
+        check(fields(schema::MAX_FIELDS))
+            .expect("field count at the configured ceiling must be accepted")
+            .fields
+            .len(),
         schema::MAX_FIELDS
     );
     assert_eq!(
-        check(fields(schema::MAX_FIELDS + 1)).unwrap_err(),
+        check(fields(schema::MAX_FIELDS + 1))
+            .expect_err("a field count above the limit must be rejected"),
         SchemaError::Limit
     );
 }
@@ -91,14 +111,26 @@ fn field_count_is_capped() {
 fn graph_requires_existing_acyclic_unique_questions() {
     let mut f = form();
     f["fields"][0]["questions"][0]["depends_on"] = json!(["missing"]);
-    assert_eq!(check(f).unwrap_err(), SchemaError::Dependency);
+    assert_eq!(
+        check(f).expect_err("a dependency on a missing question must be rejected"),
+        SchemaError::Dependency
+    );
     let mut f = form();
     f["fields"][0]["questions"][0]["depends_on"] = json!(["pick_reference"]);
-    assert_eq!(check(f).unwrap_err(), SchemaError::Dependency);
+    assert_eq!(
+        check(f).expect_err("a self-dependency must be rejected"),
+        SchemaError::Dependency
+    );
     let mut f = form();
     let q = f["fields"][0]["questions"][0].clone();
-    f["fields"][0]["questions"].as_array_mut().unwrap().push(q);
-    assert_eq!(check(f).unwrap_err(), SchemaError::Identifier);
+    f["fields"][0]["questions"]
+        .as_array_mut()
+        .expect("questions fixture must be an array")
+        .push(q);
+    assert_eq!(
+        check(f).expect_err("duplicate question IDs must be rejected"),
+        SchemaError::Identifier
+    );
 }
 #[test]
 fn invalid_resolver_candidate_overflow_and_pages_rejected() {
@@ -107,26 +139,37 @@ fn invalid_resolver_candidate_overflow_and_pages_rejected() {
     assert!(check(f).is_err());
     let mut f = form();
     f["fields"][0]["questions"][0]["candidate_source"]["max_candidates"] = json!(255);
-    assert_eq!(check(f).unwrap_err(), SchemaError::Contract);
+    assert_eq!(
+        check(f).expect_err("candidate count above the supported maximum must be rejected"),
+        SchemaError::Contract
+    );
     let mut f = form();
     f["fields"][0]["pages"] = json!([0]);
-    assert_eq!(check(f).unwrap_err(), SchemaError::Contract);
+    assert_eq!(
+        check(f).expect_err("page numbers are one-based and cannot include zero"),
+        SchemaError::Contract
+    );
     let mut f = form();
     f["fields"][0]["output_type"] = json!("bool");
-    assert_eq!(check(f).unwrap_err(), SchemaError::Contract);
+    assert_eq!(
+        check(f).expect_err("a text selection resolver cannot produce a bool output"),
+        SchemaError::Contract
+    );
 }
 #[test]
 fn static_choice_requires_complete_mapping_and_box_requires_presence_gate() {
     let mut f = form();
     f["fields"][0]["output_type"] = json!("enum");
     let q = &mut f["fields"][0]["questions"][0];
-    q.as_object_mut().unwrap().remove("candidate_source");
+    q.as_object_mut()
+        .expect("question fixture must be an object")
+        .remove("candidate_source");
     q["criteria"] = json!({"a":null,"b":null});
     f["fields"][0]["resolver"] = json!({"kind":"selected_choice","question_id":"pick_reference","mapping":{"a":"A","b":"B"}});
     assert!(check(f.clone()).is_ok());
     f["fields"][0]["resolver"]["mapping"]
         .as_object_mut()
-        .unwrap()
+        .expect("choice mapping must be an object")
         .remove("b");
     assert!(check(f).is_err());
 }
@@ -136,7 +179,9 @@ fn mapping_values_must_match_output_type_before_evaluation() {
     let mut f = form();
     f["fields"][0]["output_type"] = json!("bool");
     let q = &mut f["fields"][0]["questions"][0];
-    q.as_object_mut().unwrap().remove("candidate_source");
+    q.as_object_mut()
+        .expect("question fixture must be an object")
+        .remove("candidate_source");
     q["criteria"] = json!({"yes":null,"no":null});
     f["fields"][0]["resolver"] = json!({"kind":"selected_choice","question_id":"pick_reference","mapping":{"yes":"true","no":"false"}});
     assert!(check(f.clone()).is_err());
@@ -180,7 +225,7 @@ fn multiple_candidates_require_bounded_text_array_and_one_independent_question()
     f["fields"][0]["output_type"] = json!("string_array");
     f["fields"][0]["resolver"] =
         json!({"kind":"selected_candidates","question_id":"pick_reference","max_selections":8});
-    let parsed = check(f.clone()).unwrap();
+    let parsed = check(f.clone()).expect("bounded independent text selection must be valid");
     assert!(parsed.validate_strategy(Strategy::TextFirst).is_ok());
     assert!(parsed.validate_strategy(Strategy::Hybrid).is_err());
     assert!(parsed.validate_strategy(Strategy::VisionFirst).is_err());
@@ -192,7 +237,7 @@ fn multiple_candidates_require_bounded_text_array_and_one_independent_question()
     let mut bad = f.clone();
     bad["fields"][0]["resolver"]
         .as_object_mut()
-        .unwrap()
+        .expect("resolver fixture must be an object")
         .remove("max_selections");
     assert!(check(bad).is_err());
     let mut bad = f.clone();
@@ -203,19 +248,21 @@ fn multiple_candidates_require_bounded_text_array_and_one_independent_question()
     assert!(check(bad).is_err());
     let mut q = f["fields"][0]["questions"][0].clone();
     q["id"] = json!("another");
-    f["fields"][0]["questions"].as_array_mut().unwrap().push(q);
+    f["fields"][0]["questions"]
+        .as_array_mut()
+        .expect("questions fixture must be an array")
+        .push(q);
     assert!(check(f).is_err());
 }
 
 #[test]
 fn shared_context_keeps_exact_state_envelope_byte_and_leaf_depth_limits() {
-    use voltfill_core::{
-        jev::{Content, Limits},
-        schema,
-    };
-    let mut form = schema::parse(include_bytes!("../../../examples/text-form.json")).unwrap();
+    use voltfill_core::jev::{Content, Limits};
+    use voltfill_core::schema;
+    let mut form = schema::parse(include_bytes!("../../../examples/text-form.json"))
+        .expect("example text form must parse");
     let overhead = serde_json::to_vec(&serde_json::json!({"state":{"shared_context":""}}))
-        .unwrap()
+        .expect("empty state envelope must serialize")
         .len();
     for (extra, accepted) in [(0, true), (1, false)] {
         form.shared_context = Some(Content::Text(

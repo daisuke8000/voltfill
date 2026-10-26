@@ -2,6 +2,7 @@
 use super::{Content, Request};
 use serde::{Deserialize, Serialize};
 
+/// Local admission policy. Token estimates are not provider usage or billing data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ContextLimits {
@@ -26,6 +27,7 @@ impl Default for ContextLimits {
     }
 }
 impl ContextLimits {
+    #[must_use]
     pub fn validate(&self) -> bool {
         (1..=1_000_000).contains(&self.max_request_tokens)
             && (1..=self.max_request_tokens).contains(&self.max_question_tokens)
@@ -43,12 +45,14 @@ fn is_full(value: &u64) -> bool {
     *value == 100
 }
 
+/// Saturating planning estimates for a whole request and its largest question.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct InputEstimate {
     pub request_tokens: u64,
     pub largest_question_tokens: u64,
 }
 impl InputEstimate {
+    #[must_use]
     pub fn fits(self, limits: &ContextLimits, attempt_cap: u64) -> bool {
         self.request_tokens <= limits.max_request_tokens.min(attempt_cap)
             && self.largest_question_tokens <= limits.max_question_tokens
@@ -71,6 +75,9 @@ fn image_uses(content: &Content, references: &[&str]) -> u64 {
     }
 }
 
+/// Estimate serialized text and image occurrences for local admission decisions.
+/// This is neither a tokenizer nor a guaranteed upper bound on provider usage.
+#[must_use]
 pub fn estimate(request: &Request, limits: &ContextLimits) -> InputEstimate {
     // Neither the text estimate nor the image allowance is an exact bound.
     const FRAMING: u64 = 256;

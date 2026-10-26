@@ -1,10 +1,16 @@
-use jev_client::{self as jev, RecordingTransport, ResponseBody, transport::*};
+use jev_client::transport::{
+    self, Attempt, AttemptBudget, AttemptContext, AttemptObserver, Clock, Failure, HttpRequest,
+    HttpResponse, Policy, Secret, Transport, TransportError,
+};
+use jev_client::{self as jev, RecordingTransport, ResponseBody};
 use std::collections::VecDeque;
 
 struct Wire(VecDeque<Result<HttpResponse, TransportError>>);
 impl Transport for Wire {
     fn send(&mut self, _: HttpRequest<'_>) -> Result<HttpResponse, TransportError> {
-        self.0.pop_front().unwrap()
+        self.0
+            .pop_front()
+            .expect("transport must not exceed the queued attempts")
     }
 }
 #[derive(Default)]
@@ -18,7 +24,7 @@ impl Clock for Time {
     }
 }
 fn request() -> jev::Request {
-    jev::parse_request(br#"{"model":"jev-1.14.0","state":"synthetic","questions":{"q":{"type":"noul","instructions":"Present?"}}}"#,jev::Limits::default()).unwrap()
+    jev::parse_request(br#"{"model":"jev-1.14.0","state":"synthetic","questions":{"q":{"type":"noul","instructions":"Present?"}}}"#,jev::Limits::default()).expect("synthetic Noul request must satisfy the wire contract")
 }
 fn response(body: &[u8], error: Option<TransportError>) -> HttpResponse {
     HttpResponse {
@@ -39,8 +45,9 @@ fn records_every_send_in_order_without_extraction_context() {
         Err(TransportError::BeforeSend),
     ]));
     let request = request();
-    let body = jev::multipart::Body::json(&request).unwrap();
-    let secret = Secret::new("synthetic-only".into()).unwrap();
+    let body = jev::multipart::Body::json(&request).expect("text-only request must encode as JSON");
+    let secret =
+        Secret::new("synthetic-only".into()).expect("synthetic bearer contains only visible ASCII");
     let mut records = Vec::new();
     {
         let mut transport = RecordingTransport::new(&mut wire, |record| records.push(record));
@@ -88,11 +95,12 @@ fn originals_survive_observer_failure_and_disabled_execution_never_records() {
     let original =
         br#"{ "model":"jev-1.14.0", "answers":{"q":{"type":"noul","noul":1}}, "unknown":[1,2] }"#;
     let mut wire = Wire(VecDeque::from([Ok(response(original, None))]));
-    let secret = Secret::new("synthetic-only".into()).unwrap();
+    let secret =
+        Secret::new("synthetic-only".into()).expect("synthetic bearer contains only visible ASCII");
     let request = request();
     let mut records = Vec::new();
     let mut recorder = RecordingTransport::new(&mut wire, |r| records.push(r));
-    let disabled = execute(
+    let disabled = transport::execute(
         &request,
         &[],
         "boundary",
@@ -103,7 +111,7 @@ fn originals_survive_observer_failure_and_disabled_execution_never_records() {
         &mut Time::default(),
     );
     assert_eq!(disabled.result.err(), Some(Failure::Disabled));
-    let result = execute_observed(
+    let result = transport::execute_observed(
         &request,
         &[],
         "boundary",

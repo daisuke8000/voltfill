@@ -1,21 +1,29 @@
 //! Serial execution boundary. The opt-in HTTP implementation is in `super::http`.
 //! A real transport must enforce TLS verification, no redirects, streaming response
 //! byte limits and the supplied timeout before reading the full response body.
-use super::{
-    Error, Limits, Request, Response,
-    multipart::{self, Body, PngImage},
-    parse_response,
-};
+use super::multipart::{self, Body, PngImage};
+use super::planning::{self, ContextLimits};
+use super::{Asset, Content, Error, Limits, Request, Response, ResponseBody};
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::{Arc, Mutex, MutexGuard};
 
+/// Caller-injected bearer value whose Debug representation is always redacted.
 pub struct Secret(String);
 impl Secret {
+    /// Compatibility name for [`Self::try_new`].
     pub fn new(value: String) -> Result<Self, Failure> {
+        Self::try_new(value)
+    }
+
+    /// Validate a caller-supplied bearer value without reading the environment.
+    pub fn try_new(value: String) -> Result<Self, Failure> {
         if value.is_empty() || !value.bytes().all(|b| b.is_ascii_graphic()) {
             return Err(Failure::Credentials);
         }
         Ok(Self(value))
     }
     /// Only the transport should expose this to an Authorization header.
+    #[must_use]
     pub fn bearer(&self) -> &str {
         &self.0
     }
@@ -26,12 +34,14 @@ impl std::fmt::Debug for Secret {
     }
 }
 
-pub struct HttpRequest<'a> {
-    pub secret: &'a Secret,
-    pub body: &'a Body,
+/// One bounded transport attempt; the transport must enforce both timeout and body limits.
+pub struct HttpRequest<'request> {
+    pub secret: &'request Secret,
+    pub body: &'request Body,
     pub timeout_ms: u64,
     pub max_response_bytes: usize,
 }
+/// Received HTTP status and original body, including a prefix when reading fails.
 pub struct HttpResponse {
     pub status: u16,
     pub body: Vec<u8>,
@@ -41,33 +51,38 @@ pub struct HttpResponse {
     /// HTTP date form requires a wall-clock-aware transport; never ignore it.
     pub retry_after_ms: Option<u64>,
 }
+/// Safe failure categories; uncertainty after sending must not be reported as BeforeSend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum TransportError {
     BeforeSend,
     OutcomeUnknown,
     ResponseTooLarge,
 }
+/// Injection boundary for a real bounded HTTP implementation or a synthetic test transport.
+/// Return received prefixes through HttpResponse even when the body is incomplete.
 pub trait Transport {
     fn send(&mut self, request: HttpRequest<'_>) -> Result<HttpResponse, TransportError>;
 }
+/// A credential-free record emitted before response parsing or observer callbacks.
 #[derive(Debug, serde::Serialize)]
 pub struct ResponseRecord {
     pub http_status: Option<u16>,
     pub retry_after_ms: Option<u64>,
     pub transport_error: Option<TransportError>,
-    pub body: Option<super::ResponseBody>,
+    pub body: Option<ResponseBody>,
     pub body_complete: bool,
 }
 
 /// Calls the sink once per send, before parsing or observer callbacks. The sink
 /// receives original body bytes and safe outcome metadata, never headers or secrets.
 /// Records arrive in send-completion order; the caller can attach its own context.
-pub struct RecordingTransport<'a, T, F> {
-    inner: &'a mut T,
+pub struct RecordingTransport<'transport, T, F> {
+    inner: &'transport mut T,
     sink: F,
 }
-impl<'a, T, F: FnMut(ResponseRecord)> RecordingTransport<'a, T, F> {
-    pub fn new(inner: &'a mut T, sink: F) -> Self {
+impl<'transport, T, F: FnMut(ResponseRecord)> RecordingTransport<'transport, T, F> {
+    #[must_use]
+    pub fn new(inner: &'transport mut T, sink: F) -> Self {
         Self { inner, sink }
     }
 }
@@ -94,6 +109,7 @@ impl<T: Transport, F: FnMut(ResponseRecord)> Transport for RecordingTransport<'_
     }
 }
 
+/// Monotonic time, bounded waiting, and cancellation used by admission and retry logic.
 pub trait Clock {
     /// Monotonic milliseconds, relative to an arbitrary origin.
     fn now_ms(&self) -> u64;
@@ -102,6 +118,8 @@ pub trait Clock {
         false
     }
 }
+/// Per-execution permission, timeout, retry, and reservation limits.
+/// Remote sends and preview images are disabled by default.
 #[derive(Debug, Clone, Copy)]
 pub struct Policy {
     pub allow_remote: bool,
@@ -136,6 +154,7 @@ impl Default for Policy {
         }
     }
 }
+/// Execution failure without provider text, HTTP headers, or authentication material.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Failure {
     Disabled,
@@ -163,6 +182,7 @@ pub const MIN_COMPLETION_GAP_MS: u64 = 1_000;
 pub const DEFAULT_COMPLETION_GAP_MS: u64 = 2_000;
 pub const DEFAULT_MAX_COMPLETION_GAP_MS: u64 = 60_000;
 pub const SESSION_DEADLINE_MS: u64 = 600_000;
+/// Organization-wide admission ceilings shared by every worker using one AttemptBudget.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct OrganizationLimits {
@@ -177,6 +197,7 @@ impl Default for OrganizationLimits {
         }
     }
 }
+/// Serializable execution limits; validate before applying them to a shared budget.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ExecutionConfig {
@@ -202,7 +223,7 @@ pub struct ExecutionConfig {
     pub requests_per_second: u32,
     pub input_tokens_per_second: u64,
     pub input_tokens_per_attempt: u64,
-    pub context: super::planning::ContextLimits,
+    pub context: ContextLimits,
     pub organization: OrganizationLimits,
 }
 impl Default for ExecutionConfig {
@@ -228,18 +249,20 @@ impl Default for ExecutionConfig {
             requests_per_second: 80,
             input_tokens_per_second: 100_000,
             input_tokens_per_attempt: 64_000,
-            context: super::planning::ContextLimits::default(),
+            context: ContextLimits::default(),
             organization: OrganizationLimits::default(),
         }
     }
 }
 impl ExecutionConfig {
     /// The gap after a 429: exponential backoff from the gap in use.
+    #[must_use]
     pub fn backed_off_gap(&self, gap_ms: u64) -> u64 {
         gap_ms
             .saturating_mul(u64::from(self.completion_gap_backoff))
             .min(self.max_completion_gap_ms)
     }
+    #[must_use]
     pub fn json_limits(&self) -> Limits {
         Limits {
             max_bytes: self.max_json_bytes,
@@ -292,18 +315,14 @@ pub struct InputSummary {
     pub image_dimensions: Vec<(u32, u32)>,
     pub image_sha256: Vec<String>,
 }
+#[must_use]
 pub fn input_summary(request: &Request, images: &[PngImage]) -> InputSummary {
-    fn text(
-        content: &super::Content,
-        references: &std::collections::BTreeMap<String, super::Asset>,
-    ) -> bool {
+    fn text(content: &Content, references: &BTreeMap<String, Asset>) -> bool {
         match content {
-            super::Content::Text(value) => {
-                !value.trim().is_empty() && !references.contains_key(value)
-            }
-            super::Content::Array(values) => values.iter().any(|value| text(value, references)),
-            super::Content::Object(values) => values.values().any(|value| text(value, references)),
-            super::Content::Null => false,
+            Content::Text(value) => !value.trim().is_empty() && !references.contains_key(value),
+            Content::Array(values) => values.iter().any(|value| text(value, references)),
+            Content::Object(values) => values.values().any(|value| text(value, references)),
+            Content::Null => false,
             _ => true,
         }
     }
@@ -357,7 +376,7 @@ struct BudgetState {
     value: BudgetSnapshot,
     config: ExecutionConfig,
     tokens: Vec<TokenReservation>,
-    starts: std::collections::VecDeque<u64>,
+    starts: VecDeque<u64>,
     cooldown_until: u64,
     gap_ms: u64,
     /// Until when the last doubled gap is held. Workers in flight together get
@@ -367,7 +386,7 @@ struct BudgetState {
 }
 #[derive(Clone)]
 pub struct AttemptBudget {
-    state: std::sync::Arc<std::sync::Mutex<BudgetState>>,
+    state: Arc<Mutex<BudgetState>>,
 }
 impl std::fmt::Debug for AttemptBudget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -382,6 +401,7 @@ impl Default for AttemptBudget {
     }
 }
 impl AttemptBudget {
+    #[must_use]
     pub fn from_snapshot(value: BudgetSnapshot) -> Self {
         use std::hash::{BuildHasher, Hasher};
         let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
@@ -398,7 +418,7 @@ impl AttemptBudget {
             ..Default::default()
         };
         Self {
-            state: std::sync::Arc::new(std::sync::Mutex::new(BudgetState {
+            state: Arc::new(Mutex::new(BudgetState {
                 value,
                 config,
                 tokens: Vec::new(),
@@ -412,16 +432,18 @@ impl AttemptBudget {
             })),
         }
     }
-    fn lock(&self) -> std::sync::MutexGuard<'_, BudgetState> {
+    fn lock(&self) -> MutexGuard<'_, BudgetState> {
         self.state.lock().unwrap_or_else(|poisoned| {
             let mut state = poisoned.into_inner();
             state.value.stopped = true;
             state
         })
     }
+    #[must_use]
     pub fn snapshot(&self) -> BudgetSnapshot {
         self.lock().value
     }
+    /// Permanently stop admission for all clones of this shared budget.
     pub fn stop(&self) {
         self.lock().value.stopped = true;
     }
@@ -430,6 +452,7 @@ impl AttemptBudget {
         s.value.max_posts = max_posts;
         s.value.max_cost_nano_usd = max_cost_nano_usd;
     }
+    /// Set a nonzero shared concurrency ceiling without resetting usage or reservations.
     pub fn set_worker_limit(&self, max: usize) -> Result<(), Failure> {
         if max == 0 {
             return Err(Failure::Config);
@@ -438,6 +461,8 @@ impl AttemptBudget {
         s.config.max_concurrency = max;
         Ok(())
     }
+    /// Apply validated limits only before any posts or token reservations exist.
+    /// Previously recorded completion time still constrains the earliest next admission.
     pub fn configure(&self, config: &ExecutionConfig) -> Result<(), Failure> {
         config.validate()?;
         let mut s = self.lock();
@@ -774,6 +799,7 @@ impl Drop for AttemptTicket {
         }
     }
 }
+/// Safe accounting and failure metadata for one admitted attempt, never a response-body log.
 #[derive(Debug)]
 pub struct Attempt {
     pub slot: u32,
@@ -784,12 +810,14 @@ pub struct Attempt {
     pub output_tokens: Option<u64>,
     pub billing_unknown: bool,
     pub failure: Option<Failure>,
-    pub answer_errors: std::collections::BTreeMap<String, Error>,
+    pub answer_errors: BTreeMap<String, Error>,
     pub http_status: Option<u16>,
     pub retry_after_ms: Option<u64>,
     pub retryable: bool,
 }
+/// Final protocol result together with every attempt and total elapsed monotonic time.
 #[derive(Debug)]
+#[must_use = "inspect the result and attempts so failures and usage are not discarded"]
 pub struct Execution {
     pub result: Result<Response, Failure>,
     pub attempts: Vec<Attempt>,
@@ -797,11 +825,12 @@ pub struct Execution {
 }
 /// Optional auditing around every real HTTP attempt. Callback failures stop
 /// further sends. Callbacks never receive credentials, headers or raw response bodies.
-pub struct AttemptContext<'a> {
+pub struct AttemptContext<'attempt> {
     pub slot: u32,
-    pub question_ids: &'a [String],
-    pub input: &'a InputSummary,
+    pub question_ids: &'attempt [String],
+    pub input: &'attempt InputSummary,
 }
+/// Audit callbacks may stop execution but do not replace a RecordingTransport body sink.
 pub trait AttemptObserver {
     fn waiting(&mut self, _duration_ms: u64) -> Result<(), Failure> {
         Ok(())
@@ -825,9 +854,11 @@ pub trait AttemptObserver {
         Ok(())
     }
 }
+/// Observer for callers that do not need additional admission or completion callbacks.
 pub struct NoopObserver;
 impl AttemptObserver for NoopObserver {}
 
+#[must_use]
 pub fn retryable_answer(error: Error) -> bool {
     matches!(
         error,
@@ -847,6 +878,8 @@ fn retryable_failure(failure: Failure) -> bool {
             | Failure::Deadline
     )
 }
+/// Execute with a fresh budget and no observer; default policy does not permit sending.
+/// Reuse a shared budget through execute_observed when coordinating workers or requests.
 #[allow(clippy::too_many_arguments)]
 pub fn execute<T: Transport, C: Clock>(
     request: &Request,
@@ -871,7 +904,8 @@ pub fn execute<T: Transport, C: Clock>(
         &mut NoopObserver,
     )
 }
-/// The single retry implementation used by RemoteEvaluator and its callers.
+/// Execute using the supplied shared budget and observer for every attempt.
+/// Wrap the transport in [`RecordingTransport`] to retain bodies on all error paths.
 #[allow(clippy::too_many_arguments)]
 pub fn execute_observed<T: Transport, C: Clock, O: AttemptObserver>(
     request: &Request,
@@ -928,9 +962,9 @@ pub fn execute_deferred<T: Transport, C: Clock, O: AttemptObserver>(
     )
 }
 
-enum Images<'a> {
-    Ready(&'a [PngImage]),
-    Deferred(&'a mut dyn FnMut() -> Result<Vec<PngImage>, ()>),
+enum Images<'images> {
+    Ready(&'images [PngImage]),
+    Deferred(&'images mut dyn FnMut() -> Result<Vec<PngImage>, ()>),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -984,7 +1018,7 @@ fn execute_with<T: Transport, C: Clock, O: AttemptObserver>(
             Images::Deferred(_) => None,
         };
         let config = budget.lock().config.clone();
-        let estimate = super::planning::estimate(request, &config.context);
+        let estimate = planning::estimate(request, &config.context);
         if !estimate.fits(&config.context, policy.estimated_input_tokens_per_attempt) {
             return Err(Failure::Protocol(Error::Request));
         }
@@ -1152,7 +1186,7 @@ fn execute_with<T: Transport, C: Clock, O: AttemptObserver>(
                     } else if (300..400).contains(&wire.status) {
                         attempt.failure = Some(Failure::Redirect);
                     } else if (200..300).contains(&wire.status) {
-                        match parse_response(&wire.body, request, limits) {
+                        match super::parse_response(&wire.body, request, limits) {
                             Ok(parsed) => {
                                 attempt.input_tokens = parsed.usage.input_tokens.0;
                                 attempt.output_tokens = parsed.usage.output_tokens.0;
@@ -1278,20 +1312,20 @@ mod admission_commit_tests {
         let mut clock = TestClock::default();
         let (delayed, _) = budget
             .reserve(&mut clock, 30_000, &mut NoopObserver)
-            .unwrap();
+            .expect("the first ticket fits the shared input quota");
         let (other, _) = budget
             .reserve(&mut clock, 30_000, &mut NoopObserver)
-            .unwrap();
+            .expect("the second ticket fits the remaining shared input quota");
         budget
             .commit_start(other, &mut clock, 30_000, &mut NoopObserver)
-            .unwrap();
+            .expect("the other worker may start before the delayed callback resumes");
         // Another worker returns while this ticket's pre-send observer is blocked.
         budget
             .complete_slot(other, clock.now_ms(), None, Some(Failure::Http(429)), 9_000)
-            .unwrap();
+            .expect("completing the started ticket must record its rate-limit cooldown");
         let waited = budget
             .commit_start(delayed, &mut clock, 30_000, &mut NoopObserver)
-            .unwrap();
+            .expect("the delayed ticket must start after waiting for the shared cooldown");
         assert_eq!(waited, 9_000);
         assert_eq!(clock.now_ms(), 9_000);
         budget.stop();
@@ -1330,13 +1364,13 @@ mod admission_commit_tests {
         let send = |clock: &mut TestClock, tokens, input| {
             let (id, _) = budget
                 .reserve_tokens(clock, 30_000, &mut NoopObserver, tokens)
-                .unwrap();
+                .expect("the token reservation must fit before the test deadline");
             budget
                 .commit_start(id, clock, 30_000, &mut NoopObserver)
-                .unwrap();
+                .expect("a reserved ticket must obtain start authorization");
             budget
                 .complete_slot(id, clock.now_ms(), input, None, 0)
-                .unwrap();
+                .expect("a started ticket must accept completion usage");
         };
         send(&mut clock, 8_000, Some(4_000));
         send(&mut clock, 6_000, Some(4_000));
@@ -1355,18 +1389,20 @@ mod admission_commit_tests {
             input_tokens_per_attempt: 10_000,
             ..Default::default()
         };
-        budget.configure(&config).unwrap();
+        budget
+            .configure(&config)
+            .expect("the rate-limit test configuration satisfies execution limits");
         let mut clock = TestClock::default();
         let send = |clock: &mut TestClock, input, failure| {
             let (id, _) = budget
                 .reserve_tokens(clock, 30_000, &mut NoopObserver, 8_000)
-                .unwrap();
+                .expect("the reservation must fit after any required completion gap");
             budget
                 .commit_start(id, clock, 30_000, &mut NoopObserver)
-                .unwrap();
+                .expect("the reserved ticket must start before the deadline");
             budget
                 .complete_slot(id, clock.now_ms(), input, failure, 0)
-                .unwrap();
+                .expect("completion must account for usage or a rate-limit response");
         };
         send(&mut clock, None, Some(Failure::Http(429)));
         send(&mut clock, Some(8_000), None);
@@ -1382,23 +1418,25 @@ mod admission_commit_tests {
             max_concurrency: 4,
             ..Default::default()
         };
-        budget.configure(&config).unwrap();
+        budget
+            .configure(&config)
+            .expect("four workers are within the configured concurrency limit");
         let mut clock = TestClock::default();
         let ids: Vec<_> = (0..4)
             .map(|_| {
                 let (id, _) = budget
                     .reserve_tokens(&mut clock, 30_000, &mut NoopObserver, 8_000)
-                    .unwrap();
+                    .expect("each of four reservations fits the shared token quota");
                 budget
                     .commit_start(id, &mut clock, 30_000, &mut NoopObserver)
-                    .unwrap();
+                    .expect("each reserved worker may start before any rate-limit response");
                 id
             })
             .collect();
         for id in ids {
             budget
                 .complete_slot(id, clock.now_ms(), None, Some(Failure::Http(429)), 0)
-                .unwrap();
+                .expect("each started worker must record its rate-limit response");
         }
         assert_eq!(budget.lock().gap_ms, 2 * MIN_COMPLETION_GAP_MS);
     }
@@ -1410,24 +1448,26 @@ mod admission_commit_tests {
             input_tokens_per_attempt: 1_000,
             ..Default::default()
         };
-        budget.configure(&config).unwrap();
+        budget
+            .configure(&config)
+            .expect("the one-request-per-second configuration is valid");
         let mut clock = TestClock::default();
         let (first, _) = budget
             .reserve(&mut clock, 30_000, &mut NoopObserver)
-            .unwrap();
+            .expect("the first delayed callback may reserve a ticket");
         clock.0 = 1_500;
         let (second, _) = budget
             .reserve(&mut clock, 30_000, &mut NoopObserver)
-            .unwrap();
+            .expect("the second delayed callback may reserve after the rate window");
         // Both callbacks resume together long after their reservation times.
         clock.0 = 3_000;
         budget
             .commit_start(first, &mut clock, 30_000, &mut NoopObserver)
-            .unwrap();
+            .expect("the first resumed callback may start at the current time");
         assert_eq!(clock.now_ms(), 3_000);
         budget
             .commit_start(second, &mut clock, 30_000, &mut NoopObserver)
-            .unwrap();
+            .expect("the second resumed callback must wait for a new start slot");
         assert_eq!(clock.now_ms(), 4_000);
         assert_eq!(
             budget.lock().starts.iter().copied().collect::<Vec<_>>(),

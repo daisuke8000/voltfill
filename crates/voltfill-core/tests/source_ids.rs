@@ -1,29 +1,49 @@
 mod support;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
-use voltfill_core::pdf::{PdfLimits, inspect};
+use voltfill_core::pdf::{self, PdfLimits};
 
 #[test]
 fn source_ids_keep_the_original_document_page_and_item_encoding() {
-    let mut pdf = lopdf::Document::load_mem(&support::pdf_with_text("ALPHA ")).unwrap();
+    let mut pdf = lopdf::Document::load_mem(&support::pdf_with_text("ALPHA "))
+        .expect("synthetic source PDF must load");
     let first = pdf.get_pages()[&1];
-    let page = pdf.get_object(first).unwrap().as_dict().unwrap().clone();
-    let parent = page.get(b"Parent").unwrap().as_reference().unwrap();
-    let content = page.get(b"Contents").unwrap().as_reference().unwrap();
+    let page = pdf
+        .get_object(first)
+        .expect("first page object must exist")
+        .as_dict()
+        .expect("page must be a dictionary")
+        .clone();
+    let parent = page
+        .get(b"Parent")
+        .expect("page must have a Parent")
+        .as_reference()
+        .expect("Parent must be an object reference");
+    let content = page
+        .get(b"Contents")
+        .expect("page must have Contents")
+        .as_reference()
+        .expect("Contents must be an object reference");
     pdf.get_object_mut(content)
-        .unwrap()
+        .expect("referenced content object must exist")
         .as_stream_mut()
-        .unwrap()
+        .expect("content object must be a stream")
         .set_content(
             b"BT /F1 12 Tf 80 240 Td (ALPHA) Tj 0 -20 Td ( ) Tj 0 -20 Td (ALPHA) Tj ET".to_vec(),
         );
     let second = pdf.add_object(page);
-    let pages = pdf.get_object_mut(parent).unwrap().as_dict_mut().unwrap();
+    let pages = pdf
+        .get_object_mut(parent)
+        .expect("page tree root must exist")
+        .as_dict_mut()
+        .expect("page tree root must be a dictionary");
     pages.set("Kids", vec![lopdf::Object::Reference(first), second.into()]);
     pages.set("Count", 2);
     let mut bytes = Vec::new();
-    pdf.save_to(&mut bytes).unwrap();
-    let snapshot = inspect(&bytes, PdfLimits::default()).unwrap();
+    pdf.save_to(&mut bytes)
+        .expect("two-page synthetic PDF must serialize");
+    let snapshot =
+        pdf::inspect(&bytes, PdfLimits::default()).expect("supported synthetic pages must inspect");
     let document_id: String = Sha256::digest(&bytes)
         .iter()
         .map(|b| format!("{b:02x}"))

@@ -1,15 +1,14 @@
 //! Evaluation boundary: synthetic fixtures and explicitly enabled remote Jev.
-use crate::{
-    geometry::ImageTransform,
-    jev::{
-        self, Answer, Content, Request, Response,
-        multipart::PngImage,
-        transport::{self, Clock, Policy, Secret},
-    },
-};
+use crate::geometry::ImageTransform;
+use crate::jev::multipart::PngImage;
+use crate::jev::transport::{self, Clock, Policy, Secret};
+use crate::jev::{self, Answer, Content, Request, Response};
+use crate::model::{JevResponse, UsageSummary};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, time::Instant};
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 pub enum EvaluationError {
@@ -22,20 +21,20 @@ pub enum EvaluationError {
     #[error("evaluation protocol failed")]
     Protocol,
 }
-pub struct EvaluationContext<'a> {
-    pub field_id: &'a str,
+pub struct EvaluationContext<'context> {
+    pub field_id: &'context str,
     pub page: u32,
     pub remaining_requests: u32,
     pub remaining_ms: u64,
 }
-pub struct EvaluationCall<'a> {
-    pub request: &'a Request,
-    pub images: &'a [PngImage],
-    pub context: EvaluationContext<'a>,
+pub struct EvaluationCall<'call> {
+    pub request: &'call Request,
+    pub images: &'call [PngImage],
+    pub context: EvaluationContext<'call>,
 }
 pub struct EvaluationOutcome {
     pub result: Result<Response, EvaluationError>,
-    pub usage: crate::model::UsageSummary,
+    pub usage: UsageSummary,
 }
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -45,13 +44,20 @@ pub struct EvaluationImage {
     pub height: u32,
     pub transform: ImageTransform,
 }
+/// Evaluation boundary for explicitly supplied fixtures or authorized remote execution.
+/// Implementations preserve received attempt bodies independently of parsing success.
 pub trait Evaluator {
-    fn take_responses(&mut self) -> Vec<crate::model::JevResponse> {
+    /// Drain retained attempts, including retries, malformed responses, and transport failures.
+    #[must_use]
+    fn take_responses(&mut self) -> Vec<JevResponse> {
         Vec::new()
     }
+    #[must_use]
     fn supports_batching(&self) -> bool {
         false
     }
+    /// Return one outcome per call in input order, with usage attached to each outcome.
+    #[must_use]
     fn evaluate_many(&mut self, calls: &[EvaluationCall<'_>]) -> Vec<EvaluationOutcome> {
         calls
             .iter()
@@ -70,13 +76,15 @@ pub trait Evaluator {
         images: &[PngImage],
         context: &EvaluationContext<'_>,
     ) -> Result<Response, EvaluationError>;
-    fn last_usage(&self) -> crate::model::UsageSummary {
-        crate::model::UsageSummary {
+    #[must_use]
+    fn last_usage(&self) -> UsageSummary {
+        UsageSummary {
             attempts: 1,
             unknown_usage_attempts: 1,
             ..Default::default()
         }
     }
+    #[must_use]
     fn backend(&self) -> &'static str {
         "injected_evaluator"
     }
@@ -119,11 +127,12 @@ impl FixtureEvaluator {
             {
                 return Err(EvaluationError::Fixture);
             }
-            PngImage::new("image".into(), image.png.clone())
+            PngImage::try_new("image".into(), image.png.clone())
                 .map_err(|_| EvaluationError::Fixture)?;
         }
         Ok(Self { fixture, calls: 0 })
     }
+    #[must_use]
     pub fn calls(&self) -> u32 {
         self.calls
     }
@@ -161,28 +170,27 @@ impl Evaluator for FixtureEvaluator {
                     if !criteria.contains_key("none") {
                         return Err(EvaluationError::Fixture);
                     }
-                    "none".to_owned()
+                    "none"
                 } else {
                     let target = fixture
                         .get("select_text")
                         .and_then(Value::as_str)
                         .ok_or(EvaluationError::Fixture)?;
-                    let matches: Vec<_> = criteria
+                    let mut matches = criteria
                         .iter()
                         .filter(|(key, content)| {
                             key.as_str() != "none"
-                                && matches!(content,Content::Text(text) if text==target)
+                                && matches!(content, Content::Text(text) if text == target)
                         })
-                        .map(|(key, _)| key.clone())
-                        .collect();
-                    if matches.len() != 1 {
-                        return Err(EvaluationError::Fixture);
+                        .map(|(key, _)| key.as_str());
+                    match (matches.next(), matches.next()) {
+                        (Some(selected), None) => selected,
+                        _ => return Err(EvaluationError::Fixture),
                     }
-                    matches[0].clone()
                 };
                 let probabilities: BTreeMap<_, _> = criteria
                     .keys()
-                    .map(|key| (key, if *key == selected { 1.0 } else { 0.0 }))
+                    .map(|key| (key, if key == selected { 1.0 } else { 0.0 }))
                     .collect();
                 json!({"type":"choice","choice":selected,"probabilities":probabilities,"confidence":1.0})
             } else {
@@ -241,15 +249,26 @@ pub struct RemoteEvaluator<
     pub clock: C,
     pub budget: transport::AttemptBudget,
     pub observer: O,
-    secret: std::sync::Arc<Secret>,
+    secret: Arc<Secret>,
     policy: Policy,
-    usage: crate::model::UsageSummary,
+    usage: UsageSummary,
     config: transport::ExecutionConfig,
     many: Option<ManyExecutor<T, C, O>>,
-    responses: std::sync::Arc<std::sync::Mutex<Vec<crate::model::JevResponse>>>,
+    responses: Arc<Mutex<Vec<JevResponse>>>,
 }
 impl RemoteEvaluator {
+    /// Compatibility name for [`Self::try_new`].
     pub fn new(
+        endpoint: jev::http::Endpoint,
+        secret: Secret,
+        allow_remote: bool,
+        allow_preview_images: bool,
+    ) -> Result<Self, EvaluationError> {
+        Self::try_new(endpoint, secret, allow_remote, allow_preview_images)
+    }
+
+    /// Build remote evaluation with explicit send and image permissions; does not send a request.
+    pub fn try_new(
         endpoint: jev::http::Endpoint,
         secret: Secret,
         allow_remote: bool,
@@ -259,7 +278,7 @@ impl RemoteEvaluator {
             secret,
             allow_remote,
             allow_preview_images,
-            jev::http::HttpTransport::new(endpoint).map_err(|_| EvaluationError::Transport)?,
+            jev::http::HttpTransport::try_new(endpoint).map_err(|_| EvaluationError::Transport)?,
             MonotonicClock {
                 started: Instant::now(),
             },
@@ -271,7 +290,7 @@ impl RemoteEvaluator {
 }
 impl<T: transport::Transport, C: Clock, O: transport::AttemptObserver> RemoteEvaluator<T, C, O> {
     pub fn with_components(
-        secret: impl Into<std::sync::Arc<Secret>>,
+        secret: impl Into<Arc<Secret>>,
         allow_remote: bool,
         allow_preview_images: bool,
         transport: T,
@@ -349,9 +368,9 @@ impl<
         self.with_max_concurrency(config.max_concurrency)
     }
 }
-struct UsageObserver<'a, O> {
-    inner: &'a mut O,
-    usage: &'a mut crate::model::UsageSummary,
+struct UsageObserver<'usage, O> {
+    inner: &'usage mut O,
+    usage: &'usage mut UsageSummary,
 }
 impl<O: transport::AttemptObserver> transport::AttemptObserver for UsageObserver<'_, O> {
     fn waiting(&mut self, ms: u64) -> Result<(), transport::Failure> {
@@ -364,7 +383,7 @@ impl<O: transport::AttemptObserver> transport::AttemptObserver for UsageObserver
         timeout: u64,
         context: &transport::AttemptContext<'_>,
     ) -> Result<(), transport::Failure> {
-        if !self.usage.add(&crate::model::UsageSummary {
+        if !self.usage.add(&UsageSummary {
             attempts: 1,
             unknown_usage_attempts: 1,
             ..Default::default()
@@ -382,7 +401,7 @@ impl<O: transport::AttemptObserver> transport::AttemptObserver for UsageObserver
         budget: &transport::AttemptBudget,
         context: &transport::AttemptContext<'_>,
     ) -> Result<(), transport::Failure> {
-        let valid = self.usage.add(&crate::model::UsageSummary {
+        let valid = self.usage.add(&UsageSummary {
             known_input_tokens: attempt.input_tokens.unwrap_or(0),
             known_output_tokens: attempt.output_tokens.unwrap_or(0),
             ..Default::default()
@@ -402,7 +421,7 @@ impl<O: transport::AttemptObserver> transport::AttemptObserver for UsageObserver
 impl<T: transport::Transport, C: Clock, O: transport::AttemptObserver> Evaluator
     for RemoteEvaluator<T, C, O>
 {
-    fn take_responses(&mut self) -> Vec<crate::model::JevResponse> {
+    fn take_responses(&mut self) -> Vec<JevResponse> {
         std::mem::take(
             &mut *self
                 .responses
@@ -439,7 +458,7 @@ impl<T: transport::Transport, C: Clock, O: transport::AttemptObserver> Evaluator
             self.responses
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
-                .push(crate::model::JevResponse {
+                .push(JevResponse {
                     field_id: context.field_id.into(),
                     page: context.page,
                     question_ids: question_ids.clone(),
@@ -525,8 +544,8 @@ impl<T: transport::Transport, C: Clock, O: transport::AttemptObserver> Evaluator
 
         outcomes
     }
-    fn last_usage(&self) -> crate::model::UsageSummary {
-        crate::model::UsageSummary {
+    fn last_usage(&self) -> UsageSummary {
+        UsageSummary {
             attempts: self.usage.attempts,
             unknown_usage_attempts: self.usage.unknown_usage_attempts,
             known_input_tokens: self.usage.known_input_tokens,
@@ -538,8 +557,8 @@ impl<T: transport::Transport, C: Clock, O: transport::AttemptObserver> Evaluator
         "jev_remote"
     }
 }
-struct SharedObserver<'a, O> {
-    inner: std::sync::Arc<std::sync::Mutex<&'a mut O>>,
+struct SharedObserver<'observer, O> {
+    inner: Arc<Mutex<&'observer mut O>>,
 }
 impl<O> Clone for SharedObserver<'_, O> {
     fn clone(&self) -> Self {
@@ -588,10 +607,8 @@ fn parallel_many<
     remote: &mut RemoteEvaluator<T, C, O>,
     calls: &[EvaluationCall<'_>],
 ) -> Vec<EvaluationOutcome> {
-    use std::sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     let started = remote.clock.now_ms();
     let next = AtomicUsize::new(0);
     let observer = SharedObserver {
@@ -688,10 +705,8 @@ mod concurrent_tests {
     use crate::jev::transport::{
         AttemptBudget, HttpRequest, HttpResponse, Transport, TransportError,
     };
-    use std::sync::{
-        Arc, Barrier,
-        atomic::{AtomicUsize, Ordering},
-    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
     #[test]
     fn engine_error_returns_retained_responses_to_caller() {
         let mut remote = remote(false, 1);
@@ -706,23 +721,24 @@ mod concurrent_tests {
                     remaining_ms: 30_000,
                 },
             )
-            .unwrap();
-        let form =
-            crate::schema::parse(include_bytes!("../../../examples/text-form.json")).unwrap();
+            .expect("the scripted request must complete before testing extraction failure");
+        let form = crate::schema::parse(include_bytes!("../../../examples/text-form.json"))
+            .expect("the checked-in text form satisfies the schema");
         let error = crate::engine::extract(
             b"invalid PDF",
             &form,
             &crate::engine::ExtractOptions::default(),
             &mut remote,
         )
-        .unwrap_err();
+        .expect_err("invalid PDF input must fail while retaining received responses");
         let records = error.jev_responses();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].http_status, Some(200));
         let Some(crate::model::ResponseBody::Text(body)) = &records[0].body else {
             panic!("original response missing from error");
         };
-        let value: Value = serde_json::from_str(body).unwrap();
+        let value: Value = serde_json::from_str(body)
+            .expect("the original successful response must retain valid JSON");
         assert_eq!(value["answers"]["q"]["noul"], 1.0);
         assert!(remote.take_responses().is_empty());
     }
@@ -746,22 +762,22 @@ mod concurrent_tests {
             vec![0xff,0xfe,0x00],
         ] {
             let mut remote = RemoteEvaluator::with_components(
-                Secret::new("synthetic-not-real".into()).unwrap(),true,false,
+                Secret::try_new("synthetic-not-real".into()).expect("the synthetic bearer contains only permitted characters"),true,false,
                 Original(bytes.clone()),MonotonicClock { started:Instant::now() },
                 AttemptBudget::default(),transport::NoopObserver,
-            ).unwrap().with_max_attempts(1).unwrap();
+            ).expect("the original-body transport must initialize the evaluator").with_max_attempts(1).expect("one attempt is a valid retry limit");
             let _ = remote.evaluate(&request(),&[],&EvaluationContext {
                 field_id:"field",page:1,remaining_requests:1,remaining_ms:30_000,
             });
             let records = remote.take_responses();
             assert_eq!(records.len(),1);
             assert_eq!(records[0].question_ids,["q"]);
-            let original = match records[0].body.as_ref().unwrap() {
+            let original = match records[0].body.as_ref().expect("every received response must retain its original body") {
                 crate::model::ResponseBody::Text(text) => text.as_bytes(),
                 crate::model::ResponseBody::Bytes(bytes) => bytes.as_slice(),
             };
             assert_eq!(original,bytes);
-            let encoded = serde_json::to_string(&records[0]).unwrap();
+            let encoded = serde_json::to_string(&records[0]).expect("text and binary response records must serialize as JSON");
             assert!(!encoded.contains('\n'));
             assert!(!encoded.contains('\x1b'));
             assert!(remote.take_responses().is_empty());
@@ -786,7 +802,7 @@ mod concurrent_tests {
                 barrier.wait();
             }
             self.active.fetch_sub(1, Ordering::SeqCst);
-            Ok(HttpResponse { body_error: None,status:200,body:serde_json::to_vec(&json!({"model":jev::MODEL,"answers":{"q":{"type":"noul","noul":1.0}},"usage":{"input_tokens":10,"output_tokens":if index==0{self.output}else{1}}})).unwrap(),retry_after_ms:None})
+            Ok(HttpResponse { body_error: None,status:200,body:serde_json::to_vec(&json!({"model":jev::MODEL,"answers":{"q":{"type":"noul","noul":1.0}},"usage":{"input_tokens":10,"output_tokens":if index==0{self.output}else{1}}})).expect("the scripted usage response must serialize as JSON"),retry_after_ms:None})
         }
     }
     fn barrier_count(wire: &Wire) -> usize {
@@ -810,7 +826,7 @@ mod concurrent_tests {
         }
     }
     fn request() -> Request {
-        jev::parse_request(br#"{"model":"jev-1.14.0","state":"synthetic","questions":{"q":{"type":"noul","instructions":"present"}}}"#,jev::Limits::default()).unwrap()
+        jev::parse_request(br#"{"model":"jev-1.14.0","state":"synthetic","questions":{"q":{"type":"noul","instructions":"present"}}}"#,jev::Limits::default()).expect("the synthetic noul request satisfies the wire contract")
     }
     fn calls<'a>(request: &'a Request, remaining: u32, ms: u64) -> Vec<EvaluationCall<'a>> {
         vec![
@@ -838,7 +854,8 @@ mod concurrent_tests {
     }
     fn remote(barrier: bool, output: u64) -> RemoteEvaluator<Wire, MonotonicClock, Audit> {
         RemoteEvaluator::with_components(
-            Secret::new("synthetic-only".into()).unwrap(),
+            Secret::try_new("synthetic-only".into())
+                .expect("the synthetic bearer contains only permitted characters"),
             true,
             false,
             Wire {
@@ -854,9 +871,9 @@ mod concurrent_tests {
             AttemptBudget::default(),
             Audit::default(),
         )
-        .unwrap()
+        .expect("the synchronized transport must initialize the evaluator")
         .with_max_concurrency(2)
-        .unwrap()
+        .expect("two workers are a valid concurrency limit")
     }
     fn set_input_quota<T, C, O>(remote: &RemoteEvaluator<T, C, O>, tokens: u64) {
         let old = remote.budget.snapshot();
@@ -865,7 +882,10 @@ mod concurrent_tests {
         config.organization.input_tokens_per_second =
             config.organization.input_tokens_per_second.max(tokens);
         config.input_tokens_per_attempt = config.input_tokens_per_attempt.min(tokens);
-        remote.budget.configure(&config).unwrap();
+        remote
+            .budget
+            .configure(&config)
+            .expect("the input quota remains within its matching organization allocation");
         remote
             .budget
             .set_limits(old.max_posts, old.max_cost_nano_usd);
@@ -873,7 +893,9 @@ mod concurrent_tests {
     #[test]
     fn worker_count_accepts_any_positive_value() {
         assert!(remote(false, 1).with_max_concurrency(0).is_err());
-        let mut remote = remote(false, 1).with_max_concurrency(usize::MAX).unwrap();
+        let mut remote = remote(false, 1)
+            .with_max_concurrency(usize::MAX)
+            .expect("any positive worker limit must be accepted");
         set_input_quota(&remote, 128_000);
         let request = request();
         let results = remote.evaluate_many(&calls(&request, 2, 30_000));
@@ -982,7 +1004,8 @@ mod concurrent_tests {
         let clock = AtomicClock::default();
         let count = Arc::new(AtomicUsize::new(0));
         let mut remote = RemoteEvaluator::with_components(
-            Secret::new("synthetic".into()).unwrap(),
+            Secret::try_new("synthetic".into())
+                .expect("the synthetic bearer contains only permitted characters"),
             true,
             false,
             SlowWire {
@@ -993,9 +1016,9 @@ mod concurrent_tests {
             AttemptBudget::default(),
             transport::NoopObserver,
         )
-        .unwrap()
+        .expect("the deadline-test transport must initialize the evaluator")
         .with_max_concurrency(1)
-        .unwrap();
+        .expect("one worker is a valid concurrency limit");
         let request = request();
         let results = remote.evaluate_many(&calls(&request, 2, 31));
         assert_eq!(count.load(Ordering::SeqCst), 1);
@@ -1021,7 +1044,8 @@ mod concurrent_tests {
         let clock = AtomicClock::default();
         let count = Arc::new(AtomicUsize::new(0));
         let mut remote = RemoteEvaluator::with_components(
-            Secret::new("synthetic".into()).unwrap(),
+            Secret::try_new("synthetic".into())
+                .expect("the synthetic bearer contains only permitted characters"),
             true,
             false,
             AlwaysTransient(count.clone()),
@@ -1029,9 +1053,9 @@ mod concurrent_tests {
             AttemptBudget::default(),
             transport::NoopObserver,
         )
-        .unwrap()
+        .expect("the retry-test transport must initialize the evaluator")
         .with_max_concurrency(2)
-        .unwrap();
+        .expect("two workers are a valid concurrency limit");
         set_input_quota(&remote, 128_000);
         let request = request();
         let results = remote.evaluate_many(&calls(&request, 3, 30_000));
@@ -1051,7 +1075,8 @@ mod concurrent_tests {
             }
         }
         let mut remote = RemoteEvaluator::with_components(
-            Secret::new("synthetic".into()).unwrap(),
+            Secret::try_new("synthetic".into())
+                .expect("the synthetic bearer contains only permitted characters"),
             true,
             false,
             PanicWire,
@@ -1061,9 +1086,9 @@ mod concurrent_tests {
             AttemptBudget::default(),
             transport::NoopObserver,
         )
-        .unwrap()
+        .expect("the panic-test transport must initialize before execution")
         .with_max_concurrency(1)
-        .unwrap();
+        .expect("one worker is a valid concurrency limit");
         let request = request();
         let results = remote.evaluate_many(&calls(&request, 2, 30_000));
         assert!(results.iter().all(|result| result.result.is_err()));
@@ -1096,7 +1121,8 @@ mod concurrent_tests {
             transport::TransportError::ResponseTooLarge,
         ] {
             let mut remote = RemoteEvaluator::with_components(
-                Secret::new("synthetic-key".into()).unwrap(),
+                Secret::try_new("synthetic-key".into())
+                    .expect("the synthetic bearer contains only permitted characters"),
                 true,
                 false,
                 Partial(failure),
@@ -1104,9 +1130,9 @@ mod concurrent_tests {
                 AttemptBudget::default(),
                 transport::NoopObserver,
             )
-            .unwrap()
+            .expect("the incomplete-body transport must initialize the evaluator")
             .with_max_attempts(1)
-            .unwrap();
+            .expect("one attempt is a valid retry limit");
             assert!(
                 remote
                     .evaluate(
@@ -1128,7 +1154,9 @@ mod concurrent_tests {
             assert_eq!(records[0].transport_error, Some(failure));
             assert!(!records[0].body_complete);
             assert_eq!(
-                serde_json::to_value(&records[0]).unwrap()["body"],
+                serde_json::to_value(&records[0])
+                    .expect("an incomplete response record must serialize without losing its body")
+                    ["body"],
                 "partial response"
             );
         }
