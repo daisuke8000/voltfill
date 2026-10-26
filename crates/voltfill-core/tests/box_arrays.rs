@@ -1,9 +1,7 @@
 //! Local source geometry and synthetic extraction; no API or rendering calls.
-use voltfill_core::{
-    candidates::CandidateIndex,
-    geometry::Rect,
-    model::{Quality, SourceFragment, Strategy},
-};
+use voltfill_core::candidates::CandidateIndex;
+use voltfill_core::geometry::Rect;
+use voltfill_core::model::{Quality, SourceFragment, Strategy};
 
 fn fragment(id: &str, item_index: usize, text: &str, bbox: Rect) -> SourceFragment {
     SourceFragment {
@@ -22,28 +20,47 @@ fn any_positive_overlap_keeps_the_full_unicode_run_but_touching_does_not() {
         "unicode",
         0,
         "東京🦀e\u{301}\n原文全体",
-        Rect::new(0.0, 0.0, 10.0, 10.0).unwrap(),
+        Rect::new(0.0, 0.0, 10.0, 10.0)
+            .expect("fixture coordinates must form a positive finite rectangle"),
     )];
-    let index = CandidateIndex::new(&raw).unwrap();
+    let index = CandidateIndex::new(&raw)
+        .expect("source fragments must have unique IDs and valid geometry");
     let just_below_ten = f64::from_bits(10.0_f64.to_bits() - 1);
     let selected = index
-        .overlapping(1, Rect::new(just_below_ten, 0.0, 11.0, 10.0).unwrap())
-        .unwrap();
+        .overlapping(
+            1,
+            Rect::new(just_below_ten, 0.0, 11.0, 10.0)
+                .expect("fixture coordinates must form a positive finite rectangle"),
+        )
+        .expect("the positive overlap query must be within page coordinates");
     assert_eq!(selected.len(), 1);
-    assert_eq!(index.text(selected[0]).unwrap(), raw[0].raw_text);
+    assert_eq!(
+        index
+            .text(selected[0])
+            .expect("a candidate selected by this index must resolve to its source text"),
+        raw[0].raw_text
+    );
     assert_eq!(selected[0].spans[0].start, 0);
     assert_eq!(selected[0].spans[0].end, raw[0].raw_text.len());
     let evidence = index
         .evidence(selected[0], "f", "box", Strategy::VisionFirst)
-        .unwrap();
+        .expect("a selected candidate must retain its original source evidence");
     assert_eq!(evidence.raw_fragments, vec![raw[0].raw_text.clone()]);
     assert_eq!(evidence.display_bbox, raw[0].bbox);
     for touching in [
-        Rect::new(10.0, 0.0, 20.0, 10.0).unwrap(),
-        Rect::new(0.0, 10.0, 10.0, 20.0).unwrap(),
-        Rect::new(10.0, 10.0, 20.0, 20.0).unwrap(),
+        Rect::new(10.0, 0.0, 20.0, 10.0)
+            .expect("fixture coordinates must form a positive finite rectangle"),
+        Rect::new(0.0, 10.0, 10.0, 20.0)
+            .expect("fixture coordinates must form a positive finite rectangle"),
+        Rect::new(10.0, 10.0, 20.0, 20.0)
+            .expect("fixture coordinates must form a positive finite rectangle"),
     ] {
-        assert!(index.overlapping(1, touching).unwrap().is_empty());
+        assert!(
+            index
+                .overlapping(1, touching)
+                .expect("edge-touching rectangles are valid overlap queries")
+                .is_empty()
+        );
     }
 }
 
@@ -51,34 +68,53 @@ fn any_positive_overlap_keeps_the_full_unicode_run_but_touching_does_not() {
 fn overlapping_preserves_source_order_duplicates_and_distinct_evidence() {
     // Source order differs from visual left-to-right order and identifier order.
     let mut raw = vec![
-        fragment("z", 2, "同じ値", Rect::new(20.0, 0.0, 30.0, 10.0).unwrap()),
-        fragment("a", 7, "同じ値", Rect::new(0.0, 0.0, 10.0, 10.0).unwrap()),
+        fragment(
+            "z",
+            2,
+            "同じ値",
+            Rect::new(20.0, 0.0, 30.0, 10.0)
+                .expect("fixture coordinates must form a positive finite rectangle"),
+        ),
+        fragment(
+            "a",
+            7,
+            "同じ値",
+            Rect::new(0.0, 0.0, 10.0, 10.0)
+                .expect("fixture coordinates must form a positive finite rectangle"),
+        ),
         fragment(
             "other_page",
             0,
             "他ページ",
-            Rect::new(0.0, 0.0, 10.0, 10.0).unwrap(),
+            Rect::new(0.0, 0.0, 10.0, 10.0)
+                .expect("fixture coordinates must form a positive finite rectangle"),
         ),
         fragment(
             "suspect",
             8,
             "不確か",
-            Rect::new(0.0, 0.0, 10.0, 10.0).unwrap(),
+            Rect::new(0.0, 0.0, 10.0, 10.0)
+                .expect("fixture coordinates must form a positive finite rectangle"),
         ),
         fragment(
             "unknown",
             9,
             "不明",
-            Rect::new(0.0, 0.0, 10.0, 10.0).unwrap(),
+            Rect::new(0.0, 0.0, 10.0, 10.0)
+                .expect("fixture coordinates must form a positive finite rectangle"),
         ),
     ];
     raw[2].page = 2;
     raw[3].quality = Quality::Suspect;
     raw[4].quality = Quality::Unknown;
-    let index = CandidateIndex::new(&raw).unwrap();
+    let index = CandidateIndex::new(&raw).expect("distinct source IDs permit repeated text values");
     let selected = index
-        .overlapping(1, Rect::new(0.0, 0.0, 30.0, 10.0).unwrap())
-        .unwrap();
+        .overlapping(
+            1,
+            Rect::new(0.0, 0.0, 30.0, 10.0)
+                .expect("fixture coordinates must form a positive finite rectangle"),
+        )
+        .expect("the page-wide rectangle must be a valid overlap query");
     assert_eq!(
         selected.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
         ["c_z", "c_a"]
@@ -86,7 +122,9 @@ fn overlapping_preserves_source_order_duplicates_and_distinct_evidence() {
     assert_eq!(
         selected
             .iter()
-            .map(|c| index.text(c).unwrap())
+            .map(|c| index
+                .text(c)
+                .expect("selected candidates must resolve to their own source text"))
             .collect::<Vec<_>>(),
         ["同じ値", "同じ値"]
     );
@@ -95,7 +133,7 @@ fn overlapping_preserves_source_order_duplicates_and_distinct_evidence() {
         .map(|c| {
             index
                 .evidence(c, "f", "box", Strategy::VisionFirst)
-                .unwrap()
+                .expect("each selected candidate must retain distinct source evidence")
         })
         .collect::<Vec<_>>();
     assert_ne!(evidence[0].id, evidence[1].id);

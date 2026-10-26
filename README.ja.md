@@ -6,11 +6,11 @@
 
 [English](README.md) · 日本語
 
-PDFから構造化データを抽出するRustライブラリ、CLI、Axumサーバーです。項目と質問をJSONで定義すると、抽出した値、根拠となる原文（Evidence）、受信したAPIレスポンスの本文を返します。PDFへの書き込みは行いません。
+PDFから値・原文の根拠（Evidence）・API応答を返すRustライブラリ／CLI／Axumサーバーです。質問はJSONで指定し、PDFは変更しません。
 
 ## インストール
 
-Rust 1.99.1が必要です。リポジトリのルートで実行します。
+Rust 1.99.1で、リポジトリのルートから実行します。
 
 ```sh
 cargo install --path crates/voltfill-cli --locked
@@ -26,19 +26,19 @@ Jevに送信せず確認します。
 voltfill inspect input.pdf
 ```
 
-実APIを使うには、信頼できるJevのHTTPS URLを `VOLTFILL_JEV_ENDPOINT` に設定し、`VOLTFILL_JEV_API_KEY` または `VOLTFILL_JEV_API_KEY_FILE` でキーを渡します。`input.pdf` は手元のPDF、`schema.json` は項目と質問を定義したJSONです。
+[接続先・キー](docs/configuration.md#environment)を設定し、PDFと抽出定義を渡します。
 
 ```sh
 voltfill run input.pdf schema.json --remote -o result.json
 ```
 
-既定はText-first、Hybridは `--strategy hybrid` です。オプションは `voltfill --help` を参照してください。
+既定はText-first。Hybridは `--strategy hybrid`、全オプションは `voltfill --help` を参照してください。
 
 ## 抽出方式
 
 | 方式 | 動作 | スキーマ |
 |---|---|---|
-| `text` | 原文の候補から選択 | [Text](examples/text-form.json) / [複数取得](examples/text-multi-form.json) |
+| `text` | 原文の候補から選択 | [Text](examples/text-form.json) |
 | `vision` | 画像のBoxを原文に対応付け | [Vision](examples/vision-form.json) |
 | `hybrid` | 文字候補とBoxを照合 | [Hybrid](examples/hybrid-form.json) |
 
@@ -48,9 +48,9 @@ voltfill run input.pdf schema.json --remote -o result.json
 
 ## 抽出結果
 
-抽出レポートは `fields`・`evidence`・`usage`・`jev_responses` を含みます。部分失敗や曖昧な結果でも値を含む場合があるため、`status`・`reason_codes` を確認してください。再試行・エラーを含む各試行の受信本文を保ち、`body_complete: false` は未受信または不完全な本文を示します。
+結果は `fields`・`evidence`・`usage`・`jev_responses` です。部分失敗でも値を保持するため、`status`・`reason_codes` を確認してください。再試行・エラーの受信本文も残し、未受信・不完全なら `body_complete: false` です。
 
-既定ではconfidenceで足切りせず解決済みの値を返し、原文・座標・型・validatorを検証します。結果は `evaluation_only: true` で、confidenceは校正済みの正答確率ではありません。
+原文・座標・型・validatorを検証し、既定ではconfidenceで足切りしません。結果は評価専用（`evaluation_only: true`）で、confidenceは校正済みの正答確率ではありません。
 
 <a id="http-server"></a>
 
@@ -62,7 +62,7 @@ Jevに送信しない固定回答モックを起動します。
 voltfill serve --mock examples/text-mock.json --listen 127.0.0.1:3000
 ```
 
-別のターミナルから手元のPDFとスキーマ例を送ります。モックは出力形式の確認用で、抽出精度は評価しません。
+別ターミナルからPDFとスキーマを送ります。モックは形式確認用で、精度評価には使えません。
 
 ```sh
 curl --fail-with-body --silent --show-error http://127.0.0.1:3000/v1/extract \
@@ -72,7 +72,7 @@ curl --fail-with-body --silent --show-error http://127.0.0.1:3000/v1/extract \
 
 ## 基盤 crate
 
-基盤 crate は抽出スキーマや Evidence を必須とせずに利用できます。サポート対象の公開 API は次のとおりです。
+基盤 crate は抽出スキーマ・Evidenceなしで使えます。
 
 | crate | 公開 API |
 |---|---|
@@ -81,13 +81,11 @@ curl --fail-with-body --silent --show-error http://127.0.0.1:3000/v1/extract \
 | `jev-client` | `build_request`、`parse_request`、`parse_response`、`RequestDraft`、`Request`、`Content`、`Question`、`Asset`、`Limits`、`Answer`、`Response`、`Error`、`PngImage`、`Endpoint`、`HttpTransport`、`Secret`、`Policy`、`ExecutionConfig`、`RecordingTransport`、`ResponseRecord`、`ResponseBody`。`transport` の trait・共有予算・`execute` / `execute_observed` / `execute_deferred`、`planning`、`multipart` |
 | `otel-log` | `TelemetryLogger`（呼び出し側が指定した `log` の target だけを、ローカルの OTLP JSON ログか、渡された `SdkLoggerProvider` に出す）、`opentelemetry_sdk` |
 
-`voltfill-core` は4つすべてに依存し、`pdf-render` は `pdf-probe` にも依存します。基盤から core への依存はなく、`jev-client` は PDF 系にも依存しません。Evidence、抽出フィールド・結果、全体の `Timings` / `UsageSummary`、field/page を付けた `JevResponse` は core が持ちます。PDF 調査は独立した `InspectionTimings` を返します。既存の core の利用パス（`pdf`・`geometry`・`render`・`jev`・`model`・`logging`）は再公開と互換アダプターで維持し、field/page 付き observer API は `voltfill_core::jev::transport` に残します。
+基盤はcoreに依存せず、coreが抽出結果・Evidence・全体計測を持ちます。既存APIは維持します。依存関係と契約は[構成図](docs/architecture.html)を参照してください。
 
-1回の抽出処理では、未キャッシュのページ画像が必要になった時点で描画用の文書を開き、ページ間で再利用します。単一ページの候補検索はページ別の索引を使い、原文の順序を保持します。描画の予算、座標検証、Evidenceの契約は変わりません。
+描画は既定オフです。次はHayroでリクエストを構築する無送信例です。PDFiumの指定と画像制限は[描画設定](docs/configuration.md#rendering)を参照してください。
 
-default feature はすべて空です。次の例には `pdf-render/hayro` を有効にします。PDFium なら `pdf-render/pdfium` を有効にし、呼び出し元が用意したライブラリの絶対パスを渡します。core は両 feature を転送し、バックエンドの選択と native library の扱いは従来どおりです。`PngImage::new` は PNG の各辺を `multipart::IMAGE_SIDE_PX`（280〜1568ピクセル）で検査します。ライブラリの呼び出し元は、利用モデルが受け付ける範囲を `PngImage::with_sides` に渡せます。CLI・サーバーの画像制限は変わらず、サーバーでの受理を保証するものではありません。この例は構築のみで、送信しません。
-
-独立したプロジェクトからソース checkout を path 依存として指定できます。
+外部プロジェクトではpath依存を指定します。
 
 ```toml
 [dependencies]
@@ -98,13 +96,13 @@ jev-client = { path = "/path/to/voltfill/crates/jev-client" }
 
 ```rust
 use std::collections::BTreeMap;
-use jev_client::{Asset, Content, Limits, PngImage, Question, RequestDraft, build_request};
+use jev_client::{Asset, Content, Limits, PngImage, Question, RequestDraft};
 
 fn prepare(pdf: &[u8]) -> Result<jev_client::multipart::Body, Box<dyn std::error::Error>> {
     let doc = pdf_probe::inspect(pdf, pdf_probe::PdfLimits::default())?;
     let image = pdf_render::render(pdf, doc.pages[0].page, &pdf_render::RenderConfig::hayro())?;
-    let png = PngImage::new("page".into(), image.png)?;
-    let request = build_request(RequestDraft {
+    let png = PngImage::try_new("page".into(), image.png)?;
+    let request = jev_client::build_request(RequestDraft {
         model: "jev-1.14.0".into(),
         state: Content::Text("Inspect <page>".into()),
         questions: BTreeMap::from([("visible".into(), Question::Noul {
@@ -116,15 +114,13 @@ fn prepare(pdf: &[u8]) -> Result<jev_client::multipart::Body, Box<dyn std::error
 }
 ```
 
-送信には、明示的な許可、呼び出し元が注入した `Secret`、検証済みの上限、`Clock` とともに `transport::execute` または `execute_observed` を使います。`execute_deferred` は、送信枠を確保してからページ画像を作り、作れなかったときは送らずに枠を返します。`RecordingTransport::new(&mut transport, |record| records.push(record))` で包むと、受信本文と機密情報を含まない通信結果を保持できます。sink は解析と observer の前に、エラーや不完全な本文を含む各 send で1回、完了順に呼ばれます。複数の呼び出し・worker で共有するときは sink でリクエストの文脈を付けます。認証情報や HTTP ヘッダーは渡しません。ログ target は互換用の `voltfill_core::jev` を維持し、ログは応答データの代わりにはしません。
+送信には許可・`Secret`・上限・`Clock` を指定します。`execute` / `execute_observed` を使い、`execute_deferred` なら枠の予約後に画像を準備し、失敗なら枠を返します。
 
-各試行は送信前に推定入力トークンを予約します。完了後は、報告された使用量を完了後の保持時間（completion gap）の間、毎秒の入力トークン上限に数え続けます。使用量が不明なら予約全量を保持します。保持時間の既定の開始値は2秒です。Jev の HTTP 429 で `completion_gap_backoff`（既定2、1〜16、1なら固定）倍にし、`max_completion_gap_ms`（既定60秒）で制限します。直前のバックオフ期間内の429は1回だけ倍率を適用します。`completion_gap_ms` は1秒以上かつ上限以下、上限は最大600秒に設定できます。費用の会計、使用量が予約を超えた場合の停止、期限は引き続き適用します。
-
-[独立した consumer](tests/foundation-consumer/src/main.rs) は PDF と Jev の基盤3 crate（`otel-log` は使わない）と画像だけの合成 PDF を使用します。`cargo run --locked -p xtask -- foundation-consumer` で、workspace 外へコピーし、依存グラフと固定済み外部依存のバージョンを確認して、Hayro で無送信の検証を実行し、一時ビルド出力を削除します。native の検証には `--pdfium-library /absolute/path/to/library` を指定します。ライブラリは自動取得しません。OCR は対象外で、抽出レポートは従来どおり評価専用です。
+全試行の原本文を解析前に残すには `RecordingTransport` を使います。ログは応答の代わりになりません。詳しくは[実行シーケンス](docs/architecture.html#sequence)を参照してください。
 
 ## ドキュメント
 
-CI の検査、依存関係監査、シークレット検出、ワークフローのセキュリティ検査は[開発ガイド](docs/development.md)を参照してください。
+CI・依存監査・シークレット／ワークフロー検査は[開発ガイド](docs/development.md)を参照してください。
 
 [設定](docs/configuration.md) · [HTTPサーバー](docs/server.md) · [開発](docs/development.md) · [ベンチマーク](docs/benchmarks.md)
 

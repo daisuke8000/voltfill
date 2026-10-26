@@ -1,17 +1,15 @@
 //! Fault injection through the real RemoteEvaluator used by CLI and the campaign.
 use serde_json::{Value, json};
-use std::{cell::Cell, collections::VecDeque, rc::Rc};
-use voltfill_core::{
-    evaluate::{EvaluationContext, Evaluator, RemoteEvaluator},
-    jev::{
-        self, Answer, Response,
-        multipart::PngImage,
-        transport::{
-            self, Attempt, AttemptBudget, AttemptObserver, Clock, Failure, HttpRequest,
-            HttpResponse, Secret, Transport, TransportError,
-        },
-    },
+use std::cell::Cell;
+use std::collections::VecDeque;
+use std::rc::Rc;
+use voltfill_core::evaluate::{EvaluationContext, Evaluator, RemoteEvaluator};
+use voltfill_core::jev::multipart::PngImage;
+use voltfill_core::jev::transport::{
+    self, Attempt, AttemptBudget, AttemptObserver, Clock, Failure, HttpRequest, HttpResponse,
+    Secret, Transport, TransportError,
 };
+use voltfill_core::jev::{self, Answer, Response};
 
 #[derive(Clone, Default)]
 struct FakeClock(Rc<Cell<u64>>);
@@ -75,7 +73,8 @@ type Remote = RemoteEvaluator<Wire, FakeClock, Audit>;
 fn remote(outcomes: Vec<(u64, Result<HttpResponse, TransportError>)>) -> Remote {
     let clock = FakeClock::default();
     RemoteEvaluator::with_components(
-        Secret::new("synthetic-test-secret".into()).unwrap(),
+        Secret::new("synthetic-test-secret".into())
+            .expect("the synthetic bearer contains only permitted characters"),
         true,
         true,
         Wire {
@@ -89,7 +88,7 @@ fn remote(outcomes: Vec<(u64, Result<HttpResponse, TransportError>)>) -> Remote 
         AttemptBudget::default(),
         Audit::default(),
     )
-    .unwrap()
+    .expect("the scripted evaluator must initialize with the default budget")
 }
 fn http(
     status: u16,
@@ -101,7 +100,8 @@ fn http(
         Ok(HttpResponse {
             body_error: None,
             status,
-            body: serde_json::to_vec(&body).unwrap(),
+            body: serde_json::to_vec(&body)
+                .expect("the synthetic response body must serialize as JSON"),
             retry_after_ms,
         }),
     )
@@ -115,7 +115,7 @@ fn context(requests: u32, ms: u64) -> EvaluationContext<'static> {
     }
 }
 fn noul_request() -> jev::Request {
-    jev::parse_request(br#"{"model":"jev-1.14.0","state":"synthetic-only","questions":{"q":{"type":"noul","instructions":"present"}}}"#,jev::Limits::default()).unwrap()
+    jev::parse_request(br#"{"model":"jev-1.14.0","state":"synthetic-only","questions":{"q":{"type":"noul","instructions":"present"}}}"#,jev::Limits::default()).expect("the synthetic noul request satisfies the wire contract")
 }
 fn noul_reservation() -> u64 {
     jev::planning::estimate(&noul_request(), &Default::default()).request_tokens * 42
@@ -124,7 +124,7 @@ fn good() -> Value {
     json!({"model":jev::MODEL,"answers":{"q":{"type":"noul","noul":1.0}},"usage":{"input_tokens":10,"output_tokens":2}})
 }
 fn choice_request() -> jev::Request {
-    jev::parse_request(br#"{"model":"jev-1.14.0","state":"synthetic-only","questions":{"q":{"type":"choice","instructions":"pick","criteria":{"a":"A","b":"B"}}}}"#,jev::Limits::default()).unwrap()
+    jev::parse_request(br#"{"model":"jev-1.14.0","state":"synthetic-only","questions":{"q":{"type":"choice","instructions":"pick","criteria":{"a":"A","b":"B"}}}}"#,jev::Limits::default()).expect("the synthetic choice request satisfies the wire contract")
 }
 fn choice(valid: bool, input: u64) -> Value {
     json!({"model":jev::MODEL,"answers":{"q":{"type":"choice","choice":if valid{"a"}else{"invented"},"probabilities":{"a":if valid{0.9}else{0.1},"b":if valid{0.1}else{0.9}},"confidence":0.95}},"usage":{"input_tokens":input,"output_tokens":342}})
@@ -145,7 +145,7 @@ fn real_remote_retries_429_retry_after_5xx_and_unknown_with_independent_reservat
         let mut r = remote(vec![first, http(200, good(), None)]);
         let response = r
             .evaluate(&noul_request(), &[], &context(3, 30_000))
-            .unwrap();
+            .expect("the scripted success must resolve after a retryable failure");
         assert!(matches!(
             response.answers["q"],
             Ok(Answer::Noul { noul: 1.0 })
@@ -184,7 +184,7 @@ fn valid_envelope_invalid_choice_retries_without_relaxing_validator_or_unknown_b
     ]);
     let response = r
         .evaluate(&choice_request(), &[], &context(3, 30_000))
-        .unwrap();
+        .expect("the valid choice must resolve after retrying the invalid answer");
     assert!(response.answers["q"].is_ok());
     assert_eq!(r.last_usage().attempts, 2);
     assert_eq!(r.last_usage().known_input_tokens, 110);
@@ -201,9 +201,11 @@ fn valid_envelope_invalid_choice_retries_without_relaxing_validator_or_unknown_b
     );
     let response = exhausted
         .evaluate(&choice_request(), &[], &context(3, 30_000))
-        .unwrap();
+        .expect("exhausted semantic retries must retain the final response envelope");
     assert_eq!(
-        response.answers["q"].as_ref().unwrap_err(),
+        response.answers["q"]
+            .as_ref()
+            .expect_err("the final invented choice must retain its validation error"),
         &jev::Error::Keys
     );
     assert_eq!(exhausted.transport.bodies.len(), 3);
@@ -263,14 +265,14 @@ fn retry_after_deadline_attempt_timeout_and_cross_call_budget_are_shared() {
         http(200, good(), None),
     ]);
     r.evaluate(&noul_request(), &[], &context(3, 30_000))
-        .unwrap();
+        .expect("the scripted retry fits within the remaining deadline");
     assert_eq!(r.transport.starts, [0, 12_000]);
     assert_eq!(r.transport.timeouts, [10_000, 10_000]);
     assert_eq!(r.budget.snapshot().reserved, noul_reservation());
     let mut r = remote(vec![http(200, good(), None), http(200, good(), None)]);
     r.budget.set_limits(1, 200_000_000);
     r.evaluate(&noul_request(), &[], &context(3, 30_000))
-        .unwrap();
+        .expect("the first evaluation fits the one-request shared budget");
     assert!(
         r.evaluate(&noul_request(), &[], &context(3, 30_000))
             .is_err()
@@ -289,7 +291,7 @@ fn arbitrary_clock_origin_and_idle_before_first_call_do_not_expire_a_new_session
     let mut r = remote(vec![http(200, good(), None)]);
     r.clock.0.set(9_000_000);
     r.evaluate(&noul_request(), &[], &context(3, 30_000))
-        .unwrap();
+        .expect("a new session must start relative to the current clock origin");
     assert_eq!(r.transport.starts, [9_000_000]);
     r.clock.0.set(9_000_000 + 600_000);
     assert!(
@@ -321,7 +323,11 @@ fn underestimated_usage_stops_future_sends_and_preserves_the_original_body() {
     let Some(voltfill_core::model::ResponseBody::Text(original)) = &records[0].body else {
         panic!("missing original");
     };
-    assert_eq!(serde_json::from_str::<Value>(original).unwrap(), body);
+    assert_eq!(
+        serde_json::from_str::<Value>(original)
+            .expect("the retained budget-overflow response must preserve JSON content"),
+        body
+    );
 }
 fn png() -> Vec<u8> {
     let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
@@ -347,8 +353,9 @@ fn png() -> Vec<u8> {
 }
 #[test]
 fn actual_remote_mixed_four_question_batch_retries_the_identical_bound_image_once() {
-    let request=jev::parse_request(br#"{"model":"jev-1.14.0","state":{"text":"synthetic","image":"@page"},"assets":{"@page":{"part":"page"}},"questions":{"n":{"type":"noul","instructions":"present"},"c":{"type":"choice","instructions":"pick","criteria":{"a":"A","b":"B"}},"s":{"type":"score","instructions":"score","criteria":["bad","good"]},"b":{"type":"box","instructions":"locate the image"}}}"#,jev::Limits::default()).unwrap();
-    let images = [PngImage::new("page".into(), png()).unwrap()];
+    let request=jev::parse_request(br#"{"model":"jev-1.14.0","state":{"text":"synthetic","image":"@page"},"assets":{"@page":{"part":"page"}},"questions":{"n":{"type":"noul","instructions":"present"},"c":{"type":"choice","instructions":"pick","criteria":{"a":"A","b":"B"}},"s":{"type":"score","instructions":"score","criteria":["bad","good"]},"b":{"type":"box","instructions":"locate the image"}}}"#,jev::Limits::default()).expect("the mixed four-question image request satisfies the wire contract");
+    let images = [PngImage::new("page".into(), png())
+        .expect("the synthetic PNG has a safe part name and supported dimensions")];
     let summary = transport::input_summary(&request, &images);
     assert_eq!(summary.input_kind, "both");
     assert_eq!(summary.question_count, 4);
@@ -361,7 +368,9 @@ fn actual_remote_mixed_four_question_batch_retries_the_identical_bound_image_onc
 
     let reservation = jev::planning::estimate(&request, &Default::default()).request_tokens * 42;
 
-    let response = r.evaluate(&request, &images, &context(3, 30_000)).unwrap();
+    let response = r
+        .evaluate(&request, &images, &context(3, 30_000))
+        .expect("the mixed batch must resolve after the scripted retry");
     assert_eq!(response.answers.len(), 4);
     assert!(response.answers.values().all(|a| a.is_ok()));
     assert_eq!(r.transport.bodies.len(), 2);
@@ -373,7 +382,11 @@ fn actual_remote_mixed_four_question_batch_retries_the_identical_bound_image_onc
     let Some(voltfill_core::model::ResponseBody::Text(original)) = &records[1].body else {
         panic!("complete original response missing");
     };
-    assert_eq!(serde_json::from_str::<Value>(original).unwrap(), body);
+    assert_eq!(
+        serde_json::from_str::<Value>(original)
+            .expect("the retained successful response must preserve JSON content"),
+        body
+    );
 }
 
 #[test]
@@ -385,16 +398,20 @@ fn configured_json_limit_rechecks_prebuilt_text_and_image_requests_before_send()
             panic!("JSON limit must reject before sending");
         }
     }
-    let image_request = jev::parse_request(br#"{"model":"jev-1.14.0","state":"@page","assets":{"@page":{"part":"page"}},"questions":{"q":{"type":"box","instructions":"locate"}}}"#, jev::Limits::default()).unwrap();
+    let image_request = jev::parse_request(br#"{"model":"jev-1.14.0","state":"@page","assets":{"@page":{"part":"page"}},"questions":{"q":{"type":"box","instructions":"locate"}}}"#, jev::Limits::default()).expect("the image request is valid under the original JSON limit");
     for (request, images) in [
         (noul_request(), Vec::new()),
         (
             image_request,
-            vec![PngImage::new("page".into(), png()).unwrap()],
+            vec![
+                PngImage::new("page".into(), png())
+                    .expect("the synthetic PNG has a safe part name and supported dimensions"),
+            ],
         ),
     ] {
         let mut evaluator = RemoteEvaluator::with_components(
-            Secret::new("synthetic".into()).unwrap(),
+            Secret::new("synthetic".into())
+                .expect("the synthetic bearer contains only permitted characters"),
             true,
             true,
             NeverSend,
@@ -402,12 +419,12 @@ fn configured_json_limit_rechecks_prebuilt_text_and_image_requests_before_send()
             AttemptBudget::default(),
             transport::NoopObserver,
         )
-        .unwrap()
+        .expect("the never-send transport must initialize without network access")
         .with_execution_config(&transport::ExecutionConfig {
             max_json_bytes: request.bytes().len() - 1,
             ..Default::default()
         })
-        .unwrap();
+        .expect("the reduced JSON limit is valid configuration for preflight rejection");
         assert!(matches!(
             evaluator.evaluate(&request, &images, &context(3, 30_000)),
             Err(voltfill_core::evaluate::EvaluationError::Protocol)

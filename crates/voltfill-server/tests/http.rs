@@ -10,21 +10,23 @@ fn server_otlp_is_opt_in_and_disabled_errors_remain_available() {
         if let Some(level) = level {
             command.args(["--log-level", level]);
         }
-        let output = command.output().unwrap();
+        let output = command.output().expect("Cargo-built server must launch");
         assert_eq!(output.status.code(), Some(2));
         if level == Some("info") {
             assert!(output.stderr.is_empty());
-            let logs: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let logs: Value = serde_json::from_slice(&output.stdout)
+                .expect("enabled logging must emit an OTLP JSON envelope");
             assert!(logs["resourceLogs"].is_array());
             assert!(
                 String::from_utf8(output.stdout)
-                    .unwrap()
+                    .expect("OTLP JSON output must be UTF-8")
                     .contains("input_read_failed")
             );
         } else {
             assert!(output.stdout.is_empty());
             assert_eq!(
-                serde_json::from_slice::<Value>(&output.stderr).unwrap(),
+                serde_json::from_slice::<Value>(&output.stderr)
+                    .expect("disabled logging must preserve the JSON error response"),
                 json!({"error":"input_read_failed"})
             );
         }
@@ -37,11 +39,12 @@ fn remote_alias_does_not_require_an_exclusive_organization_flag() {
         .env_clear()
         .args(["--remote", "--allow-images"])
         .output()
-        .unwrap();
+        .expect("Cargo-built server must launch");
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     assert_eq!(
-        serde_json::from_slice::<Value>(&output.stderr).unwrap(),
+        serde_json::from_slice::<Value>(&output.stderr)
+            .expect("disabled logging must preserve the JSON error response"),
         json!({"error":"api_key_required"})
     );
 }

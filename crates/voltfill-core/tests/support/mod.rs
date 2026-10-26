@@ -1,9 +1,6 @@
 pub fn pdf_with_text(text: &str) -> Vec<u8> {
-    use lopdf::{
-        Document, Object, Stream,
-        content::{Content, Operation},
-        dictionary,
-    };
+    use lopdf::content::{Content, Operation};
+    use lopdf::{Document, Object, Stream, dictionary};
     let mut doc = Document::with_version("1.5");
     let pages_id = doc.new_object_id();
     // Type3 glyphs need no font file, which renderers refuse to substitute.
@@ -57,7 +54,12 @@ pub fn pdf_with_text(text: &str) -> Vec<u8> {
             Operation::new("ET", vec![]),
         ],
     };
-    let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+    let content_id = doc.add_object(Stream::new(
+        dictionary! {},
+        content
+            .encode()
+            .expect("synthetic text operations must encode"),
+    ));
     let page_id = doc.add_object(dictionary! {
         "Type" => "Page", "Parent" => pages_id, "Contents" => content_id,
         "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
@@ -72,6 +74,7 @@ pub fn pdf_with_text(text: &str) -> Vec<u8> {
     let catalog_id = doc.add_object(dictionary! {"Type" => "Catalog", "Pages" => pages_id});
     doc.trailer.set("Root", catalog_id);
     let mut bytes = Vec::new();
-    doc.save_to(&mut bytes).unwrap();
+    doc.save_to(&mut bytes)
+        .expect("synthetic PDF must serialize");
     bytes
 }

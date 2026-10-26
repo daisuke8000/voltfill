@@ -4,7 +4,7 @@ use voltfill_core::geometry::{
 };
 
 fn rect(l: f64, t: f64, r: f64, b: f64) -> Rect {
-    Rect::new(l, t, r, b).unwrap()
+    Rect::new(l, t, r, b).expect("fixture coordinates must form a finite positive rectangle")
 }
 
 // P0-04's 1e-6 PDF-unit tolerance is only a test comparison tolerance, not a
@@ -30,7 +30,7 @@ fn page(rotation: Rotation) -> PageGeometry {
         rotation,
         1.0,
     )
-    .unwrap()
+    .expect("the crop lies inside the media box with a positive unit scale")
 }
 
 #[test]
@@ -53,15 +53,24 @@ fn nonzero_crop_origins_and_all_rotations_match_known_markers() {
     for (rotation, expected, (w, h)) in cases {
         let geometry = page(rotation);
         point_close(
-            geometry.pdf_to_display(Point { x: 40.0, y: 60.0 }).unwrap(),
+            geometry
+                .pdf_to_display(Point { x: 40.0, y: 60.0 })
+                .expect("the PDF marker lies inside the crop"),
             expected,
         );
         // Inverse checked against independently specified PDF marker.
         point_close(
-            geometry.display_to_pdf(expected).unwrap(),
+            geometry
+                .display_to_pdf(expected)
+                .expect("the expected display marker must map back inside the crop"),
             Point { x: 40.0, y: 60.0 },
         );
-        assert_eq!(geometry.display_bounds().unwrap(), rect(0.0, 0.0, w, h));
+        assert_eq!(
+            geometry
+                .display_bounds()
+                .expect("each supported rotation must produce finite display bounds"),
+            rect(0.0, 0.0, w, h)
+        );
         for marker in [
             Point { x: 10.0, y: 20.0 },
             Point { x: 210.0, y: 120.0 },
@@ -72,8 +81,12 @@ fn nonzero_crop_origins_and_all_rotations_match_known_markers() {
         ] {
             point_close(
                 geometry
-                    .display_to_pdf(geometry.pdf_to_display(marker).unwrap())
-                    .unwrap(),
+                    .display_to_pdf(
+                        geometry
+                            .pdf_to_display(marker)
+                            .expect("the corner or interior marker lies inside the crop"),
+                    )
+                    .expect("the transformed marker must map back to PDF coordinates"),
                 marker,
             );
         }
@@ -90,8 +103,18 @@ fn rectangle_envelopes_cover_rotated_corners() {
         (Rotation::Deg270, rect(30.0, 130.0, 60.0, 170.0)),
     ] {
         let geometry = page(rotation);
-        assert_eq!(geometry.pdf_rect_to_display(pdf).unwrap(), expected);
-        assert_eq!(geometry.display_rect_to_pdf(expected).unwrap(), pdf);
+        assert_eq!(
+            geometry
+                .pdf_rect_to_display(pdf)
+                .expect("the PDF rectangle lies inside the crop"),
+            expected
+        );
+        assert_eq!(
+            geometry
+                .display_rect_to_pdf(expected)
+                .expect("the rotated envelope must map back to the original rectangle"),
+            pdf
+        );
     }
     // Non-axis-aligned affine mapping requires all four corners, not a diagonal.
     let transform = AffineTransform {
@@ -103,7 +126,9 @@ fn rectangle_envelopes_cover_rotated_corners() {
         f: 0.0,
     };
     assert_eq!(
-        transform.map_rect(rect(10.0, 20.0, 30.0, 40.0)).unwrap(),
+        transform
+            .map_rect(rect(10.0, 20.0, 30.0, 40.0))
+            .expect("the finite affine transform must map all four corners"),
         rect(70.0, 30.0, 110.0, 70.0)
     );
 }
@@ -114,7 +139,7 @@ fn extractor_display_bounds_are_flipped_once() {
     assert_eq!(
         rotated
             .extractor_rect_to_display(12.0, 30.0, 20.0, 10.0)
-            .unwrap(),
+            .expect("the extractor rectangle lies inside the rotated display bounds"),
         rect(12.0, 160.0, 32.0, 170.0)
     );
     assert!(
@@ -159,19 +184,24 @@ fn ledger() -> ImageTransform {
 #[test]
 fn normalized_image_box_undoes_actual_crop_resize_and_padding() {
     let image = ledger();
-    assert_eq!(image.sent_dimensions().unwrap(), (200, 200));
+    assert_eq!(
+        image
+            .sent_dimensions()
+            .expect("the explicit resize and padding ledger must yield image dimensions"),
+        (200, 200)
+    );
     // N=(.30,.35)-(.50,.65) => I=(60,70)-(100,130)
     // => R=(60,90)-(140,150) => D=(30,30)-(70,50).
     rect_close(
         image
             .normalized_box_to_display(rect(0.30, 0.35, 0.50, 0.65))
-            .unwrap(),
+            .expect("the normalized box lies wholly inside image content"),
         rect(30.0, 30.0, 70.0, 50.0),
     );
     rect_close(
         image
             .normalized_box_to_display(rect(0.25, 0.20, 0.75, 0.80))
-            .unwrap(),
+            .expect("the content-edge box excludes all padding"),
         rect(20.0, 20.0, 120.0, 60.0),
     );
 }
@@ -187,7 +217,9 @@ fn normalized_boxes_recover_the_same_pdf_region_for_every_rotation() {
         (Rotation::Deg270, rect(0.40, 0.575, 0.55, 0.675)),
     ] {
         let page = page(rotation);
-        let bounds = page.display_bounds().unwrap();
+        let bounds = page
+            .display_bounds()
+            .expect("the supported page rotation must produce display bounds");
         let raster_width = (bounds.width() * 2.0) as u32;
         let raster_height = (bounds.height() * 2.0) as u32;
         let image = ImageTransform {
@@ -212,9 +244,12 @@ fn normalized_boxes_recover_the_same_pdf_region_for_every_rotation() {
                 bottom: 100,
             },
         };
-        let display = image.normalized_box_to_display(box_).unwrap();
+        let display = image
+            .normalized_box_to_display(box_)
+            .expect("the normalized marker box lies inside resized page content");
         rect_close(
-            page.display_rect_to_pdf(display).unwrap(),
+            page.display_rect_to_pdf(display)
+                .expect("the recovered display region must map inside the PDF crop"),
             rect(40.0, 60.0, 80.0, 90.0),
         );
     }

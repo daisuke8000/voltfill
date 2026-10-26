@@ -11,12 +11,15 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use thiserror::Error;
 
+/// Explicit renderer choice; PDFium requires a caller-supplied absolute library path.
 #[derive(Debug, Clone)]
 pub enum RenderBackend {
     Pdfium(PathBuf),
     Hayro,
 }
 
+/// Raster and input ceilings for the selected backend.
+/// There is no default backend or automatic native-library discovery.
 #[derive(Debug, Clone)]
 pub struct RenderConfig {
     pub backend: RenderBackend,
@@ -28,10 +31,12 @@ pub struct RenderConfig {
 }
 
 impl RenderConfig {
+    #[must_use]
     pub fn new(library_path: impl Into<PathBuf>) -> Self {
         Self::with_backend(RenderBackend::Pdfium(library_path.into()))
     }
 
+    #[must_use]
     pub fn hayro() -> Self {
         Self::with_backend(RenderBackend::Hayro)
     }
@@ -47,6 +52,7 @@ impl RenderConfig {
         }
     }
 
+    #[must_use]
     pub fn renderer_name(&self) -> &'static str {
         match self.backend {
             RenderBackend::Pdfium(_) => "pdfium",
@@ -86,6 +92,7 @@ impl RenderConfig {
     }
 }
 
+/// Encoded page pixels with the geometry needed to map image answers to the PDF.
 #[derive(Debug)]
 pub struct RenderedImage {
     pub png: Vec<u8>,
@@ -163,15 +170,15 @@ pub fn render(
 }
 
 /// Reuses a parsed PDF across page renders, initializing the backend lazily.
-pub struct RenderDocument<'a> {
-    bytes: &'a [u8],
+pub struct RenderDocument<'document> {
+    bytes: &'document [u8],
     config: RenderConfig,
     pages: Vec<Result<PageGeometry, RenderError>>,
     native: OnceLock<Result<Native, RenderError>>,
 }
 
-impl<'a> RenderDocument<'a> {
-    pub fn open(bytes: &'a [u8], config: &RenderConfig) -> Result<Self, RenderError> {
+impl<'document> RenderDocument<'document> {
+    pub fn open(bytes: &'document [u8], config: &RenderConfig) -> Result<Self, RenderError> {
         config.validate()?;
         if bytes.len() > config.max_input_bytes {
             return Err(RenderError::LimitExceeded);
@@ -182,7 +189,8 @@ impl<'a> RenderDocument<'a> {
         }
         let tree = metadata::page_tree(&metadata_doc, config.max_pages)
             .map_err(|_| RenderError::InvalidPdf)?;
-        let pages = (tree.iter())
+        let pages: Vec<Result<PageGeometry, RenderError>> = tree
+            .iter()
             .map(|id| page_geometry(metadata::page_metadata(&metadata_doc, *id)))
             .collect();
         Ok(Self {
@@ -193,6 +201,7 @@ impl<'a> RenderDocument<'a> {
         })
     }
 
+    #[must_use]
     pub fn page_count(&self) -> usize {
         self.pages.len()
     }
@@ -243,7 +252,7 @@ fn page_geometry(
         return Err(RenderError::UnsupportedGeometry);
     }
     let r = |v: [f64; 4]| {
-        Rect::new(v[0], v[1], v[2], v[3]).map_err(|_| RenderError::UnsupportedGeometry)
+        Rect::try_new(v[0], v[1], v[2], v[3]).map_err(|_| RenderError::UnsupportedGeometry)
     };
     let rotation = match m.normalized_rotate {
         0 => Rotation::Deg0,
@@ -252,7 +261,7 @@ fn page_geometry(
         270 => Rotation::Deg270,
         _ => return Err(RenderError::UnsupportedGeometry),
     };
-    PageGeometry::new(
+    PageGeometry::try_new(
         r(m.media.value)?,
         r(m.crop.value)?,
         rotation,
@@ -338,10 +347,8 @@ fn render_hayro(
     use hayro::hayro_interpret::InterpreterSettings;
     use hayro::kurbo::Affine;
     use hayro::vello_cpu::{Pixmap, RasterizerSettings, RenderContext, Resources, TargetInit};
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     // Vello's target dimensions are u16. Reject rather than truncate.
     let w = u16::try_from(width).map_err(|_| RenderError::LimitExceeded)?;
@@ -597,7 +604,7 @@ fn image_transform(
         e: origin.x,
         f: origin.y,
     };
-    let raster = Rect::new(0.0, 0.0, width as f64, height as f64)
+    let raster = Rect::try_new(0.0, 0.0, width as f64, height as f64)
         .map_err(|_| RenderError::UnsupportedGeometry)?;
     let actual = mapping
         .map_rect(bounds)
@@ -685,8 +692,10 @@ mod tests {
     #[test]
     fn fractional_scale_preserves_valid_viewport_edge_boxes() {
         for height in [281., 299.] {
-            let bounds = Rect::new(0., 0., 280., height).unwrap();
-            let geometry = PageGeometry::new(bounds, bounds, Rotation::Deg0, 1.).unwrap();
+            let bounds = Rect::try_new(0., 0., 280., height)
+                .expect("the fractional-scale page has positive finite dimensions");
+            let geometry = PageGeometry::try_new(bounds, bounds, Rotation::Deg0, 1.)
+                .expect("matching media and crop boxes with unit scale must validate");
             let raster_height = (height * 1.5_f64).round() as u32;
             let transform = image_transform(
                 &geometry,
@@ -697,15 +706,20 @@ mod tests {
                 420,
                 raster_height,
             )
-            .unwrap();
+            .expect("the fractional viewport map must produce an image ledger");
             let actual = transform
-                .normalized_box_to_display(Rect::new(0., 0., 1., 1.).unwrap())
-                .unwrap();
+                .normalized_box_to_display(
+                    Rect::try_new(0., 0., 1., 1.)
+                        .expect("the unit rectangle is valid normalized geometry"),
+                )
+                .expect("the full normalized viewport must map to display bounds");
             assert!((actual.right - 280.).abs() < 1e-10);
             assert!((actual.bottom - height).abs() < 1e-10);
             assert!(
                 transform
-                    .normalized_box_to_display(Rect::new(0., 0., 1.000000000000001, 1.).unwrap())
+                    .normalized_box_to_display(Rect::try_new(0., 0., 1.000000000000001, 1.).expect(
+                        "a rectangle slightly above one is finite before normalized validation"
+                    ))
                     .is_err()
             );
         }
@@ -736,8 +750,10 @@ mod tests {
             (841.89, 595.276),
             (419.528, 595.276),
         ] {
-            let bounds = Rect::new(0., 0., w, h).unwrap();
-            let geometry = PageGeometry::new(bounds, bounds, Rotation::Deg0, 1.).unwrap();
+            let bounds = Rect::try_new(0., 0., w, h)
+                .expect("the standard page dimensions form a positive rectangle");
+            let geometry = PageGeometry::try_new(bounds, bounds, Rotation::Deg0, 1.)
+                .expect("the standard page geometry uses matching boxes and unit scale");
             for scale in [1.5, 1.6, 1.7, 1.75, 1.8, 1.84, 1.85, 1.86] {
                 let (width, height) = ((w * scale).round() as u32, (h * scale).round() as u32);
                 if width.max(height) > 1568 {
@@ -748,7 +764,8 @@ mod tests {
                 worst = worst
                     .max((corner.x - f64::from(width)).abs())
                     .max((corner.y - f64::from(height)).abs());
-                let transform = image_transform(&geometry, map, width, height).unwrap();
+                let transform = image_transform(&geometry, map, width, height)
+                    .expect("the emulated f32 map must fit the geometry tolerance");
                 assert_eq!(transform.display_to_raster.b, 0.);
                 assert_eq!(transform.display_to_raster.e, 0.);
             }
@@ -761,8 +778,10 @@ mod tests {
 
     #[test]
     fn offsets_beyond_f32_error_are_rejected() {
-        let bounds = Rect::new(0., 0., 595.276, 841.89).unwrap();
-        let geometry = PageGeometry::new(bounds, bounds, Rotation::Deg0, 1.).unwrap();
+        let bounds = Rect::try_new(0., 0., 595.276, 841.89)
+            .expect("the A4 dimensions form a positive rectangle");
+        let geometry = PageGeometry::try_new(bounds, bounds, Rotation::Deg0, 1.)
+            .expect("the A4 page has matching boxes and unit scale");
         let (width, height) = (1012, 1431);
         let shifted = |offset: f64, shear: f64| {
             move |p: Point| Point {
@@ -773,7 +792,8 @@ mod tests {
         assert!(image_transform(&geometry, shifted(5e-4, 0.), width, height).is_ok());
         for (offset, shear) in [(0.01, 0.), (0., 1e-5)] {
             assert_eq!(
-                image_transform(&geometry, shifted(offset, shear), width, height).unwrap_err(),
+                image_transform(&geometry, shifted(offset, shear), width, height)
+                    .expect_err("offset or shear beyond the tolerance must reject the map"),
                 RenderError::UnsupportedGeometry
             );
         }
@@ -781,9 +801,12 @@ mod tests {
 
     #[test]
     fn distant_crop_origin_widens_the_pixel_bound() {
-        let media = Rect::new(0., 0., 5100., 5100.).unwrap();
-        let crop = Rect::new(5000., 5000., 5100., 5100.).unwrap();
-        let geometry = PageGeometry::new(media, crop, Rotation::Deg0, 1.).unwrap();
+        let media = Rect::try_new(0., 0., 5100., 5100.)
+            .expect("the distant-origin media box has positive finite dimensions");
+        let crop = Rect::try_new(5000., 5000., 5100., 5100.)
+            .expect("the distant crop has positive finite dimensions");
+        let geometry = PageGeometry::try_new(media, crop, Rotation::Deg0, 1.)
+            .expect("the distant crop lies inside the media box");
         let shifted = |offset: f64| {
             move |p: Point| Point {
                 x: (p.x - 5000.) * 1.7 + offset,
@@ -792,16 +815,19 @@ mod tests {
         };
         assert!(image_transform(&geometry, shifted(4e-4), 170, 170).is_ok());
         assert_eq!(
-            image_transform(&geometry, shifted(0.05), 170, 170).unwrap_err(),
+            image_transform(&geometry, shifted(0.05), 170, 170)
+                .expect_err("the distant crop must still reject excessive offset"),
             RenderError::UnsupportedGeometry
         );
     }
 
     #[test]
     fn an_extreme_crop_origin_cannot_widen_the_bound_past_its_ceiling() {
-        let media = Rect::new(0., 0., 1e9, 1e9).unwrap();
-        let crop = Rect::new(1e9 - 100., 1e9 - 100., 1e9, 1e9).unwrap();
-        let geometry = PageGeometry::new(media, crop, Rotation::Deg0, 1.).unwrap();
+        let media = Rect::try_new(0., 0., 1e9, 1e9).expect("the extreme media box remains finite");
+        let crop = Rect::try_new(1e9 - 100., 1e9 - 100., 1e9, 1e9)
+            .expect("the extreme crop remains finite and nonempty");
+        let geometry = PageGeometry::try_new(media, crop, Rotation::Deg0, 1.)
+            .expect("the extreme crop lies inside the media box");
         let shifted = |offset: f64| {
             move |p: Point| Point {
                 x: (p.x - (1e9 - 100.)) * 1.7 + offset,
@@ -810,15 +836,18 @@ mod tests {
         };
         assert!(image_transform(&geometry, shifted(0.09), 170, 170).is_ok());
         assert_eq!(
-            image_transform(&geometry, shifted(0.11), 170, 170).unwrap_err(),
+            image_transform(&geometry, shifted(0.11), 170, 170)
+                .expect_err("the error ceiling must reject an excessive extreme-origin offset"),
             RenderError::UnsupportedGeometry
         );
     }
 
     #[test]
     fn reflected_and_swapped_native_maps_cannot_become_valid_ledgers() {
-        let bounds = Rect::new(0., 0., 100., 100.).unwrap();
-        let geometry = PageGeometry::new(bounds, bounds, Rotation::Deg0, 1.).unwrap();
+        let bounds =
+            Rect::try_new(0., 0., 100., 100.).expect("the reflection test uses a positive square");
+        let geometry = PageGeometry::try_new(bounds, bounds, Rotation::Deg0, 1.)
+            .expect("the reflection test page has matching boxes and unit scale");
         assert_eq!(
             image_transform(
                 &geometry,
@@ -829,7 +858,7 @@ mod tests {
                 100,
                 100
             )
-            .unwrap_err(),
+            .expect_err("a reflected map must not become a valid image ledger"),
             RenderError::UnsupportedGeometry
         );
         assert_eq!(
@@ -842,7 +871,7 @@ mod tests {
                 100,
                 100
             )
-            .unwrap_err(),
+            .expect_err("a swapped-axis map must not become a valid image ledger"),
             RenderError::UnsupportedGeometry
         );
     }
@@ -893,11 +922,15 @@ mod document_tests {
         let bytes = pdf(&[(200, 300), (300, 200), (250, 250)]);
         let mut config = RenderConfig::hayro();
         config.pixels_per_point = 1.5;
-        let document = RenderDocument::open(&bytes, &config).unwrap();
+        let document = RenderDocument::open(&bytes, &config)
+            .expect("the generated three-page PDF must open with hayro");
         assert_eq!(document.page_count(), 3);
         for page in [2, 1, 3, 2] {
-            let once = render(&bytes, page, &config).unwrap();
-            let opened = document.render(page).unwrap();
+            let once = render(&bytes, page, &config)
+                .expect("one-shot rendering must succeed for each existing page");
+            let opened = document
+                .render(page)
+                .expect("reused-document rendering must succeed for each existing page");
             assert_eq!(
                 (opened.png, opened.width, opened.height),
                 (once.png, once.width, once.height)
@@ -909,13 +942,19 @@ mod document_tests {
         }
         let mut scaled = config.clone();
         scaled.pixels_per_point = 0.75;
-        let once = render(&bytes, 3, &scaled).unwrap();
-        let opened = document.render_at(3, 0.75).unwrap();
+        let once =
+            render(&bytes, 3, &scaled).expect("the third page must render at the smaller scale");
+        let opened = document
+            .render_at(3, 0.75)
+            .expect("the opened document must support a per-call scale");
         assert_eq!((opened.png, opened.width), (once.png, once.width));
         for page in [0, 4] {
             assert_eq!(
-                document.render(page).unwrap_err(),
-                render(&bytes, page, &config).unwrap_err()
+                document
+                    .render(page)
+                    .expect_err("the opened document must reject an out-of-range page"),
+                render(&bytes, page, &config)
+                    .expect_err("one-shot rendering must reject the same out-of-range page")
             );
         }
     }

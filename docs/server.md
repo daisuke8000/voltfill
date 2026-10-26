@@ -8,22 +8,28 @@
 voltfill serve --remote --listen 127.0.0.1:3000
 ```
 
-`POST /v1/extract` にmultipartの `pdf`・`schema` と任意のJSON `options` を送ります。`GET /health` はヘルスチェックです。[送信例](../README.ja.md#http-server)・[抽出結果](../README.ja.md#results)を参照してください。
+`POST /v1/extract` はmultipartの `pdf`・`schema` と任意のJSON `options`、`GET /health` はヘルスチェックです。[送信例](../README.ja.md#http-server)・[結果](../README.ja.md#results)も参照してください。
 
-HTTPの方式名は `text_first`・`vision_first`・`hybrid` です。例：Hybridスキーマを使い、curlに `--form-string 'options={"strategy":"hybrid"}'` を追加します。`options.model` は起動時の `--model` の既定値を上書きします。
+方式は `text_first` / `vision_first` / `hybrid`。Hybridスキーマならcurlに `--form-string 'options={"strategy":"hybrid"}'` を追加します。`options.model` は起動時の `--model` を上書きします。
 
-Vision／Hybridは起動時の `--allow-images` と、`--renderer hayro` などの[レンダラー](configuration.md#rendering)も必要です。サーバーがPDFを描画し、アップロードからレンダラー・接続先・認証情報・資源制限は変更できません。
+Vision／Hybridは起動時に `--allow-images` と[レンダラー](configuration.md#rendering)を指定します（例：`--renderer hayro`）。描画はサーバー側で行い、アップロードからレンダラー・接続先・認証・資源制限は変更できません。
 
 <a id="authentication"></a>
 
 ## 認証
 
-`VOLTFILL_SERVER_API_KEY` または `VOLTFILL_SERVER_API_KEY_FILE` を設定し（同時指定不可）、クライアントから `Authorization: Bearer <key>` を送ります。未設定のループバックでは認証は任意で、非ループバックの待ち受け・`Origin` 付き抽出では必須です。
+`VOLTFILL_SERVER_API_KEY` / `VOLTFILL_SERVER_API_KEY_FILE` の一方を設定し、`Authorization: Bearer <key>` を送ります。認証は未設定のループバックでは任意、非ループバック待ち受け・`Origin` 付き抽出では必須です。
 
-VOLTFILL自体はHTTPです。別マシンからはTLSプロキシでHTTPSを用意し、VOLTFILLまでの経路もループバックなどで保護します。組み込みアプリは待ち受け・通信経路を保護してください。
+VOLTFILLはHTTPです。別マシンからはTLSプロキシを使い、VOLTFILLまでの経路も保護します。組み込み時も待ち受け・経路の保護が必要です。
 
-抽出は同時に1件です。実行中・待機中は `Retry-After` 付き `429 server_busy`、送信一時停止中は `503 remote_paused_unknown_outcome` を返します。アップロード期限は `--upload-timeout-ms` で変更できます。
+抽出は同時1件。実行・待機中は `Retry-After` 付き `429 server_busy`、送信停止中は `503 remote_paused_unknown_outcome` です。アップロード期限は `--upload-timeout-ms` で指定します。
 
 ## 直前の文書の再利用
 
-既定はオフです。`--reuse-document`（起動ファイルでは `serve.reuse_document: true`）を付けると、直前の1件のPDFの本文・位置情報と描画済みページ画像をメモリに保持し、PDFのバイト列と解析・描画の設定がすべて同じ次のリクエストで再利用します。最後にその文書を使ったリクエストが終了してから `--reuse-document-ttl-ms`（1〜3600000、既定60000。`serve.reuse_document_ttl_ms`、`VOLTFILL_REUSE_DOCUMENT_TTL_MS`）が過ぎると、リクエストがなくても破棄します。有効にできるのはフラグ／起動ファイルのキーだけで、環境変数はTTLのみを設定します。保持する画像はPNGの合計で最大 `max_concurrency`（実行設定の値）× 描画の `max_output_bytes` バイトで、評価中のウィンドウの画像とは別に保持されます。本文・位置情報のスナップショットも保持し、キャッシュにない場合は追加で1回コピーされます。これには独自のバイト上限がなく（PDF上限は入力バイト数・ページ数・項目数を制限するだけで、保持するテキストの大きさは制限しません）、画像の上限にも含まれません。有効時は、文書の内容がリクエスト終了後もサーバーのメモリに残り、直近の同一アップロードがあると応答の速さやレポートのタイミング（解析・描画の回数を含む）から分かるため、単一テナントのサーバー向けです。
+既定オフの `--reuse-document` / `serve.reuse_document: true` は、直前1件の本文・位置・描画画像をメモリに保持します。PDFバイト列と解析・描画設定が同じ次の要求で再利用します。
+
+最後の利用終了からTTL経過後、要求がなくても破棄します。TTLは `--reuse-document-ttl-ms` / `serve.reuse_document_ttl_ms` / `VOLTFILL_REUSE_DOCUMENT_TTL_MS` で1〜3600000 ms（既定60000）を指定します。環境変数だけでは有効化できません。
+
+PNGは合計 `max_concurrency × max_output_bytes` バイトまでで、評価中の画像とは別に保持します。本文・位置も保持し、キャッシュ不在時は1回追加コピーします。テキストの保持量に独自の上限はなく、画像上限にも含まれません。PDF上限は入力バイト・ページ・項目数だけを制限します。
+
+内容が要求終了後も残り、応答速度や解析・描画回数から同一アップロードの存在が分かるため、単一テナント向けです。

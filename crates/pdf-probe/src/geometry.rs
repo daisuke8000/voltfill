@@ -1,4 +1,4 @@
-//! Pure geometry contracts. Raster/native agreement still requires P0-04 fixtures.
+//! Pure geometry contracts; these alone do not establish agreement with a native renderer.
 //! Canonical Display uses a top-left origin and downward y. PDF user coordinates
 //! use upward y; `Rect::top` there means the minimum y, not the visual top.
 
@@ -46,7 +46,13 @@ pub struct Rect {
 }
 
 impl Rect {
+    /// Compatibility name for [`Self::try_new`].
     pub fn new(left: f64, top: f64, right: f64, bottom: f64) -> Result<Self, GeometryError> {
+        Self::try_new(left, top, right, bottom)
+    }
+
+    /// Require finite coordinates and a rectangle with positive extent.
+    pub fn try_new(left: f64, top: f64, right: f64, bottom: f64) -> Result<Self, GeometryError> {
         let rect = Self {
             left,
             top,
@@ -77,13 +83,17 @@ impl Rect {
         }
     }
 
+    #[must_use]
     pub fn width(self) -> f64 {
         self.right - self.left
     }
+    #[must_use]
     pub fn height(self) -> f64 {
         self.bottom - self.top
     }
 
+    #[must_use]
+    /// Include touching boundaries; return false if either rectangle is invalid.
     pub fn contains(self, other: Self) -> bool {
         self.validate().is_ok()
             && other.validate().is_ok()
@@ -156,7 +166,18 @@ pub struct PageGeometry {
 
 impl PageGeometry {
     /// CropBox must be contained by MediaBox; unsupported metadata is not repaired.
+    /// Compatibility name for [`Self::try_new`].
     pub fn new(
+        media_box: Rect,
+        crop_box: Rect,
+        rotation: Rotation,
+        user_unit: f64,
+    ) -> Result<Self, GeometryError> {
+        Self::try_new(media_box, crop_box, rotation, user_unit)
+    }
+
+    /// Validate supported page geometry without repairing unsupported metadata.
+    pub fn try_new(
         media_box: Rect,
         crop_box: Rect,
         rotation: Rotation,
@@ -184,6 +205,7 @@ impl PageGeometry {
         Ok(())
     }
 
+    /// Return the rotated CropBox extent in top-left-origin Display coordinates.
     pub fn display_bounds(&self) -> Result<Rect, GeometryError> {
         self.validate()?;
         let (w, h) = (self.crop_box.width(), self.crop_box.height());
@@ -191,9 +213,10 @@ impl PageGeometry {
             Rotation::Deg0 | Rotation::Deg180 => (w, h),
             Rotation::Deg90 | Rotation::Deg270 => (h, w),
         };
-        Rect::new(0.0, 0.0, w, h)
+        Rect::try_new(0.0, 0.0, w, h)
     }
 
+    /// Convert a PDF user-space point inside CropBox to Display coordinates.
     pub fn pdf_to_display(&self, point: Point) -> Result<Point, GeometryError> {
         self.validate()?;
         point.validate()?;
@@ -211,6 +234,7 @@ impl PageGeometry {
         Point { x, y }.validate()
     }
 
+    /// Convert a point inside Display bounds back to PDF user space.
     pub fn display_to_pdf(&self, point: Point) -> Result<Point, GeometryError> {
         point.validate()?;
         if !self.display_bounds()?.contains_point(point) {
@@ -247,9 +271,9 @@ impl PageGeometry {
         width: f64,
         height: f64,
     ) -> Result<Rect, GeometryError> {
-        Rect::new(x, y, x + width, y + height)?;
+        Rect::try_new(x, y, x + width, y + height)?;
         let bounds = self.display_bounds()?;
-        let rect = Rect::new(x, bounds.bottom - y - height, x + width, bounds.bottom - y)?;
+        let rect = Rect::try_new(x, bounds.bottom - y - height, x + width, bounds.bottom - y)?;
         if !bounds.contains(rect) {
             return Err(GeometryError::OutOfBounds);
         }
@@ -357,7 +381,7 @@ impl ImageTransform {
         {
             return Err(GeometryError::InvalidImageDimensions);
         }
-        let raster = Rect::new(
+        let raster = Rect::try_new(
             0.0,
             0.0,
             self.raster_width as f64,
@@ -396,17 +420,17 @@ impl ImageTransform {
     pub fn normalized_box_to_display(&self, normalized: Rect) -> Result<Rect, GeometryError> {
         self.validate()?;
         normalized.validate()?;
-        if !Rect::new(0.0, 0.0, 1.0, 1.0)?.contains(normalized) {
+        if !Rect::try_new(0.0, 0.0, 1.0, 1.0)?.contains(normalized) {
             return Err(GeometryError::OutOfBounds);
         }
         let (w, h) = self.sent_dimensions()?;
-        let image = Rect::new(
+        let image = Rect::try_new(
             normalized.left * w as f64,
             normalized.top * h as f64,
             normalized.right * w as f64,
             normalized.bottom * h as f64,
         )?;
-        let content = Rect::new(
+        let content = Rect::try_new(
             self.padding.left as f64,
             self.padding.top as f64,
             self.padding.left as f64 + self.resized_width as f64,
@@ -417,7 +441,7 @@ impl ImageTransform {
         }
         let sx = self.crop.width() / self.resized_width as f64;
         let sy = self.crop.height() / self.resized_height as f64;
-        let raster = Rect::new(
+        let raster = Rect::try_new(
             (image.left - content.left) * sx + self.crop.left,
             (image.top - content.top) * sy + self.crop.top,
             (image.right - content.left) * sx + self.crop.left,

@@ -1,11 +1,9 @@
 //! Installed-command paths exercised without Jev or caller credentials.
 use serde_json::Value;
-use std::{
-    fs,
-    path::PathBuf,
-    process::{Command, Output},
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::fs;
+use std::path::PathBuf;
+use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
 struct Temp(PathBuf);
 impl Temp {
     fn new() -> Self {
@@ -15,12 +13,12 @@ impl Temp {
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::create_dir(&p).unwrap();
+        fs::create_dir(&p).expect("create the isolated launch-test directory");
         Self(p)
     }
     fn file(&self, name: &str, text: &str) -> PathBuf {
         let p = self.0.join(name);
-        fs::write(&p, text).unwrap();
+        fs::write(&p, text).expect("write the synthetic launch configuration");
         p
     }
 }
@@ -33,7 +31,7 @@ fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
-        .unwrap()
+        .expect("the workspace root must exist relative to the CLI crate")
 }
 fn cli(args: &[&str], cwd: &Temp) -> Output {
     Command::new(env!("CARGO_BIN_EXE_voltfill"))
@@ -41,7 +39,7 @@ fn cli(args: &[&str], cwd: &Temp) -> Output {
         .current_dir(&cwd.0)
         .env_clear()
         .output()
-        .unwrap()
+        .expect("launch the built CLI with an empty environment")
 }
 #[test]
 fn unsafe_or_ambiguous_configs_fail_without_disclosing_contents_or_reading_keys() {
@@ -57,14 +55,29 @@ fn unsafe_or_ambiguous_configs_fail_without_disclosing_contents_or_reading_keys(
         ("json", r#"{"run":{"remote":true,"remote":false}}"#),
     ] {
         let p = temp.file(&format!("bad.{ext}"), text);
-        let out = cli(&["run", "--config", p.to_str().unwrap()], &temp);
+        let out = cli(
+            &[
+                "run",
+                "--config",
+                p.to_str().expect("the generated config path must be UTF-8"),
+            ],
+            &temp,
+        );
         assert_eq!(out.status.code(), Some(2), "{text}");
-        let err = String::from_utf8(out.stderr).unwrap();
+        let err = String::from_utf8(out.stderr).expect("CLI diagnostics must be UTF-8");
         assert!(!err.contains("secret-canary"));
         assert!(!err.contains("api_key_required"));
     }
     let p = temp.file("oversized.yaml", &" ".repeat(65537));
-    let out = cli(&["run", "-c", p.to_str().unwrap()], &temp);
+    let out = cli(
+        &[
+            "run",
+            "-c",
+            p.to_str()
+                .expect("the generated oversized config path must be UTF-8"),
+        ],
+        &temp,
+    );
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("input_too_large"));
 }
@@ -74,7 +87,15 @@ fn explicit_empty_server_config_is_an_error_for_launch_and_legacy_files() {
     let temp = Temp::new();
     for (name, content) in [("empty.yaml", "serve: {}\n"), ("empty.json", "{}")] {
         let p = temp.file(name, content);
-        let out = cli(&["serve", "--config", p.to_str().unwrap()], &temp);
+        let out = cli(
+            &[
+                "serve",
+                "--config",
+                p.to_str()
+                    .expect("the generated empty config path must be UTF-8"),
+            ],
+            &temp,
+        );
         assert_eq!(out.status.code(), Some(2));
         assert!(String::from_utf8_lossy(&out.stderr).contains("remote_permission_required"));
     }
@@ -95,14 +116,22 @@ fn server_environment_and_credential_files_are_validated_before_listening() {
             vec!["--listen", "0.0.0.0:0", "--model", "invalid"],
             vec![
                 ("VOLTFILL_LISTEN", "invalid-private-canary"),
-                ("VOLTFILL_SERVER_API_KEY_FILE", key.to_str().unwrap()),
+                (
+                    "VOLTFILL_SERVER_API_KEY_FILE",
+                    key.to_str()
+                        .expect("the synthetic credential-file path must be UTF-8"),
+                ),
             ],
             "invalid_model",
         ),
         (
             vec![],
             vec![
-                ("VOLTFILL_SERVER_API_KEY_FILE", key.to_str().unwrap()),
+                (
+                    "VOLTFILL_SERVER_API_KEY_FILE",
+                    key.to_str()
+                        .expect("the synthetic credential-file path must be UTF-8"),
+                ),
                 ("VOLTFILL_SERVER_API_KEY", "synthetic-server-canary"),
             ],
             "credential_sources_conflict",
@@ -120,16 +149,25 @@ fn server_environment_and_credential_files_are_validated_before_listening() {
     ] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_voltfill"));
         command
-            .args(["serve", "--mock", fixture.to_str().unwrap()])
+            .args([
+                "serve",
+                "--mock",
+                fixture
+                    .to_str()
+                    .expect("the example fixture path must be UTF-8"),
+            ])
             .args(args)
             .env_clear();
         for (name, value) in variables {
             command.env(name, value);
         }
-        let output = command.output().unwrap();
+        let output = command
+            .output()
+            .expect("launch the built server command with synthetic settings");
         assert_eq!(output.status.code(), Some(2));
         assert_eq!(
-            serde_json::from_slice::<Value>(&output.stderr).unwrap()["error"],
+            serde_json::from_slice::<Value>(&output.stderr)
+                .expect("server startup diagnostics must be JSON")["error"],
             error
         );
         assert!(!String::from_utf8_lossy(&output.stderr).contains("canary"));

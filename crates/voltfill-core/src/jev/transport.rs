@@ -1,20 +1,18 @@
 //! Extraction-specific observer compatibility over the Jev execution boundary.
-use super::{
-    Limits, Request, Response,
-    multipart::{Body, PngImage},
-};
+use super::multipart::{Body, PngImage};
+use super::{Limits, Request, Response};
 pub use jev_client::transport::*;
 
-pub struct RequestScope<'a> {
-    pub field_id: &'a str,
+pub struct RequestScope<'request> {
+    pub field_id: &'request str,
     pub page: u32,
 }
-pub struct AttemptContext<'a> {
+pub struct AttemptContext<'attempt> {
     pub slot: u32,
-    pub field_id: &'a str,
+    pub field_id: &'attempt str,
     pub page: u32,
-    pub question_ids: &'a [String],
-    pub input: &'a InputSummary,
+    pub question_ids: &'attempt [String],
+    pub input: &'attempt InputSummary,
 }
 pub trait AttemptObserver {
     fn waiting(&mut self, _duration_ms: u64) -> Result<(), Failure> {
@@ -128,9 +126,9 @@ pub fn execute_in_scope<T: Transport, C: Clock, O: AttemptObserver>(
     )
 }
 
-struct ScopedObserver<'a, 's, O> {
-    inner: &'a mut O,
-    scope: RequestScope<'s>,
+struct ScopedObserver<'observer, 'request, O> {
+    inner: &'observer mut O,
+    scope: RequestScope<'request>,
 }
 impl<O: AttemptObserver> jev_client::transport::AttemptObserver for ScopedObserver<'_, '_, O> {
     fn waiting(&mut self, duration_ms: u64) -> Result<(), Failure> {

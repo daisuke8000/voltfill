@@ -7,6 +7,7 @@ const TARGETS: &[&str] = &["voltfill_core", "voltfill_cli", "voltfill_server"];
 
 pub struct TelemetryLogger(otel_log::TelemetryLogger);
 impl TelemetryLogger {
+    #[must_use]
     pub fn new(
         service: &'static str,
         level: log::LevelFilter,
@@ -17,6 +18,7 @@ impl TelemetryLogger {
         ))
     }
     /// Supply a provider with an OTLP exporter to integrate a collector.
+    #[must_use]
     pub fn with_provider(provider: SdkLoggerProvider, level: log::LevelFilter) -> Self {
         Self(otel_log::TelemetryLogger::with_provider(
             provider, SCOPE, TARGETS, level,

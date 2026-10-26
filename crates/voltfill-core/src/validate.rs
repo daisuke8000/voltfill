@@ -1,7 +1,7 @@
 use crate::schema::{Normalization, OutputType, Validator};
 use serde_json::Value;
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, thiserror::Error, PartialEq, Eq)]
 pub enum ValidationError {
     #[error("value does not satisfy declared type")]
     Type,
@@ -9,6 +9,7 @@ pub enum ValidationError {
     Rule,
 }
 
+#[must_use]
 pub fn normalize(raw: &str, normalization: Normalization) -> String {
     match normalization {
         Normalization::None => raw.to_owned(),
@@ -19,6 +20,7 @@ pub fn normalize(raw: &str, normalization: Normalization) -> String {
 
 // Only the radical blocks are folded: other compatibility characters, such as
 // full-width letters and circled numbers, are meaningful as printed.
+#[must_use]
 pub fn unify_cjk_radicals(raw: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
     let mut out = String::with_capacity(raw.len());

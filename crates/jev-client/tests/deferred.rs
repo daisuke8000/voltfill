@@ -1,4 +1,9 @@
-use jev_client::{self as jev, PngImage, multipart::Body, transport::*};
+use jev_client::multipart::Body;
+use jev_client::transport::{
+    self, AttemptBudget, Clock, Execution, Failure, HttpRequest, HttpResponse, NoopObserver,
+    Policy, Secret, Transport, TransportError,
+};
+use jev_client::{self as jev, PngImage};
 use std::collections::VecDeque;
 
 #[derive(Default)]
@@ -49,7 +54,7 @@ fn request() -> jev::Request {
         br#"{"model":"jev-1.14.0","state":"@page","assets":{"@page":{"part":"page"}},"questions":{"q":{"type":"noul","instructions":"Present?"}}}"#,
         jev::Limits::default(),
     )
-    .unwrap()
+    .expect("synthetic image reference must bind to its declared asset")
 }
 fn reply(status: u16) -> HttpResponse {
     let body = br#"{"model":"jev-1.14.0","answers":{"q":{"type":"noul","noul":1}},"usage":{"input_tokens":900,"output_tokens":5}}"#;
@@ -77,11 +82,14 @@ fn run(
     budget: &mut AttemptBudget,
     make: &mut dyn FnMut() -> Result<Vec<PngImage>, ()>,
 ) -> Execution {
-    execute_deferred(
+    transport::execute_deferred(
         &request(),
         make,
         "deferred-boundary",
-        Some(&Secret::new("synthetic-only".into()).unwrap()),
+        Some(
+            &Secret::new("synthetic-only".into())
+                .expect("synthetic bearer contains only visible ASCII"),
+        ),
         policy(),
         jev::Limits::default(),
         wire,
@@ -104,15 +112,21 @@ fn deferred_images_are_made_once_and_a_retry_resends_the_same_body() {
         &mut AttemptBudget::default(),
         &mut || {
             made += 1;
-            Ok(vec![PngImage::new("page".into(), png()).unwrap()])
+            Ok(vec![
+                PngImage::new("page".into(), png())
+                    .expect("synthetic PNG must pass structural validation"),
+            ])
         },
     );
     assert!(execution.result.is_ok());
     assert_eq!(made, 1);
     assert_eq!(wire.sent.len(), 2);
     assert_eq!(wire.sent[0], wire.sent[1]);
-    let images = [PngImage::new("page".into(), png()).unwrap()];
-    let ready = jev::multipart::encode(&request(), &images, "deferred-boundary").unwrap();
+    let images =
+        [PngImage::new("page".into(), png())
+            .expect("synthetic PNG must pass structural validation")];
+    let ready = jev::multipart::encode(&request(), &images, "deferred-boundary")
+        .expect("prepared image must match the declared multipart asset");
     assert_eq!(wire.sent[0], Body::bytes(&ready));
 }
 
@@ -131,7 +145,10 @@ fn images_that_cannot_be_made_return_the_slot_unsent() {
     assert_eq!((snapshot.reserved, snapshot.known_cost), (0, 0));
     assert!(snapshot.last_completion.is_none() && !snapshot.stopped);
     let sent = run(&mut wire, &mut clock, &mut budget, &mut || {
-        Ok(vec![PngImage::new("page".into(), png()).unwrap()])
+        Ok(vec![
+            PngImage::new("page".into(), png())
+                .expect("synthetic PNG must pass structural validation"),
+        ])
     });
     assert!(sent.result.is_ok());
     assert_eq!((clock.0, wire.sent.len()), (0, 1));

@@ -1,14 +1,12 @@
 use serde_json::Value;
-use std::{
-    path::PathBuf,
-    process::{Command, Output},
-};
+use std::path::PathBuf;
+use std::process::{Command, Output};
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
-        .unwrap()
+        .expect("workspace root must exist relative to the CLI manifest")
 }
 
 fn cli(args: &[&str]) -> Output {
@@ -17,12 +15,12 @@ fn cli(args: &[&str]) -> Output {
         .current_dir(root())
         .env_clear()
         .output()
-        .unwrap()
+        .expect("Cargo-built CLI must launch")
 }
 
 fn assert_error_response(bytes: &[u8], reason: &str) {
     assert_eq!(
-        serde_json::from_slice::<Value>(bytes).unwrap(),
+        serde_json::from_slice::<Value>(bytes).expect("CLI errors must be JSON"),
         serde_json::json!({"error": reason})
     );
 }
@@ -37,9 +35,10 @@ fn concurrency_flag_accepts_values_above_the_default() {
         "--max-concurrency",
         "64",
     ]);
-    let error = serde_json::from_slice::<Value>(&out.stderr).unwrap()["error"]
+    let error = serde_json::from_slice::<Value>(&out.stderr)
+        .expect("validation failure must return a JSON error")["error"]
         .as_str()
-        .unwrap()
+        .expect("error code must be a string")
         .to_string();
     assert!(
         !["invalid_arguments", "invalid_execution_config"].contains(&error.as_str()),
@@ -51,7 +50,7 @@ fn concurrency_flag_accepts_values_above_the_default() {
 fn retry_and_logging_help_and_validation_precede_input_or_credentials() {
     let out = cli(&["--help"]);
     assert_eq!(out.status.code(), Some(0));
-    let help = String::from_utf8(out.stdout).unwrap();
+    let help = String::from_utf8(out.stdout).expect("CLI help must be UTF-8");
     for phrase in [
         "--max-attempts",
         "--max-concurrency",

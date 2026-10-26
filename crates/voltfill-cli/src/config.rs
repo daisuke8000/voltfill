@@ -1,12 +1,10 @@
 //! Explicit launch files; no filesystem discovery, interpolation or credentials.
 use serde::Deserialize;
 use serde_json::Value;
-use std::{
-    collections::BTreeSet,
-    io::Read,
-    path::{Path, PathBuf},
-};
-use voltfill_core::{jev::transport::ExecutionConfig, resources::ResourceLimits};
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use voltfill_core::jev::transport::ExecutionConfig;
+use voltfill_core::resources::ResourceLimits;
 use voltfill_server::cli::settings;
 
 pub struct Invocation {
@@ -97,6 +95,8 @@ fn flag(args: &mut Vec<String>, explicit: &BTreeSet<String>, name: &str, enabled
     }
 }
 pub fn expand(arguments: impl IntoIterator<Item = String>) -> Result<Invocation, &'static str> {
+    use std::io::Read;
+
     let mut args: Vec<_> = arguments
         .into_iter()
         .map(|a| if a == "-c" { "--config".into() } else { a })
@@ -370,14 +370,18 @@ mod tests {
             &path,
             "serve:\n  mock: mock.json\n  reuse_document: true\n  reuse_document_ttl_ms: 1234\n",
         )
-        .unwrap();
+        .expect("write the reuse configuration for flag expansion");
         let invocation = expand([
             "serve".into(),
             "--config".into(),
-            path.to_str().unwrap().into(),
+            path.to_str()
+                .expect("the generated config path must be UTF-8")
+                .into(),
         ]);
-        std::fs::remove_file(&path).unwrap();
-        let arguments = invocation.unwrap().arguments;
+        std::fs::remove_file(&path).expect("remove the temporary reuse configuration");
+        let arguments = invocation
+            .expect("the reuse configuration must expand into server arguments")
+            .arguments;
         assert!(arguments.contains(&"--reuse-document".to_owned()));
         assert!(
             arguments

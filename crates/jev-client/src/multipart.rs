@@ -119,6 +119,7 @@ impl std::fmt::Debug for PngImage {
     }
 }
 impl PngImage {
+    #[must_use]
     pub fn sha256(&self) -> String {
         self.sha256
             .get_or_init(|| {
@@ -131,10 +132,17 @@ impl PngImage {
             .clone()
     }
     /// Validated IHDR dimensions only; does not expose image bytes or filenames.
+    #[must_use]
     pub fn dimensions(&self) -> (u32, u32) {
         self.dimensions
     }
+    /// Compatibility name for [`Self::try_new`].
     pub fn new(part: String, bytes: Vec<u8>) -> Result<Self, Error> {
+        Self::try_new(part, bytes)
+    }
+
+    /// Validate PNG structure and the default model image dimensions.
+    pub fn try_new(part: String, bytes: Vec<u8>) -> Result<Self, Error> {
         Self::with_sides(part, bytes, IMAGE_SIDE_PX)
     }
     /// For a caller whose model accepts other side lengths than Jev's default.
@@ -218,6 +226,7 @@ impl Body {
     pub(crate) fn shared_bytes(&self) -> bytes::Bytes {
         self.bytes.clone()
     }
+    #[must_use]
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }

@@ -1,4 +1,5 @@
-use crate::{jev, model::Strategy};
+use crate::jev;
+use crate::model::Strategy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -8,7 +9,7 @@ pub const MAX_SCHEMA_BYTES: usize = 1024 * 1024;
 // work an extraction actually does.
 pub const MAX_FIELDS: usize = 512;
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, thiserror::Error, PartialEq, Eq)]
 pub enum SchemaError {
     #[error("invalid schema JSON")]
     Json,
@@ -26,6 +27,8 @@ pub enum SchemaError {
     Strategy,
 }
 
+/// Extraction schema. Deserialization alone does not validate dependency or resolver contracts.
+/// Use [`parse`] for bounded JSON decoding followed by validation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FormDefinition {
@@ -37,6 +40,7 @@ pub struct FormDefinition {
     pub shared_context: Option<jev::Content>,
 }
 
+/// One requested value, its questions, source scope, and deterministic resolution rules.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldDefinition {
@@ -68,6 +72,7 @@ pub enum OutputType {
     Enum,
 }
 
+/// A schema question whose dynamic criteria may be populated from source candidates.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QuestionDefinition {
@@ -87,19 +92,19 @@ pub struct QuestionDefinition {
 impl QuestionDefinition {
     pub(crate) fn wire_question(&self) -> Result<jev::Question, SchemaError> {
         let instructions = self.instructions.clone();
-        let criteria = self.criteria.clone().unwrap_or(Value::Null);
+        let criteria = self.criteria.as_ref().unwrap_or(&Value::Null);
         Ok(match self.kind {
             QuestionType::Noul => jev::Question::Noul {
                 instructions,
-                criteria: serde_json::from_value(criteria).map_err(|_| SchemaError::Contract)?,
+                criteria: Deserialize::deserialize(criteria).map_err(|_| SchemaError::Contract)?,
             },
             QuestionType::Choice => jev::Question::Choice {
                 instructions,
-                criteria: serde_json::from_value(criteria).map_err(|_| SchemaError::Contract)?,
+                criteria: Deserialize::deserialize(criteria).map_err(|_| SchemaError::Contract)?,
             },
             QuestionType::Score => jev::Question::Score {
                 instructions,
-                criteria: serde_json::from_value(criteria).map_err(|_| SchemaError::Contract)?,
+                criteria: Deserialize::deserialize(criteria).map_err(|_| SchemaError::Contract)?,
             },
             QuestionType::Box if self.criteria.is_none() => jev::Question::Box { instructions },
             QuestionType::Box => return Err(SchemaError::Contract),
@@ -148,6 +153,7 @@ pub enum CandidateKind {
     TextSpans,
 }
 
+/// Maps validated answers to a field value; source-backed resolvers must retain Evidence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Resolver {
@@ -175,6 +181,7 @@ pub enum Resolver {
     },
 }
 impl Resolver {
+    #[must_use]
     pub fn question_id(&self) -> &str {
         match self {
             Self::SelectedCandidate { question_id }
@@ -204,6 +211,7 @@ pub enum Normalization {
     CollapseWhitespace,
 }
 
+/// Decode bounded JSON with duplicate-key detection and validate the complete form contract.
 pub fn parse(bytes: &[u8]) -> Result<FormDefinition, SchemaError> {
     if bytes.len() > MAX_SCHEMA_BYTES {
         return Err(SchemaError::Limit);
@@ -223,6 +231,7 @@ fn identifier(value: &str) -> bool {
 }
 
 impl FormDefinition {
+    /// Check schema version, field limits, identifiers, dependency graphs, and resolver/type compatibility.
     pub fn validate(&self) -> Result<(), SchemaError> {
         if self.schema_version != 1 {
             return Err(SchemaError::Version);
@@ -231,7 +240,7 @@ impl FormDefinition {
             return Err(SchemaError::Limit);
         }
         if let Some(context) = &self.shared_context
-            && (!jev::entry(context, false) || !jev::fits_in_state("shared_context", context))
+            && (!jev::entry(context) || !jev::fits_in_state("shared_context", context))
         {
             return Err(SchemaError::Contract);
         }
@@ -249,10 +258,10 @@ impl FormDefinition {
             }
             let mut questions = BTreeMap::new();
             for q in &field.questions {
-                if !identifier(&q.id) || questions.insert(&q.id, q).is_some() {
+                if !identifier(&q.id) || questions.insert(q.id.as_str(), q).is_some() {
                     return Err(SchemaError::Identifier);
                 }
-                if !jev::entry(&q.instructions, false) {
+                if !jev::entry(&q.instructions) {
                     return Err(SchemaError::Contract);
                 }
                 if let Some(source) = &q.candidate_source {
@@ -288,7 +297,7 @@ impl FormDefinition {
                 let previous = done.len();
                 for (id, q) in &questions {
                     if q.depends_on.iter().all(|d| done.contains(d.as_str())) {
-                        done.insert(id.as_str());
+                        done.insert(*id);
                     }
                 }
                 if done.len() == previous {
@@ -296,7 +305,7 @@ impl FormDefinition {
                 }
             }
             let q = questions
-                .get(&field.resolver.question_id().to_string())
+                .get(field.resolver.question_id())
                 .ok_or(SchemaError::Contract)?;
             let correct = match &field.resolver {
                 Resolver::SelectedCandidate { .. } => {
@@ -332,7 +341,7 @@ impl FormDefinition {
                                 | OutputType::Decimal
                         )
                         && questions
-                            .get(presence_question_id)
+                            .get(presence_question_id.as_str())
                             .is_some_and(|p| p.kind == QuestionType::Noul)
                 }
                 Resolver::SelectedChoice { mapping, .. } => {
@@ -375,6 +384,7 @@ impl FormDefinition {
         Ok(())
     }
 
+    /// Reject question modalities and resolvers unsupported by the selected extraction strategy.
     pub fn validate_strategy(&self, strategy: Strategy) -> Result<(), SchemaError> {
         if strategy != Strategy::TextFirst
             && self
@@ -384,7 +394,8 @@ impl FormDefinition {
         {
             return Err(SchemaError::Strategy);
         }
-        for q in self.fields.iter().flat_map(|f| &f.questions) {
+        let questions = self.fields.iter().flat_map(|field| &field.questions);
+        for q in questions {
             let valid = match strategy {
                 Strategy::TextFirst => {
                     q.input.modality == Modality::Text && q.kind != QuestionType::Box
