@@ -10,4 +10,4 @@ serde.workspace = true
 thiserror.workspace = true
 sha2.workspace = true
 pdf-inspector = { version = "=1.25.2", default-features = false }
-lopdf = { version = "=0.45.0", default-features = false }
+lopdf = { version = "=0.46.0", default-features = false }
