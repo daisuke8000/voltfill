@@ -1,4 +1,4 @@
-//! HTTP extraction service, admission, and document lifetime management.
+//! HTTP extraction and form-fill service, admission, and document lifetime management.
 use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Request, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
+use vf_core::fill::{self, MAX_FORM_BYTES};
 use vf_legacy::engine::{self, DocumentCache, EvaluationProfile, ExtractOptions};
 use vf_legacy::evaluate::{FixtureEvaluator, MonotonicClock, RemoteEvaluator};
 use vf_legacy::jev::http::{Endpoint, HttpTransport};
@@ -190,11 +191,12 @@ pub fn router(state: AppState) -> Router {
             routing::get(|| async { Json(json!({"status":"ok"})) }),
         )
         .route("/v1/extract", routing::post(extract))
+        .route("/v1/fill", routing::post(fill_form))
         .layer(DefaultBodyLimit::max(upload_limit(&state)))
         .with_state(state)
 }
 fn upload_limit(state: &AppState) -> usize {
-    state.config.resources.pdf.max_bytes + schema::MAX_SCHEMA_BYTES + 128 * 1024
+    state.config.resources.pdf.max_bytes + schema::MAX_SCHEMA_BYTES.max(MAX_FORM_BYTES) + 128 * 1024
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -249,6 +251,20 @@ fn authorized(request: &Request, key: Option<&Secret>) -> bool {
     }
     difference == 0
 }
+/// Shared by every upload endpoint: Bearer when configured, and browsers only with a key.
+/// Returns the rejection, if any.
+fn unauthenticated(request: &Request, state: &AppState) -> Option<Response> {
+    if !authorized(request, state.config.api_key.as_ref()) {
+        return Some(error(StatusCode::UNAUTHORIZED, "unauthorized"));
+    }
+    if state.config.api_key.is_none() && request.headers().contains_key(header::ORIGIN) {
+        return Some(error(
+            StatusCode::FORBIDDEN,
+            "browser_authentication_required",
+        ));
+    }
+    None
+}
 struct CancelOnDrop(Arc<AtomicBool>);
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
@@ -276,7 +292,8 @@ impl Clock for JobClock {
     }
 }
 
-type Upload = (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>);
+/// Received parts in the order of the endpoint's part list.
+type Upload<const N: usize> = [Option<Vec<u8>>; N];
 
 // Answering while the client is still uploading and then closing the connection shows
 // up on the client as a reset rather than the response, and a client cannot tell a
@@ -324,35 +341,35 @@ async fn discard_upload(body: axum::body::Body, limit: usize, deadline: Duration
     let _ = tokio::time::timeout(deadline, read).await;
 }
 
-async fn bounded_upload(
-    upload: impl std::future::Future<Output = Result<Upload, (StatusCode, &'static str)>>,
+async fn bounded_upload<T>(
+    upload: impl std::future::Future<Output = Result<T, (StatusCode, &'static str)>>,
     deadline: Duration,
-) -> Result<Upload, (StatusCode, &'static str)> {
+) -> Result<T, (StatusCode, &'static str)> {
     tokio::time::timeout(deadline, upload)
         .await
         .unwrap_or(Err((StatusCode::REQUEST_TIMEOUT, "upload_timeout")))
 }
 
-async fn read_upload(
+/// Read each named part at most once, within its own byte limit; any other part is rejected.
+async fn read_upload<const N: usize>(
     request: Request,
     state: &AppState,
-) -> Result<Upload, (StatusCode, &'static str)> {
+    parts: [(&'static str, usize); N],
+) -> Result<Upload<N>, (StatusCode, &'static str)> {
     let mut multipart = match Multipart::from_request(request, state).await {
         Ok(value) => value,
         Err(_) => return Err((StatusCode::BAD_REQUEST, "invalid_multipart")),
     };
-    let (mut pdf, mut definition, mut options) = (None, None, None);
+    let mut upload: Upload<N> = std::array::from_fn(|_| None);
     loop {
         let field = match multipart.next_field().await {
             Ok(Some(field)) => field,
             Ok(None) => break,
             Err(rejection) => return Err((rejection.status(), "invalid_or_oversized_upload")),
         };
-        let name = field.name().unwrap_or("").to_owned();
-        let limit = match name.as_str() {
-            "pdf" if pdf.is_none() => state.config.resources.pdf.max_bytes,
-            "schema" if definition.is_none() => schema::MAX_SCHEMA_BYTES,
-            "options" if options.is_none() => 64 * 1024,
+        let name = field.name().unwrap_or("");
+        let (slot, limit) = match parts.iter().position(|(part, _)| *part == name) {
+            Some(index) if upload[index].is_none() => (index, parts[index].1),
             _ => return Err((StatusCode::BAD_REQUEST, "unknown_or_duplicate_part")),
         };
         let mut field = field;
@@ -369,21 +386,14 @@ async fn read_upload(
                 Err(rejection) => return Err((rejection.status(), "invalid_or_oversized_upload")),
             }
         }
-        match name.as_str() {
-            "pdf" => pdf = Some(bytes),
-            "schema" => definition = Some(bytes),
-            _ => options = Some(bytes),
-        }
+        upload[slot] = Some(bytes);
     }
-    Ok((pdf, definition, options))
+    Ok(upload)
 }
 
 async fn extract(State(state): State<AppState>, request: Request) -> Response {
-    if !authorized(&request, state.config.api_key.as_ref()) {
-        return error(StatusCode::UNAUTHORIZED, "unauthorized");
-    }
-    if state.config.api_key.is_none() && request.headers().contains_key(header::ORIGIN) {
-        return error(StatusCode::FORBIDDEN, "browser_authentication_required");
+    if let Some(response) = unauthenticated(&request, &state) {
+        return response;
     }
     let rejection = match state.jobs.clone().try_acquire_owned() {
         Err(_) => Err(busy(2)),
@@ -406,8 +416,13 @@ async fn extract(State(state): State<AppState>, request: Request) -> Response {
         Ok(permit) => permit,
         Err(response) => return reject_upload(request, &state, response).await,
     };
-    let (pdf, definition, options) = match bounded_upload(
-        read_upload(request, &state),
+    let parts = [
+        ("pdf", state.config.resources.pdf.max_bytes),
+        ("schema", schema::MAX_SCHEMA_BYTES),
+        ("options", 64 * 1024),
+    ];
+    let [pdf, definition, options] = match bounded_upload(
+        read_upload(request, &state, parts),
         Duration::from_millis(state.config.upload_timeout_ms),
     )
     .await
@@ -598,6 +613,62 @@ fn extraction_error(error: engine::EngineError) -> Response {
         }),
     )
         .into_response()
+}
+
+/// `POST /v1/fill`: the HTTP form of `voltfill fill`. It inspects the PDF's own text
+/// layer and matches it to the form offline, so it never sends a Jev request, renders
+/// or uses the document cache. It shares the single job slot with extraction, but the
+/// Jev cooldown and pause do not apply because nothing here reaches Jev.
+async fn fill_form(State(state): State<AppState>, request: Request) -> Response {
+    if let Some(response) = unauthenticated(&request, &state) {
+        return response;
+    }
+    let permit = match state.jobs.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => return reject_upload(request, &state, busy(2)).await,
+    };
+    let limits = state.config.resources.pdf;
+    let parts = [("pdf", limits.max_bytes), ("form", MAX_FORM_BYTES)];
+    let [pdf, definition] = match bounded_upload(
+        read_upload(request, &state, parts),
+        Duration::from_millis(state.config.upload_timeout_ms),
+    )
+    .await
+    {
+        Ok(upload) => upload,
+        Err((status, code)) => return error(status, code),
+    };
+    let (Some(pdf), Some(definition)) = (pdf, definition) else {
+        return error(StatusCode::BAD_REQUEST, "missing_pdf_or_form");
+    };
+    let form = match fill::parse_form(&definition) {
+        Ok(form) => form,
+        Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_form"),
+    };
+    drop(definition);
+    log::info!(target:"vf_server","{}",json!({"event":"fill_started","pdf_bytes":pdf.len(),"fields":form.fields.len()}));
+    let joined = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let snapshot = match vf_source::inspect(&pdf, limits) {
+            Ok(snapshot) => snapshot,
+            Err(vf_source::PdfError::LimitExceeded) => {
+                return error(StatusCode::PAYLOAD_TOO_LARGE, "input_too_large");
+            }
+            Err(_) => return error(StatusCode::BAD_REQUEST, "pdf_inspection_failed"),
+        };
+        drop(pdf);
+        let result = fill::fill(&snapshot.document_id, &snapshot.fragments, &form);
+        let filled = result
+            .fields
+            .values()
+            .filter(|f| f.status == fill::FillStatus::Filled)
+            .count();
+        log::info!(target:"vf_server","{}",json!({"event":"fill_completed","fields":result.fields.len(),"filled":filled}));
+        Json(result).into_response()
+    })
+    .await;
+    // A failed worker sent nothing to Jev, so unlike extraction it does not pause admission.
+    joined.unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "worker_failed"))
 }
 
 #[cfg(test)]
@@ -853,7 +924,7 @@ mod tests {
             .expect("the idle server must have an available job permit");
         let upload = async move {
             let _permit = permit;
-            std::future::pending::<Result<Upload, (StatusCode, &'static str)>>().await
+            std::future::pending::<Result<Upload<3>, (StatusCode, &'static str)>>().await
         };
         let response = bounded_upload(upload, Duration::from_millis(1))
             .await
@@ -908,14 +979,38 @@ mod tests {
     }
 
     fn text_pdf(text: &str) -> Vec<u8> {
-        let stream = format!("BT /F1 24 Tf 72 700 Td ({text}) Tj ET");
-        let objects = [
+        pages_pdf(&[text])
+    }
+
+    fn two_page_pdf() -> Vec<u8> {
+        pages_pdf(&["Ref: AB12", "Ref: CD34"])
+    }
+
+    /// One text line per page. Objects: catalog, page tree, font, then a page and its content.
+    fn pages_pdf(texts: &[&str]) -> Vec<u8> {
+        let kids: Vec<String> = (0..texts.len())
+            .map(|i| format!("{} 0 R", 4 + 2 * i))
+            .collect();
+        let mut objects = vec![
             "<</Type/Catalog/Pages 2 0 R>>".to_owned(),
-            "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_owned(),
-            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>".to_owned(),
-            format!("<</Length {}>>\nstream\n{stream}\nendstream", stream.len()),
+            format!(
+                "<</Type/Pages/Kids[{}]/Count {}>>",
+                kids.join(" "),
+                texts.len()
+            ),
             "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>".to_owned(),
         ];
+        for (i, text) in texts.iter().enumerate() {
+            let stream = format!("BT /F1 24 Tf 72 700 Td ({text}) Tj ET");
+            objects.push(format!(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents {} 0 R/Resources<</Font<</F1 3 0 R>>>>>>",
+                5 + 2 * i
+            ));
+            objects.push(format!(
+                "<</Length {}>>\nstream\n{stream}\nendstream",
+                stream.len()
+            ));
+        }
         let mut pdf = b"%PDF-1.4\n".to_vec();
         let mut offsets = Vec::new();
         for (i, object) in objects.iter().enumerate() {
@@ -937,23 +1032,28 @@ mod tests {
         pdf
     }
 
-    async fn extract_pdf(state: &AppState, pdf: &[u8], options: &str) -> Response {
+    fn multipart(parts: &[(&str, &[u8])]) -> Vec<u8> {
         let mut body = Vec::new();
-        for (name, content) in [
+        for (name, content) in parts {
+            body.extend(
+                format!("--b\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n").bytes(),
+            );
+            body.extend(*content);
+            body.extend(b"\r\n");
+        }
+        body.extend(b"--b--\r\n");
+        body
+    }
+
+    async fn extract_pdf(state: &AppState, pdf: &[u8], options: &str) -> Response {
+        let body = multipart(&[
             ("pdf", pdf),
             ("options", options.as_bytes()),
             (
                 "schema",
                 &include_bytes!("../../../examples/legacy/text-form.json")[..],
             ),
-        ] {
-            body.extend(
-                format!("--b\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n").bytes(),
-            );
-            body.extend(content);
-            body.extend(b"\r\n");
-        }
-        body.extend(b"--b--\r\n");
+        ]);
         router(state.clone())
             .oneshot(
                 Request::post("/v1/extract")
@@ -963,6 +1063,288 @@ mod tests {
             )
             .await
             .expect("the router must return a response to the multipart request")
+    }
+
+    const FORM: &[u8] = br#"{"fields":[
+        {"id":"reference","label":"Ref"},
+        {"id":"missing","label":"Total","type":"amount"}
+    ]}"#;
+
+    /// Multipart parts as (name, content), in sending order.
+    type Parts<'a> = &'a [(&'a str, &'a [u8])];
+
+    async fn post_fill(
+        state: &AppState,
+        parts: Parts<'_>,
+        headers: &[(header::HeaderName, &str)],
+    ) -> Response {
+        let mut request = Request::post("/v1/fill")
+            .header(header::CONTENT_TYPE, "multipart/form-data; boundary=b");
+        for (name, value) in headers {
+            request = request.header(name, *value);
+        }
+        router(state.clone())
+            .oneshot(
+                request
+                    .body(Body::from(multipart(parts)))
+                    .expect("construct the local multipart fill request"),
+            )
+            .await
+            .expect("the router must return a response to the fill request")
+    }
+
+    async fn json_body(response: Response) -> serde_json::Value {
+        let bytes = body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("the fill response body must fit the test read limit");
+        serde_json::from_slice(&bytes).expect("the fill response must be JSON")
+    }
+
+    async fn assert_filled(response: Response) {
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["evaluation_only"], true);
+        assert_eq!(
+            body["document_id"]
+                .as_str()
+                .expect("the fill result must carry the document id")
+                .len(),
+            64
+        );
+        let reference = &body["fields"]["reference"];
+        assert_eq!(reference["status"], "filled");
+        assert_eq!(reference["raw"], "AB12");
+        assert_eq!(reference["value"], "AB12");
+        assert_eq!(reference["evidence"][0]["text"], "AB12");
+        assert_eq!(reference["evidence"][0]["page"], 1);
+        assert_eq!(body["fields"]["missing"]["status"], "not_found");
+    }
+
+    #[tokio::test]
+    async fn fill_returns_the_labelled_source_value_with_evidence() {
+        let state = state();
+        let pdf = text_pdf("Ref: AB12");
+        assert_filled(post_fill(&state, &[("form", FORM), ("pdf", &pdf)], &[]).await).await;
+        assert_eq!(state.jobs.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn fill_rejects_missing_unknown_duplicate_and_invalid_parts() {
+        let state = state();
+        let pdf = text_pdf("Ref: AB12");
+        let oversized = vec![b' '; MAX_FORM_BYTES + 1];
+        let cases: [(Parts, StatusCode, &str); 9] = [
+            (
+                &[("pdf", &pdf)],
+                StatusCode::BAD_REQUEST,
+                "missing_pdf_or_form",
+            ),
+            (
+                &[("form", FORM)],
+                StatusCode::BAD_REQUEST,
+                "missing_pdf_or_form",
+            ),
+            (
+                &[("pdf", &pdf), ("schema", FORM)],
+                StatusCode::BAD_REQUEST,
+                "unknown_or_duplicate_part",
+            ),
+            (
+                &[("pdf", &pdf), ("form", FORM), ("form", FORM)],
+                StatusCode::BAD_REQUEST,
+                "unknown_or_duplicate_part",
+            ),
+            (
+                &[("pdf", &pdf), ("form", b"{")],
+                StatusCode::BAD_REQUEST,
+                "invalid_form",
+            ),
+            (
+                &[("pdf", &pdf), ("form", br#"{"fields":[]}"#)],
+                StatusCode::BAD_REQUEST,
+                "invalid_form",
+            ),
+            (
+                &[
+                    ("pdf", &pdf),
+                    ("form", br#"{"fields":[{"id":"a","label":"x","extra":1}]}"#),
+                ],
+                StatusCode::BAD_REQUEST,
+                "invalid_form",
+            ),
+            (
+                &[("pdf", &pdf), ("form", &oversized)],
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "part_too_large",
+            ),
+            (
+                &[("pdf", b"not a pdf"), ("form", FORM)],
+                StatusCode::BAD_REQUEST,
+                "pdf_inspection_failed",
+            ),
+        ];
+        for (parts, status, code) in cases {
+            assert_error(post_fill(&state, parts, &[]).await, status, code).await;
+            assert_eq!(state.jobs.available_permits(), 1, "{code}");
+        }
+        let response = router(state.clone())
+            .oneshot(
+                Request::post("/v1/fill")
+                    .body(Body::from("{}"))
+                    .expect("construct the local non-multipart fill request"),
+            )
+            .await
+            .expect("the router must return a response to the fill request");
+        assert_error(response, StatusCode::BAD_REQUEST, "invalid_multipart").await;
+    }
+
+    #[tokio::test]
+    async fn fill_applies_the_configured_pdf_limits() {
+        let pdf = text_pdf("Ref: AB12");
+        let mut config = ServerConfig::fixture(
+            include_bytes!("../../../examples/legacy/text-mock.json").to_vec(),
+        )
+        .expect("the checked-in mock must initialize the fixture server config");
+        config.resources.pdf.max_bytes = pdf.len() - 1;
+        let state =
+            AppState::try_new(config).expect("the lowered PDF limit must initialize app state");
+        assert_error(
+            post_fill(&state, &[("pdf", &pdf), ("form", FORM)], &[]).await,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "part_too_large",
+        )
+        .await;
+
+        let mut config = ServerConfig::fixture(
+            include_bytes!("../../../examples/legacy/text-mock.json").to_vec(),
+        )
+        .expect("the checked-in mock must initialize the fixture server config");
+        config.resources.pdf.max_pages = 1;
+        let state =
+            AppState::try_new(config).expect("the lowered page limit must initialize app state");
+        assert_error(
+            post_fill(&state, &[("pdf", &two_page_pdf()), ("form", FORM)], &[]).await,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "input_too_large",
+        )
+        .await;
+        assert_eq!(state.jobs.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn fill_requires_the_configured_bearer_key_and_browser_authentication() {
+        let pdf = text_pdf("Ref: AB12");
+        let parts: Parts = &[("pdf", &pdf), ("form", FORM)];
+        assert_error(
+            post_fill(&state(), parts, &[(header::ORIGIN, "https://app.example")]).await,
+            StatusCode::FORBIDDEN,
+            "browser_authentication_required",
+        )
+        .await;
+
+        let mut config = ServerConfig::fixture(
+            include_bytes!("../../../examples/legacy/text-mock.json").to_vec(),
+        )
+        .expect("the checked-in mock must initialize the fixture server config");
+        config.api_key = Some(
+            Secret::new("synthetic-server-key".into())
+                .expect("the synthetic server key must be a valid bearer value"),
+        );
+        let state = AppState::try_new(config).expect("the keyed config must initialize app state");
+        for headers in [
+            &[][..],
+            &[(header::AUTHORIZATION, "Bearer synthetic-server-kex")][..],
+            &[(header::AUTHORIZATION, "synthetic-server-key")][..],
+        ] {
+            assert_error(
+                post_fill(&state, parts, headers).await,
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+            )
+            .await;
+        }
+        assert_filled(
+            post_fill(
+                &state,
+                parts,
+                &[
+                    (header::AUTHORIZATION, "Bearer synthetic-server-key"),
+                    (header::ORIGIN, "https://app.example"),
+                ],
+            )
+            .await,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn fill_shares_the_single_job_slot_with_extraction() {
+        let state = state();
+        let pdf = text_pdf("Ref: AB12");
+        let permit = state
+            .jobs
+            .clone()
+            .try_acquire_owned()
+            .expect("the idle server must have an available job permit");
+        let response = post_fill(&state, &[("pdf", &pdf), ("form", FORM)], &[]).await;
+        assert_eq!(response.headers()[header::RETRY_AFTER], "2");
+        assert_error(response, StatusCode::TOO_MANY_REQUESTS, "server_busy").await;
+        assert_eq!(state.jobs.available_permits(), 0);
+        drop(permit);
+        assert_filled(post_fill(&state, &[("pdf", &pdf), ("form", FORM)], &[]).await).await;
+    }
+
+    #[tokio::test]
+    async fn fill_upload_is_bounded_by_the_upload_deadline() {
+        let state = busy_state(300);
+        let stream = busy_server(&state).await;
+        let head = upload_head(1024).replace("/v1/extract", "/v1/fill");
+        write_all(&stream, head.as_bytes())
+            .await
+            .expect("write the stalled fill upload headers to the local server");
+        write_all(
+            &stream,
+            b"--b\r\nContent-Disposition: form-data; name=\"pdf\"\r\n\r\n%PDF",
+        )
+        .await
+        .expect("write the partial fill upload body to the local server");
+        let response = response_head(&stream).await;
+        assert!(response.starts_with("HTTP/1.1 408"), "{response}");
+        until(|| state.jobs.available_permits() == 1).await;
+    }
+
+    // The remote backend owns a blocking HTTP client, which must be dropped outside a runtime.
+    #[test]
+    fn fill_works_on_a_remote_backend_while_jev_admission_is_paused() {
+        let config = ServerConfig::remote(
+            Endpoint::try_new("https://127.0.0.1:9/")
+                .expect("the synthetic HTTPS endpoint must validate without a request"),
+            Secret::new("synthetic-jev-key".into())
+                .expect("the synthetic Jev key must be a valid bearer value"),
+        );
+        let state = AppState::try_new(config).expect("the remote config must initialize app state");
+        {
+            let mut admission = state
+                .admission
+                .lock()
+                .expect("the admission state must not have been poisoned in this test");
+            admission.paused = true;
+            admission.next = Instant::now() + Duration::from_secs(60);
+        }
+        let runtime =
+            tokio::runtime::Runtime::new().expect("create the runtime used for local requests");
+        runtime.block_on(async {
+            assert_error(
+                request(state.clone()).await,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "remote_paused_unknown_outcome",
+            )
+            .await;
+            let pdf = text_pdf("Ref: AB12");
+            assert_filled(post_fill(&state, &[("pdf", &pdf), ("form", FORM)], &[]).await).await;
+        });
+        drop(runtime);
+        assert_eq!(state.jobs.available_permits(), 1);
     }
 
     fn reuse_state(ttl_ms: u64) -> (AppState, Arc<DocumentReuse>) {

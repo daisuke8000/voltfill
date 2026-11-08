@@ -236,9 +236,19 @@ curl --fail-with-body --silent --show-error http://127.0.0.1:3000/v1/extract \
   --form 'schema=@examples/legacy/text-form.json;type=application/json'
 ```
 
-認証は `VOLTFILL_SERVER_API_KEY` / `VOLTFILL_SERVER_API_KEY_FILE` の一方を設定し、`Authorization: Bearer <key>` を送ります。未設定のループバックでは任意、非ループバック待ち受け・`Origin` 付き抽出では必須です。VOLTFILLはHTTPのため、別マシンからはTLSプロキシを使います。
+`POST /v1/fill` は[フォーム入力](#fill)のHTTP版で、multipartの `pdf` と `form`（`voltfill fill` と同じフォーム項目のJSON）を受け取り、`voltfill fill` と同じ形の結果JSONを `200` で返します。Jevには送信せず、描画もしないため、`--mock` / `--remote` のどちらで起動しても同じ動作です。
 
-抽出は同時1件で、実行・待機中は `Retry-After` 付き `429 server_busy`、送信停止中は `503 remote_paused_unknown_outcome` です。`--reuse-document`（既定オフ）は直前1件の文書をTTL（`--reuse-document-ttl-ms`、既定60000 ms）までメモリに保持して再利用します。内容が要求後も残るため単一テナント向けです。
+```sh
+curl --fail-with-body --silent --show-error http://127.0.0.1:3000/v1/fill \
+  --form 'pdf=@input.pdf;type=application/pdf' \
+  --form 'form=@examples/forms/invoice.json;type=application/json'
+```
+
+エラーは `{"error": "<code>", "jev_responses": []}` で返します。`form` が不正なら `400 invalid_form`、PDFを解析できなければ `400 pdf_inspection_failed`、ページ数が上限を超えれば `413 input_too_large`、part不足は `400 missing_pdf_or_form`、未知・重複partは `400 unknown_or_duplicate_part`、partの上限超過（`pdf` は資源制限の `max_bytes`、`form` は1 MiB）は `413 part_too_large`、アップロードの時間切れは `408 upload_timeout` です。
+
+認証は `VOLTFILL_SERVER_API_KEY` / `VOLTFILL_SERVER_API_KEY_FILE` の一方を設定し、`Authorization: Bearer <key>` を送ります。未設定のループバックでは任意、非ループバック待ち受け・`Origin` 付き要求では必須です（`/v1/extract`・`/v1/fill` 共通）。VOLTFILLはHTTPのため、別マシンからはTLSプロキシを使います。
+
+抽出とフォーム入力は合わせて同時1件で、実行中は `Retry-After` 付き `429 server_busy` です。抽出はJevの送信間隔の待機中も `429`、送信停止中は `503 remote_paused_unknown_outcome` で、Jevに送信しないフォーム入力はこの2つの影響を受けません。`--reuse-document`（既定オフ）は直前1件の文書をTTL（`--reuse-document-ttl-ms`、既定60000 ms）までメモリに保持して再利用します。内容が要求後も残るため単一テナント向けです。
 
 ## 開発
 
