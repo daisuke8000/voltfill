@@ -23,7 +23,9 @@
 //!   list columns are [`Hold::GeometricOnly`].
 //! - (c) One value: the value is a single line ([`Hold::MultiLine`]
 //!   otherwise; a multi-line value ends before a line that reads as one of
-//!   the form's labels). A text value holds no second value
+//!   the form's labels), no plain fragment follows the value's fragment on
+//!   its line within [`layout::MAX_SPLIT_GAP_EM`] em ([`Hold::SplitValue`]:
+//!   the value may be split over runs). A text value holds no second value
 //!   ([`Hold::SeveralValues`]: two phone numbers; two dates or amounts not
 //!   joined by a range mark; a phone number, date or amount right after a
 //!   word that follows other text, as in `山田 太郎 生年月日 1990年1月1日`; a
@@ -246,6 +248,11 @@ pub enum Hold {
     GeometricOnly,
     /// The value spans more than one line.
     MultiLine,
+    /// A plain fragment follows the value's fragment on its line, closer
+    /// than [`layout::MAX_SPLIT_GAP_EM`] em: the value may be cut short (a
+    /// value split over runs, `〒100-0001` `東京都千代田区…`) or followed by
+    /// another value without a delimiter.
+    SplitValue,
     /// A text value holds more than one value: two phone numbers, two dates
     /// or amounts not joined by a range mark, a phone number, date or
     /// amount after a word that follows other text (a second label), a
@@ -554,6 +561,7 @@ impl Context<'_> {
                 (found.one_sided, Hold::OneSidedQualifier),
                 (pair.binding == Binding::Geometric, Hold::GeometricOnly),
                 (value.evidence.len() > 1, Hold::MultiLine),
+                (pair.split, Hold::SplitValue),
                 (
                     field.field_type == FieldType::Text && value.several,
                     Hold::SeveralValues,
@@ -1839,6 +1847,39 @@ mod tests {
             &form(json!({"fields":[{"id":"phone","label":"電話"}]})),
         );
         assert_eq!(result.fields["phone"].status, FillStatus::Filled);
+    }
+
+    #[test]
+    fn values_split_over_fragments_are_held() {
+        let fragments = [
+            frag("a", "住所：", [60.0, 100.0, 90.0, 110.0]),
+            frag("b", "〒100-0001", [100.0, 100.0, 150.0, 110.0]),
+            frag("c", "東京都千代田区千代田1-1", [160.0, 100.0, 290.0, 110.0]),
+            frag("d", "氏名：山田", [60.0, 124.0, 110.0, 134.0]),
+            frag("e", "太郎", [120.0, 124.0, 140.0, 134.0]),
+            frag("f", "電話：03-1234-5678", [60.0, 148.0, 150.0, 158.0]),
+            frag("g", "FAX：03-1234-5679", [160.0, 148.0, 245.0, 158.0]),
+        ];
+        let result = fill(
+            "doc",
+            &fragments,
+            &form(json!({"fields":[
+                {"id":"address","label":"住所"},
+                {"id":"name","label":"氏名"},
+                {"id":"tel","label":"電話"},
+                {"id":"fax","label":"FAX"}
+            ]})),
+        );
+        // Before: address = "〒100-0001" and name = "山田" (truncated).
+        for (id, raw) in [("address", "〒100-0001"), ("name", "山田")] {
+            assert_eq!(held(&result, id), Some(Hold::SplitValue), "{id}");
+            let candidate = &result.fields[id].candidates[0];
+            assert_eq!(candidate.raw, raw, "{id}");
+            assert_eq!(candidate.holds, [Hold::SplitValue], "{id}");
+        }
+        // A following `label：value` fragment does not split the value.
+        assert_eq!(result.fields["tel"].raw.as_deref(), Some("03-1234-5678"));
+        assert_eq!(result.fields["fax"].raw.as_deref(), Some("03-1234-5679"));
     }
 
     #[test]

@@ -428,7 +428,8 @@ pub fn assist<T: Transport, C: Clock>(
 /// the label or how the value is tied to it ([`Hold::PartialLabel`],
 /// [`Hold::OneSidedQualifier`], [`Hold::GeometricOnly`]), and a date, amount
 /// or number candidate has a normalized value. A candidate whose value has
-/// several lines or values fails even when its first hold is a label one.
+/// several lines or values, or may be cut short ([`Hold::SplitValue`]),
+/// fails even when its first hold is a label or binding one.
 fn offered(field: &FormField, candidate: &FillCandidate) -> bool {
     let choosable = |hold: &Hold| {
         matches!(
@@ -1641,9 +1642,11 @@ mod tests {
         }
         // Before: only the first hold was checked, so a several-values or
         // multi-line candidate behind a label or binding hold was offered.
-        let never: [&[Hold]; 6] = [
+        let never: [&[Hold]; 8] = [
             &[Hold::SeveralValues],
             &[Hold::MultiLine],
+            &[Hold::SplitValue],
+            &[Hold::GeometricOnly, Hold::SplitValue],
             &[Hold::PartialLabel, Hold::SeveralValues],
             &[Hold::OneSidedQualifier, Hold::SeveralValues],
             &[Hold::GeometricOnly, Hold::MultiLine],
@@ -1671,7 +1674,16 @@ mod tests {
     /// offered and filled (`jev_choice`) with two phone numbers or two lines.
     #[test]
     fn hidden_several_or_multi_line_candidates_are_never_filled_by_jev() {
-        let cases: [(&str, Vec<SourceFragment>, usize, &str, Vec<Hold>); 3] = [
+        /// Name, fragments, how many of them hold the hidden candidate alone,
+        /// form label and the hidden candidate's holds.
+        type Case = (
+            &'static str,
+            Vec<SourceFragment>,
+            usize,
+            &'static str,
+            Vec<Hold>,
+        );
+        let cases: [Case; 3] = [
             (
                 "partial label, two phone numbers",
                 vec![

@@ -28,6 +28,10 @@
 //!   each value cannot be told apart from the start of the next label. Such a
 //!   fragment, a `label：value` fragment and a bare `label：` fragment are
 //!   never read as the value of another label.
+//! - A value fragment followed on its line by a plain fragment closer than
+//!   [`MAX_SPLIT_GAP_EM`] em is marked [`Pair::split`]: the value may be cut
+//!   short (`住所：` `〒100-0001` `東京都千代田区…`) or followed by another
+//!   value without a delimiter.
 //! - A value runs over at most [`MAX_VALUE_LINES`] lines; a longer run is
 //!   dropped rather than cut off. Continuation stops at a line that is itself
 //!   a `label：value` pair or ends with a delimiter. Continuation lines of a
@@ -90,6 +94,11 @@ pub const DEFAULT_MAX_PAIRS: usize = 50_000;
 /// (split by the delimiter instead), so delimiter-bound right values lie
 /// roughly 0.5 to 4 em to the right of their labels.
 pub const MAX_DELIMITER_GAP_EM: f64 = 4.0;
+/// A value fragment followed on its line by a plain fragment closer than
+/// this many em (the larger height of the two) may continue in it: a value
+/// split over runs (`〒100-0001` `東京都千代田区…`, `山田` `太郎`) or followed
+/// by a second value without a delimiter. Such a pair is [`Pair::split`].
+pub const MAX_SPLIT_GAP_EM: f64 = 3.0;
 /// Default work units for [`analyze`] (see [`analyze_within`]).
 pub const DEFAULT_MAX_WORK: u64 = 200_000_000;
 
@@ -201,6 +210,11 @@ pub struct Pair {
     pub value: Vec<Span>,
     pub placement: Placement,
     pub binding: Binding,
+    /// A plain fragment (not a `label：` or `label：value` fragment) follows
+    /// the fragment of one of the value's lines on its line, closer than
+    /// [`MAX_SPLIT_GAP_EM`] em: the value may be cut short (split over runs)
+    /// or followed by another value without a delimiter.
+    pub split: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -259,7 +273,7 @@ pub fn analyze_within(
     };
     for (i, line) in lines.iter().enumerate() {
         budget.spend(1 + line.fragments.len() as u64)?;
-        for &f in &line.fragments {
+        for (position, &f) in line.fragments.iter().enumerate() {
             if !matches!(measures[f].kind, Kind::Inline { .. }) {
                 continue;
             }
@@ -273,17 +287,18 @@ pub fn analyze_within(
                 to: first.bbox.left + 1.5 * height,
                 label: None,
             };
-            if let Some(value) = page.value(i, first, column, budget)? {
+            if let Some((value, split)) = page.value(i, position, first, column, budget)? {
                 pairs.push(Pair {
                     page: line.page,
                     label,
                     value,
                     placement: Placement::Inline,
                     binding: Binding::Delimiter,
+                    split,
                 })?;
             }
         }
-        for window in line.fragments.windows(2) {
+        for (position, window) in line.fragments.windows(2).enumerate() {
             let (label, value) = (window[0], window[1]);
             if !measures[label].kind.can_label() || measures[value].kind != Kind::Plain {
                 continue;
@@ -307,13 +322,14 @@ pub fn analyze_within(
             } else {
                 Binding::Geometric
             };
-            if let Some(value) = page.value(i, first, column, budget)? {
+            if let Some((value, split)) = page.value(i, position + 1, first, column, budget)? {
                 pairs.push(Pair {
                     page: line.page,
                     label: page.span(label, START, LABEL_END, budget)?,
                     value,
                     placement: Placement::Right,
                     binding,
+                    split,
                 })?;
             }
         }
@@ -478,7 +494,7 @@ impl Measure {
 /// What a line holds in a column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Cell {
-    /// The first fragment of the line in the column.
+    /// The position in the line of its first fragment in the column.
     Found(usize),
     /// No fragment in the column.
     Blank,
@@ -560,17 +576,21 @@ impl Page<'_> {
     /// The value ends at a line without a fragment in `column`, at a
     /// `label：` or `label：value` fragment there, and (for a value to the
     /// right of its label) at a line with a fragment in the label's column
-    /// before the value column: the next row (小計 / 合計). `None` when the
-    /// value would exceed [`MAX_VALUE_LINES`].
+    /// before the value column: the next row (小計 / 合計). The first line's
+    /// fragment is at `position` of line `line`. Also returns whether any
+    /// line's fragment is [`Page::trailed`] ([`Pair::split`]). `None` when
+    /// the value would exceed [`MAX_VALUE_LINES`].
     fn value(
         &self,
         line: usize,
+        position: usize,
         first: Span,
         column: Column,
         budget: &mut Budget,
-    ) -> Result<Option<Vec<Span>>, BudgetError> {
+    ) -> Result<Option<(Vec<Span>, bool)>, BudgetError> {
         let page = self.lines[line].page;
         let mut last = first.bbox;
+        let mut split = self.trailed(&self.lines[line], position);
         let mut value = vec![first];
         for next_line in &self.lines[line + 1..] {
             budget.spend(1)?;
@@ -578,21 +598,35 @@ impl Page<'_> {
             if next_line.page != page || next_line.bbox.top - last.bottom > height {
                 break;
             }
-            let Some(next) = self.continuation(next_line, column, height, budget)? else {
+            let Some(at) = self.continuation(next_line, column, height, budget)? else {
                 break;
             };
             if value.len() >= MAX_VALUE_LINES {
                 return Ok(None);
             }
+            let next = next_line.fragments[at];
             value.push(self.span(next, START, END, budget)?);
+            split |= self.trailed(next_line, at);
             last = self.fragments[next].bbox;
         }
-        Ok(Some(value))
+        Ok(Some((value, split)))
     }
 
-    /// The plain fragment of `line` that continues a value in `column`, if
-    /// any (see [`Page::value`]). Fragments are sorted by left edge, so the
-    /// first one starting at or after `column.from` is the only candidate.
+    /// Whether the fragment at `position` of `line` is followed on the line
+    /// by a plain fragment closer than [`MAX_SPLIT_GAP_EM`] em.
+    fn trailed(&self, line: &Line, position: usize) -> bool {
+        let bbox = self.fragments[line.fragments[position]].bbox;
+        line.fragments.get(position + 1).is_some_and(|&next| {
+            let after = self.fragments[next].bbox;
+            self.kind(next) == Kind::Plain
+                && after.left - bbox.right < MAX_SPLIT_GAP_EM * bbox.height().max(after.height())
+        })
+    }
+
+    /// The position in `line` of the plain fragment that continues a value
+    /// in `column`, if any (see [`Page::value`]). Fragments are sorted by
+    /// left edge, so the first one starting at or after `column.from` is the
+    /// only candidate.
     fn continuation(
         &self,
         line: &Line,
@@ -611,12 +645,11 @@ impl Page<'_> {
         }
         if let Some(label) = column.label
             && let Cell::Found(row) = self.column_cell(line, label, 0.5 * tolerance, budget)?
-            && row != next
-            && self.fragments[row].bbox.left < self.fragments[next].bbox.left
+            && row < at
         {
             return Ok(None);
         }
-        Ok(Some(next))
+        Ok(Some(at))
     }
 
     /// Below (or Column) hypotheses for the label at `position` on line `index`.
@@ -662,15 +695,17 @@ impl Page<'_> {
                 value: vec![self.span(next.fragments[slot], START, END, budget)?],
                 placement: Placement::Below,
                 binding: Binding::Geometric,
+                split: self.trailed(next, slot),
             });
         }
-        for cell in cells {
+        for (cell, split) in cells {
             pairs.push(Pair {
                 page: line.page,
                 label: self.span(f, START, LABEL_END, budget)?,
                 value: vec![self.span(cell, START, END, budget)?],
                 placement: Placement::Column,
                 binding: Binding::Geometric,
+                split,
             })?;
         }
         Ok(())
@@ -747,7 +782,8 @@ impl Page<'_> {
 
     /// Data rows in the column of the cell at `slot` on line `first`: the
     /// row count (blank and crowded rows included, at most
-    /// [`MAX_COLUMN_ROWS`]) and the plain cells of the non-blank rows. Rows
+    /// [`MAX_COLUMN_ROWS`]) and the plain cells of the non-blank rows, each
+    /// with whether it is [`Page::trailed`] ([`Pair::split`]). Rows
     /// follow within `reach` of the previous row; a row with no cell in the
     /// column counts only when a neighbouring cell of the first row has one
     /// in it. A `label：` or `label：value` cell ends the column.
@@ -758,7 +794,7 @@ impl Page<'_> {
         height: f64,
         reach: f64,
         budget: &mut Budget,
-    ) -> Result<(usize, Vec<usize>), BudgetError> {
+    ) -> Result<(usize, Vec<(usize, bool)>), BudgetError> {
         let first_line = &self.lines[first];
         let cell = &self.fragments[first_line.fragments[slot]];
         let neighbours: Vec<Rect> = [slot.checked_sub(1), Some(slot + 1)]
@@ -768,7 +804,7 @@ impl Page<'_> {
             .map(|&f| self.fragments[f].bbox)
             .collect();
         let mut rows = 1;
-        let mut cells = vec![first_line.fragments[slot]];
+        let mut cells = vec![(first_line.fragments[slot], self.trailed(first_line, slot))];
         let mut previous = first_line.bbox;
         for line in &self.lines[first + 1..] {
             if rows >= MAX_COLUMN_ROWS
@@ -779,7 +815,9 @@ impl Page<'_> {
             }
             budget.spend(1)?;
             match self.column_cell(line, cell.bbox, height, budget)? {
-                Cell::Found(f) if self.kind(f) == Kind::Plain => cells.push(f),
+                Cell::Found(at) if self.kind(line.fragments[at]) == Kind::Plain => {
+                    cells.push((line.fragments[at], self.trailed(line, at)));
+                }
                 Cell::Found(_) => break,
                 Cell::Crowded => {}
                 Cell::Blank => {
@@ -826,7 +864,7 @@ impl Page<'_> {
             }
             budget.spend(1)?;
             if same_column(column, bbox, tolerance) {
-                return Ok(Cell::Found(f));
+                return Ok(Cell::Found(start + n));
             }
         }
         Ok(Cell::Blank)
@@ -1303,6 +1341,56 @@ mod tests {
                 .unwrap();
             assert_eq!(texts(&rows, &right.value), [value], "{label}");
         }
+    }
+
+    #[test]
+    fn a_plain_fragment_close_after_the_value_marks_it_split() {
+        // Before: 住所 → 〒100-0001 and 氏名 → 山田, with nothing marking the
+        // rest of the value in the next fragment.
+        let fragments = [
+            frag("a", "住所：", [60.0, 100.0, 90.0, 110.0]),
+            frag("b", "〒100-0001", [100.0, 100.0, 150.0, 110.0]),
+            frag("c", "東京都千代田区千代田1-1", [160.0, 100.0, 290.0, 110.0]),
+            frag("d", "氏名：山田", [60.0, 124.0, 110.0, 134.0]),
+            frag("e", "太郎", [120.0, 124.0, 140.0, 134.0]),
+            frag("f", "電話：03-1234-5678", [60.0, 148.0, 150.0, 158.0]),
+            frag("g", "FAX：03-1234-5679", [160.0, 148.0, 245.0, 158.0]),
+            frag("h", "件名：制作費", [60.0, 172.0, 120.0, 182.0]),
+            frag("i", "以上", [150.0, 172.0, 170.0, 182.0]),
+            frag("j", "担当", [60.0, 196.0, 80.0, 206.0]),
+            frag("k", "山田", [120.0, 196.0, 140.0, 206.0]),
+            frag("l", "経理部", [150.0, 196.0, 180.0, 206.0]),
+        ];
+        let layout = analyze(&fragments);
+        let split = |label: &str| {
+            let pairs = find(&layout, &fragments, label);
+            assert_eq!(pairs.len(), 1, "{label}");
+            (
+                texts(&fragments, &pairs[0].value).join("\n"),
+                pairs[0].split,
+            )
+        };
+        assert_eq!(split("住所"), ("〒100-0001".into(), true));
+        assert_eq!(split("氏名"), ("山田".into(), true));
+        assert_eq!(split("担当"), ("山田".into(), true));
+        // A following `label：value` fragment is the next pair, not the rest
+        // of the value; a fragment MAX_SPLIT_GAP_EM or more away is apart.
+        assert_eq!(split("電話"), ("03-1234-5678".into(), false));
+        assert_eq!(split("件名"), ("制作費".into(), false));
+        // Continuation lines count too.
+        let lines = [
+            frag("a", "備考：", [60.0, 100.0, 90.0, 110.0]),
+            frag("b", "午前中の配達を希望。", [100.0, 100.0, 200.0, 110.0]),
+            frag("c", "不在時は", [100.0, 112.0, 140.0, 122.0]),
+            frag("d", "宅配ボックスへ。", [150.0, 112.0, 230.0, 122.0]),
+        ];
+        let layout = analyze(&lines);
+        let note = find(&layout, &lines, "備考");
+        assert_eq!(
+            texts(&lines, &note[0].value),
+            ["午前中の配達を希望。", "不在時は"]
+        );
+        assert!(note[0].split);
     }
 
     #[test]
