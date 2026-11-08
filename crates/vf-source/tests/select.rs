@@ -2,8 +2,9 @@
 use vf_source::geometry::{AffineTransform, ImageTransform, Padding, PageGeometry, Rect, Rotation};
 use vf_source::layout::{self, Placement, Precision, Span};
 use vf_source::select::{
-    ESTIMATED_EDGE_TOLERANCE_EM, MEASURED_EDGE_SLACK, Role, SelectError, Selected, in_box,
-    overlapping,
+    ESTIMATED_EDGE_TOLERANCE_EM, HEIGHT_PER_ESTIMATED_EM, MAX_COPY_COMPARISONS,
+    MEASURED_EDGE_SLACK, Role, SelectError, Selected, contains_label, in_box, overlapping,
+    starts_with_label,
 };
 use vf_source::{Quality, SourceFragment};
 
@@ -24,6 +25,11 @@ fn fragment(id: &str, page: u32, text: &str, bbox: Rect) -> SourceFragment {
 }
 
 fn whole(f: &SourceFragment) -> Selected {
+    whole_as(f, Role::Whole)
+}
+
+/// The whole fragment with `role` (Whole, a bare Label, or Mixed).
+fn whole_as(f: &SourceFragment, role: Role) -> Selected {
     Selected {
         span: Span {
             fragment_id: f.id.clone(),
@@ -32,7 +38,7 @@ fn whole(f: &SourceFragment) -> Selected {
             bbox: f.bbox,
             precision: Precision::Run,
         },
-        role: Role::Whole,
+        role,
     }
 }
 
@@ -348,14 +354,15 @@ fn whole_line_boxes_return_label_and_value_roles() {
         texts(&raw, &in_box(&raw, 1, line).expect("whole line")),
         ["Invoice No", "AB-778"]
     );
-    // A label run and a value run in separate fragments are both Whole: no
-    // split is known inside either, and the caller must still check the label.
+    // A bare label run and a value run in separate fragments: the label run
+    // ends with its only delimiter, so it is a Label (it used to be Whole,
+    // which left ruling it out to the caller); the value run is Whole.
     let runs = [
         fragment("l", 1, "請求番号：", rect(60.0, 119.0, 115.0, 130.0)),
         fragment("v", 1, "INV-0012", rect(115.0, 119.0, 161.4, 130.0)),
     ];
     let selected = in_box(&runs, 1, rect(59.5, 118.5, 161.9, 130.5)).expect("two whole runs");
-    assert_eq!(selected, [whole(&runs[0]), whole(&runs[1])]);
+    assert_eq!(selected, [whole_as(&runs[0], Role::Label), whole(&runs[1])]);
 }
 
 /// `Total: 12000` in an 11-pt proportional font: advances from Helvetica.
@@ -503,10 +510,10 @@ fn implausible_fragment_shapes_only_select_whole_content() {
         // Twice as tall as the em: the old 0.25-height slack (5.5) let a box
         // from 121.0, inside `N`, select INV-0012.
         (rect(60.0, 108.0, 161.4, 130.0), vec![121.0, 115.0, 116.3]),
-        // 1.42 times the width-derived em: inside the plausible range, but the
-        // em is then too uncertain to separate the parts.
+        // 1.42 times the width-derived em: outside the plausible range (it
+        // used to be inside, where the em was too uncertain anyway).
         (rect(60.0, 114.0, 161.4, 130.0), vec![115.0, 116.3, 110.0]),
-        // Condensed to 70 %: the value starts at 98.5.
+        // Condensed to 70 %: the value starts at 98.5; 1.39 times the em.
         (rect(60.0, 119.0, 131.0, 130.0), vec![98.5, 101.0, 104.0]),
     ];
     for (bbox, value_lefts) in cases {
@@ -539,12 +546,15 @@ fn implausible_fragment_shapes_only_select_whole_content() {
 /// Finding: times and ratios with a full-width colon were known splits.
 #[test]
 fn digits_around_either_colon_are_not_a_split() {
-    for (text, width) in [
-        ("10：30", 33.0),
-        ("１０：３０", 55.0),
-        ("1：2", 22.0),
-        ("比率 1：2", 49.5),
-        ("10 : 30", 30.0),
+    // `比率 1：2` used to be Whole. It has the shape of `受付 10：00～17：00`
+    // (a label, a space, then a digit-guarded colon), so it is now Mixed:
+    // a colon between digits is exempt only in text made of numbers.
+    for (text, width, role) in [
+        ("10：30", 33.0, Role::Whole),
+        ("１０：３０", 55.0, Role::Whole),
+        ("1：2", 22.0, Role::Whole),
+        ("比率 1：2", 49.5, Role::Mixed),
+        ("10 : 30", 30.0, Role::Whole),
     ] {
         let raw = [fragment(
             "x",
@@ -554,10 +564,13 @@ fn digits_around_either_colon_are_not_a_split() {
         )];
         let right_half = rect(60.0 + width / 2.0 + 1.0, 118.5, 60.5 + width, 130.5);
         assert_eq!(in_box(&raw, 1, right_half), cut("x"), "{text}");
-        assert_eq!(overlapping(&raw, 1, right_half), Ok(vec![whole(&raw[0])]));
+        assert_eq!(
+            overlapping(&raw, 1, right_half),
+            Ok(vec![whole_as(&raw[0], role)])
+        );
         assert_eq!(
             in_box(&raw, 1, expand(raw[0].bbox, 0.5)),
-            Ok(vec![whole(&raw[0])]),
+            Ok(vec![whole_as(&raw[0], role)]),
             "{text}"
         );
     }
@@ -852,4 +865,331 @@ fn f32_model_boxes_on_a_rotated_page_round_trip_to_source_spans() {
     let mut expected = both_parts(&raw[0]);
     expected.push(whole(&raw[1]));
     assert_eq!(overlapping(&raw, 1, both), Ok(expected));
+}
+
+/// Helvetica advances in em for printable ASCII; wide characters one em,
+/// zero-width characters none, anything else half an em.
+fn advance_em(c: char) -> f64 {
+    const ASCII: [u16; 95] = [
+        278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278, 556, 556,
+        556, 556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556, 1015, 667, 667, 722,
+        722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778, 667, 778, 722, 667, 611, 722,
+        667, 944, 667, 667, 611, 278, 278, 278, 469, 556, 333, 556, 556, 500, 556, 556, 278, 556,
+        556, 222, 222, 500, 222, 833, 556, 556, 556, 556, 333, 500, 278, 556, 500, 722, 500, 500,
+        500, 334, 260, 334, 584,
+    ];
+    match c as u32 {
+        code @ 0x20..=0x7E => f64::from(ASCII[(code - 0x20) as usize]) / 1000.0,
+        0x0300..=0x036F | 0x200B..=0x200F | 0xFE00..=0xFE0F | 0xFEFF | 0xE0100..=0xE01EF => 0.0,
+        0x3000..=0x9FFF | 0xFF00..=0xFF60 => 1.0,
+        _ => 0.5,
+    }
+}
+
+/// `text` drawn at 11 pt from x 60, top 119, with horizontal scale `scale`
+/// (`Tz`): the extractor still reports an 11-unit height.
+fn drawn(id: &str, text: &str, scale: f64) -> SourceFragment {
+    let width: f64 = text.chars().map(advance_em).sum::<f64>() * 11.0 * scale;
+    fragment(id, 1, text, rect(60.0, 119.0, 60.0 + width, 130.0))
+}
+
+/// x where the text after `prefix` starts in a fragment made by [`drawn`].
+fn drawn_x(prefix: &str, scale: f64) -> f64 {
+    60.0 + prefix.chars().map(advance_em).sum::<f64>() * 11.0 * scale
+}
+
+fn assert_nothing_fillable(selected: &[Selected], context: &str) {
+    assert!(
+        selected.iter().all(|s| !s.role.is_fillable()),
+        "{context}: {selected:?}"
+    );
+}
+
+/// Finding N1: a run holding two fields returned a Value (or, after layout
+/// stopped splitting runs with two delimiters, a Whole) containing the next
+/// field.
+#[test]
+fn runs_holding_two_fields_are_never_fillable() {
+    for (text, label_prefix) in [
+        ("TEL：03-1234-5678　FAX：03-1234-5679", "TEL："),
+        ("電話：03-1234-5678　FAX：03-1234-5679", "電話："),
+        ("Phone：555-1234 Fax：555-9876", "Phone："),
+        ("氏名：佐藤花子　電話：03-1234-5678", "氏名："),
+        // A second delimiter that layout does not split at, in the value...
+        ("氏名：佐藤花子　電話∶03-1234-5678", "氏名："),
+        ("番号：No.1：2026年度", "番号："),
+        ("金額：Total = 12000", "金額："),
+        // ...or in the label: the value would belong to FAX, not TEL.
+        ("TEL∶03-1234-5678　FAX：03-1234-5679", "TEL∶"),
+    ] {
+        let raw = [drawn("x", text, 1.0)];
+        let line = expand(raw[0].bbox, 0.5);
+        for selected in [in_box(&raw, 1, line), overlapping(&raw, 1, line)] {
+            let selected = selected.expect("a whole-line box must be accepted");
+            assert_eq!(selected, [whole_as(&raw[0], Role::Mixed)], "{text}");
+            assert_nothing_fillable(&selected, text);
+        }
+        // A box placed exactly over the first value cuts the run.
+        let value = rect(
+            drawn_x(label_prefix, 1.0) - 0.5,
+            118.5,
+            raw[0].bbox.right + 0.5,
+            130.5,
+        );
+        assert_eq!(in_box(&raw, 1, value), cut("x"), "{text}");
+        assert_eq!(
+            overlapping(&raw, 1, value),
+            Ok(vec![whole_as(&raw[0], Role::Mixed)])
+        );
+    }
+    // Digits around a colon, a URL and a date-time stay one clean value. (A
+    // URL with a port after a label, `URL：https://host:8080/`, has a second
+    // delimiter for layout and is Mixed.)
+    for (text, expected) in [
+        ("時間：9:00", "9:00"),
+        ("日時：2026/11/08 10:30", "2026/11/08 10:30"),
+        ("URL：https://example.com/?a=1", "https://example.com/?a=1"),
+    ] {
+        let raw = [drawn("x", text, 1.0)];
+        let selected = in_box(&raw, 1, expand(raw[0].bbox, 0.5)).expect("whole line");
+        assert_eq!(roles(&selected), [Role::Label, Role::Value], "{text}");
+        assert_eq!(texts(&raw, &selected)[1], expected);
+    }
+    // Without a second delimiter, the Value is the rest of the run and may
+    // carry the next field: the caller rejects it with contains_label.
+    let text = "請求日：2026/11/08 支払期限 2026/12/31";
+    let raw = [drawn("x", text, 1.0)];
+    let selected = in_box(&raw, 1, expand(raw[0].bbox, 0.5)).expect("whole line");
+    assert_eq!(selected, both_parts(&raw[0]));
+    let value = texts(&raw, &selected)[1];
+    assert_eq!(value, "2026/11/08 支払期限 2026/12/31");
+    assert!(contains_label(value, "支払期限"));
+    assert!(contains_label(value, "支払 期限"));
+    assert!(!contains_label(value, "請求日"));
+    assert!(!contains_label(value, " \u{200B}"));
+}
+
+/// Finding N2: Whole could be a label and its value.
+#[test]
+fn whole_runs_with_a_separator_are_mixed() {
+    for text in [
+        "請求番号∶INV-0012",  // U+2236
+        "請求番号︰INV-0012", // U+FE30
+        "請求番号﹕INV-0012", // U+FE55
+        "請求番号︓INV-0012", // U+FE13
+        "請求番号　INV-0012", // U+3000
+        "Total = 12000",
+        "合計＝12,000円",
+        "受付 10：00～17：00",
+        "No.1：2026年度",
+        "午前10:30",
+        "佐藤　花子", // U+3000 inside a value run: refused too (recall cost)
+    ] {
+        let raw = [drawn("x", text, 1.0)];
+        let line = expand(raw[0].bbox, 0.5);
+        for selected in [in_box(&raw, 1, line), overlapping(&raw, 1, line)] {
+            assert_eq!(selected, Ok(vec![whole_as(&raw[0], Role::Mixed)]), "{text}");
+        }
+    }
+    // Bare labels: clean text, then one delimiter at the end.
+    for text in [
+        "請求番号：",
+        "氏　　名：",
+        "Invoice No: ",
+        "No.1：",
+        "備考：\u{200B}",
+    ] {
+        let raw = [drawn("x", text, 1.0)];
+        assert_eq!(
+            in_box(&raw, 1, expand(raw[0].bbox, 0.5)),
+            Ok(vec![whole_as(&raw[0], Role::Label)]),
+            "{text}"
+        );
+    }
+    // Clean runs stay Whole; the caller rules out labels it knows.
+    for text in [
+        "10：30",
+        "9:00 〜 18:00",
+        "2026/11/08 10:30",
+        "https://example.com:8080/?a=1",
+        "佐藤 花子",
+        "発行日 2026年11月8日",
+    ] {
+        let raw = [drawn("x", text, 1.0)];
+        assert_eq!(
+            in_box(&raw, 1, expand(raw[0].bbox, 0.5)),
+            Ok(vec![whole(&raw[0])]),
+            "{text}"
+        );
+    }
+    assert!(starts_with_label("発行日 2026年11月8日", "発行日"));
+    assert!(starts_with_label("発 行 日\u{200B}2026年", "発行日"));
+    assert!(!starts_with_label("2026年11月8日", "発行日"));
+    assert!(!starts_with_label("発行日", ""));
+    assert!(Role::Whole.is_fillable() && Role::Value.is_fillable());
+    assert!(!Role::Label.is_fillable() && !Role::Mixed.is_fillable());
+}
+
+/// Finding N3: a condensed run (`Tz`) overstates the em, so a box missing
+/// the first value character still selected the value.
+#[test]
+fn condensed_runs_select_only_with_a_whole_line_box() {
+    let text = "ご請求書番号：INV-0012";
+    let prefix = "ご請求書番号：";
+    for scale in [0.85, 0.9, 0.95] {
+        let raw = [drawn("x", text, scale)];
+        let f = &raw[0];
+        let height_per_em = f.bbox.height() / (f.bbox.width() / 11.0);
+        assert!(
+            height_per_em > *HEIGHT_PER_ESTIMATED_EM.end(),
+            "{scale}: {height_per_em}"
+        );
+        let value_left = drawn_x(prefix, scale);
+        let i_right = value_left + 0.278 * 11.0 * scale;
+        // Reviewer's case at 90 %: the box from 132.10 starts after `I`.
+        if scale == 0.9 {
+            assert!((value_left - 129.3).abs() < 1e-9 && i_right < 132.1);
+            let past_i = rect(132.10, 119.0, f.bbox.right, 130.0);
+            assert_eq!(in_box(&raw, 1, past_i), cut("x"));
+        }
+        for left in [i_right + 0.05, value_left - 0.5] {
+            let value_box = expand(with_left(f.bbox, left), 0.0);
+            assert_eq!(in_box(&raw, 1, value_box), cut("x"), "{scale} {left}");
+        }
+        let selected = in_box(&raw, 1, expand(f.bbox, 0.5)).expect("whole line");
+        assert_eq!(selected, both_parts(f));
+        assert_eq!(texts(&raw, &selected), ["ご請求書番号", "INV-0012"]);
+    }
+    // Drawn at full width, the same run keeps its known split for a value box.
+    let raw = [drawn("x", text, 1.0)];
+    let (_, v) = inline_parts(&raw[0]);
+    let value_left = drawn_x(prefix, 1.0);
+    let correct = expand(with_left(raw[0].bbox, value_left), 0.5);
+    assert_eq!(in_box(&raw, 1, correct), Ok(vec![value(&v)]));
+    let past_i = with_left(raw[0].bbox, value_left + 0.278 * 11.0 + 0.05);
+    assert_eq!(in_box(&raw, 1, past_i), cut("x"));
+}
+
+/// Finding N4: grouping depended on snapshot order, so three chained copies
+/// (60~61 and 61~62 within 1.1, 60 and 62 not) were returned twice.
+#[test]
+fn chained_copies_are_one_group_in_any_snapshot_order() {
+    let at =
+        |id: &str, left: f64| fragment(id, 1, "INV-0012", rect(left, 119.0, left + 46.4, 130.0));
+    let lefts = [60.0, 61.0, 62.0];
+    for order in [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ] {
+        let raw: Vec<_> = order
+            .iter()
+            .map(|&i| at(&format!("c{i}"), lefts[i]))
+            .collect();
+        // Contains every copy: the first in snapshot order, once.
+        let all = rect(59.5, 118.5, 108.9, 130.5);
+        assert_eq!(in_box(&raw, 1, all), Ok(vec![whole(&raw[0])]), "{order:?}");
+        assert_eq!(
+            overlapping(&raw, 1, all),
+            Ok(vec![whole(&raw[0])]),
+            "{order:?}"
+        );
+        // Contains the copy at 60 and cuts the others: no error, once.
+        let first = rect(59.5, 118.5, 106.9, 130.5);
+        let at_60 = raw
+            .iter()
+            .find(|f| f.bbox.left == 60.0)
+            .expect("the copy at 60 is in every order");
+        assert_eq!(in_box(&raw, 1, first), Ok(vec![whole(at_60)]), "{order:?}");
+    }
+}
+
+/// Finding N5: zero-width and combining characters shift the class-weight
+/// estimates, and `備考：` + U+200B gave an invisible Value.
+#[test]
+fn zero_width_characters_unbound_edges_and_never_fill_alone() {
+    // `請求番号：WM-0012` is wide enough that one more half-em weight keeps
+    // the run inside HEIGHT_PER_ESTIMATED_EM: only the zero-width rule
+    // refuses the value box below.
+    let plain = [drawn("x", "請求番号：WM-0012", 1.0)];
+    let value_box = expand(with_left(plain[0].bbox, drawn_x("請求番号：", 1.0)), 0.5);
+    let (_, v) = inline_parts(&plain[0]);
+    assert_eq!(in_box(&plain, 1, value_box), Ok(vec![value(&v)]));
+    for mark in ['\u{301}', '\u{200B}', '\u{FE0F}', '\u{FEFF}', '\u{E0100}'] {
+        let text = format!("請求番号：W{mark}M-0012");
+        let raw = [fragment("x", 1, &text, plain[0].bbox)];
+        let height_per_em = 11.0 / (raw[0].bbox.width() / 9.0);
+        assert!(HEIGHT_PER_ESTIMATED_EM.contains(&height_per_em), "{text:?}");
+        assert_eq!(in_box(&raw, 1, value_box), cut("x"), "{text:?}");
+        let selected = in_box(&raw, 1, expand(raw[0].bbox, 0.5)).expect("whole line");
+        assert_eq!(selected, both_parts(&raw[0]), "{text:?}");
+    }
+    // An invisible value is no split: the run is a bare label.
+    let raw = [drawn("x", "備考：\u{200B}", 1.0)];
+    for selected in [
+        in_box(&raw, 1, expand(raw[0].bbox, 0.5)),
+        overlapping(&raw, 1, expand(raw[0].bbox, 0.5)),
+    ] {
+        let selected = selected.expect("whole line");
+        assert_eq!(selected, [whole_as(&raw[0], Role::Label)]);
+        assert_nothing_fillable(&selected, "備考：U+200B");
+    }
+    // A fragment with nothing visible is skipped like a blank one.
+    let invisible = [fragment(
+        "z",
+        1,
+        "\u{200B}\u{FEFF}\u{301}",
+        rect(60.0, 119.0, 70.0, 130.0),
+    )];
+    let cutting = rect(65.0, 119.0, 80.0, 130.0);
+    assert_eq!(in_box(&invisible, 1, cutting), Ok(Vec::new()));
+    assert_eq!(overlapping(&invisible, 1, cutting), Ok(Vec::new()));
+}
+
+/// Finding N6 (documented limit): a value of one or a few narrow characters
+/// pulls the width-derived em below the height, so the run looks condensed
+/// and only a whole-line box selects it.
+#[test]
+fn single_narrow_character_values_need_a_whole_line_box() {
+    for (text, expected) in [("番号：I", "I"), ("担当：I-1", "I-1")] {
+        let raw = [drawn("x", text, 1.0)];
+        let value_box = expand(with_left(raw[0].bbox, drawn_x("番号：", 1.0)), 0.5);
+        assert_eq!(in_box(&raw, 1, value_box), cut("x"), "{text}");
+        let selected = in_box(&raw, 1, expand(raw[0].bbox, 0.5)).expect("whole line");
+        assert_eq!(selected, both_parts(&raw[0]));
+        assert_eq!(texts(&raw, &selected)[1], expected);
+    }
+}
+
+/// Finding N7: copy search is bounded. Two interleaved same-text columns
+/// whose tops differ by 1e-4 put thousands of non-copies in each band; the
+/// call fails with a typed error instead of taking quadratic time. A page of
+/// ordinary copies stays far below the limit (see tests/select_perf.rs).
+#[test]
+fn copy_search_beyond_its_limit_is_a_typed_error() {
+    // About n²/2 comparisons, well over the limit.
+    let n = 3_000;
+    assert!(n * n / 2 > 4 * MAX_COPY_COMPARISONS);
+    let raw: Vec<_> = (0..n)
+        .map(|i| {
+            let (left, top) = (60.0 + 10.0 * (i % 2) as f64, 119.0 + 1e-4 * i as f64);
+            fragment(
+                &format!("c{i}"),
+                1,
+                "INV-0012",
+                rect(left, top, left + 46.4, top + 11.0),
+            )
+        })
+        .collect();
+    let all = rect(59.5, 118.5, 116.9, 131.0);
+    assert_eq!(in_box(&raw, 1, all), Err(SelectError::LimitExceeded));
+    assert_eq!(overlapping(&raw, 1, all), Err(SelectError::LimitExceeded));
+    // A quarter as many (about 280,000 comparisons) stay within the limit:
+    // one copy per column.
+    let half = &raw[..n / 4];
+    let selected = in_box(half, 1, all).expect("within the copy-comparison limit");
+    assert_eq!(selected, [whole(&half[0]), whole(&half[1])]);
 }

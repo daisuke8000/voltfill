@@ -1,6 +1,7 @@
 //! Source spans selected by a Display-space box, for answers that name a
 //! region instead of text (for example a model box mapped back with
-//! [`ImageTransform::normalized_box_to_display`]).
+//! [`ImageTransform::normalized_box_to_display`]). Planned as the source side
+//! of an image fallback for form fill; nothing in fill uses it yet.
 //!
 //! # Results
 //!
@@ -13,16 +14,66 @@
 //!   estimated boxes ([`Precision::Estimated`]), whether the box covers all of
 //!   the fragment or only some of it. The delimiter and the whitespace around
 //!   it belong to neither part.
-//! - Any other fragment is returned whole as [`Role::Whole`]:
-//!   `0..raw_text.len()`, untrimmed, with the fragment box and
-//!   [`Precision::Run`].
+//! - Any other fragment is returned whole, `0..raw_text.len()`, untrimmed,
+//!   with the fragment box and [`Precision::Run`]:
+//!   - as [`Role::Whole`] when its text is *clean* (below) and has no
+//!     U+3000 IDEOGRAPHIC SPACE inside;
+//!   - as [`Role::Label`] when it is a bare label: clean text followed by one
+//!     colon-like delimiter at the end of its visible text (`請求番号：`);
+//!   - as [`Role::Mixed`] otherwise: it may hold a label with its value, or
+//!     several fields, and select cannot tell where one ends. Examples:
+//!     `TEL：03-1234-5678　FAX：03-1234-5679` (layout does not split a run
+//!     with two delimiters), `請求番号∶INV-0012` (a lookalike colon),
+//!     `請求番号　INV-0012` (U+3000), `Total = 12000`, `No.1：2026年度` and
+//!     `受付 10：00～17：00` (digits around the colon, but not a time).
 //!
-//! **Fill values.** A fill layer may take text only from `Value` spans and
-//! from `Whole` spans returned by [`in_box`]; never from `Label` spans and
-//! never from [`overlapping`]. `Whole` only says that no split is known
-//! *inside* the run: the run can still be the label of a pair across
-//! fragments (a `請求番号：` run followed by a separate value run), so the
-//! caller must still rule it out against the form label.
+//! U+3000 makes a whole run `Mixed` because Japanese layouts use it to space
+//! a label from its value; the cost is that a standalone value run such as
+//! `佐藤　花子` is refused too. Inside a known split's label or value it is
+//! allowed: the delimiter already separates them.
+//!
+//! ## Clean text
+//!
+//! Text is clean when it has at least one visible character (not whitespace,
+//! a control, or a zero-width or combining character, see
+//! [Edge positions](#edge-positions)) and no delimiter character. Delimiter
+//! characters are the colons `:` `：`, their lookalikes `∶` (U+2236), `︰`
+//! (U+FE30), `﹕` (U+FE55), `︓` (U+FE13), `꞉` (U+A789), `˸` (U+02F8), `ː`
+//! (U+02D0), `⁚` (U+205A), `⦂` (U+2982), `׃` (U+05C3), and the equals signs
+//! `=` `＝` `﹦`. Like layout's exceptions, with a stricter rule for digits,
+//! these are not delimiters:
+//!
+//! - a colon followed by `//`, and any character of a whitespace-separated
+//!   token that starts with a URL scheme (`https://example.com:8080/?a=1`);
+//! - a colon whose nearest visible neighbours are digits (ASCII or full
+//!   width) on both sides, provided every visible character of the text is a
+//!   digit, a colon, or one of `/ ／ - － ‐ ‑ – — − ~ ～ 〜 . ． , ，`: times,
+//!   ratios and date-times such as `10：30`, `10 : 30`, `9:00 〜 18:00` and
+//!   `2026/11/08 10:30`. Any other character in the text makes such a colon a
+//!   delimiter (`No.1：2026年度`, `受付 10：00～17：00`, `午前10:30`).
+//!
+//! # Fill values
+//!
+//! A fill layer may take text only from spans whose role
+//! [is fillable](Role::is_fillable), `Whole` and `Value`, returned by
+//! [`in_box`]; never from `Label` or `Mixed` spans and never from
+//! [`overlapping`]. A fillable span holds no delimiter beyond its own split,
+//! but select does not know the form, so the caller must still reject:
+//!
+//! - a `Whole` whose text starts with the form label or holds another form
+//!   label ([`starts_with_label`], [`contains_label`]): a run with no
+//!   delimiter can be a label on its own (`請求番号` followed by a separate
+//!   value run) or a label and value separated by a space
+//!   (`発行日 2026年11月8日`);
+//! - a `Value` that holds another form label ([`contains_label`]): a `Value`
+//!   is the rest of its run after the delimiter, so a run without a second
+//!   delimiter can still carry the next field
+//!   (`請求日：2026/11/08 支払期限 2026/12/31` yields
+//!   `2026/11/08 支払期限 2026/12/31`);
+//! - a `Value` returned together with the `Label` of the same run unless that
+//!   `Label` matches the form label: the value belongs to that label (a box
+//!   over `佐藤花子　電話：03-1234-5678` drawn for 氏名 yields the value of
+//!   電話).
 //!
 //! # Known splits
 //!
@@ -40,7 +91,11 @@
 //! - the label's last and the value's first character are not both digits
 //!   (ASCII or full width), so times and ratios with either colon
 //!   (`10：30`, `1：2`) stay whole. Layout skips only ASCII `9:00` today and
-//!   should adopt the same rule.
+//!   should adopt the same rule;
+//! - the label and the value are both clean: no second delimiter on either
+//!   side (`番号：No.1：2026年度`, `氏名：佐藤花子　電話∶03-1234-5678`), and
+//!   a visible character in each (`備考：` followed by U+200B is a bare
+//!   label, not a split).
 //!
 //! # Coverage
 //!
@@ -56,7 +111,8 @@
 //!   fragment fails the whole call.
 //! - [`overlapping`]: every part the box may touch, or all parts when it
 //!   touches the content but no part. It is inclusive, for diagnostics and
-//!   candidate display only, and fails only for an invalid box.
+//!   candidate display only, and fails only for an invalid box or
+//!   [`SelectError::LimitExceeded`].
 //!
 //! # Edge positions
 //!
@@ -76,12 +132,25 @@
 //! The interval is the intersection of the ranges reached from the left and
 //! from the right edge, widened to include layout's own estimate. A box edge
 //! must clear the whole interval, up to [`ESTIMATED_EDGE_TOLERANCE_EM`], to
-//! contain or to miss a part; otherwise the part is cut. A fragment whose
-//! height is not plausible for one horizontal line of its width
-//! (height / width-derived em outside [`HEIGHT_PER_ESTIMATED_EM`]: tall boxes,
-//! rotated or vertical runs, heavily condensed text) has unbounded interior
-//! edges: [`in_box`] selects it only with a box containing the whole content
-//! (as its parts, when a split is known).
+//! contain or to miss a part; otherwise the part is cut.
+//!
+//! Interior edges are unbounded, so [`in_box`] selects the fragment only with
+//! a box containing the whole content (as its parts, when a split is known),
+//! when either of these holds:
+//!
+//! - the height is not plausible for one horizontal line of its width:
+//!   height / width-derived em outside [`HEIGHT_PER_ESTIMATED_EM`]. Above its
+//!   upper end the run is likely condensed (`Tz`, 文字の縮小): pdf-inspector
+//!   reports the height as font size × max(horizontal, vertical scale), so
+//!   both the height and the width-derived em overstate the advance em, and
+//!   a box missing the first value character would still clear the
+//!   interval. Tall boxes, rotated or vertical runs fall outside too;
+//! - the text has a character without its own advance: a control, a
+//!   combining mark (U+0300–U+036F and the other combining blocks), a kana
+//!   voicing mark (U+3099–U+309A), a zero-width or format character
+//!   (U+200B–U+200F, U+202A–U+202E, U+2060–U+206F, U+FEFF, U+00AD) or a
+//!   variation selector (U+FE00–U+FE0F, U+E0100–U+E01EF). Fragments without
+//!   any visible character are not usable at all.
 //!
 //! Worked examples, both 11 units high:
 //!
@@ -90,16 +159,28 @@
 //!   label ends at 104.0–105.1. A box over the rest of the line whose left
 //!   edge lies between x 103.4 (105.07 − 0.15 em) and 116.6 (115.0 + 0.15 em)
 //!   selects only the value; the observed value start is 115.0.
-//! - `Total: 12000` in a proportional 11-unit font at x 60–121.1: the em is
-//!   10.19–11, the value starts somewhere in 74.3–111.0 and the label ends in
-//!   70.2–106.9 (layout estimates 95.7 for a true 90.6, 0.46 em off). No box
-//!   edge separates them, so every partial box is `SplitsSourceRun`; only a
-//!   box over the whole run selects its label and value. Value-only boxes over
-//!   mostly-Latin `label: value` runs are therefore refused by design.
+//! - `Total: 12000` in a proportional 11-unit font at x 60–121.1: the
+//!   width-derived em is 10.19, so height / em is 1.08 and the run is treated
+//!   as possibly condensed. Even with a bounded em, the value would start
+//!   somewhere in 74.3–111.0 and the label end in 70.2–106.9 (layout
+//!   estimates 95.7 for a true 90.6, 0.46 em off). Every partial box is
+//!   `SplitsSourceRun`; only a box over the whole run selects its label and
+//!   value. Value-only boxes over mostly-Latin `label: value` runs are
+//!   therefore refused by design.
 //!
-//! Limits: proportional CJK metrics (for example `palt`), letter spacing and
-//! combining marks are not modelled; they can move a boundary beyond its
-//! interval.
+//! Limits, until fragments carry the horizontal scale and per-glyph advances:
+//!
+//! - condensation is detected only from the width: a run condensed by a few
+//!   percent (scale above about 0.96 for `ご請求書番号：INV-0012`), or one whose
+//!   narrow characters are wider than half an em on average so that they
+//!   mask the condensation (caps such as `WWW-MMM`), keeps bounded edges, and
+//!   a box edge inside its first value character can then be accepted;
+//! - proportional CJK metrics (for example `palt`) and letter spacing are
+//!   not modelled; they can move a boundary beyond its interval;
+//! - a value of one or a few narrow characters (`番号：I`, `担当：I-1`) pulls
+//!   the width-derived em below the height, so such runs look condensed and
+//!   a box over the value alone is refused even when correctly placed; a box
+//!   over the whole run still returns the label and the value.
 //!
 //! # Caller boxes
 //!
@@ -113,27 +194,44 @@
 //!
 //! # Duplicates, order and cost
 //!
-//! Overprinted copies (faux bold) are one selection: usable fragments on the
-//! page with the same text and all four edges within
-//! [`DUPLICATE_EDGE_TOLERANCE_EM`] × the smaller height (chained) form a
-//! group. The box is tested against each copy in snapshot order and the first
-//! copy it selects is returned; a group whose copies it only misses or cuts is
-//! skipped, and it is an error only when the box cuts every copy. The copies
-//! differ by less than any glyph, so a box edge between them is not a cut.
+//! Overprinted copies (faux bold) are one selection. Copies are looked for
+//! among the usable fragments on the page *near the box*: those that
+//! intersect the box grown on every side by [`DUPLICATE_EDGE_TOLERANCE_EM`] ×
+//! their own height. Two of them are linked when they have the same text and
+//! all four edges within [`DUPLICATE_EDGE_TOLERANCE_EM`] × the smaller
+//! height, and the connected sets of links (found with a union-find, so the
+//! snapshot order does not matter) are the groups. The growth includes every
+//! copy linked to a fragment the box touches; a chain of copies that leaves
+//! that region and comes back forms separate groups.
+//!
+//! The box is tested against each copy of a group in snapshot order and the
+//! first copy it selects is returned; a group whose copies it only misses or
+//! cuts is skipped, and it is an error only when the box cuts every copy. The
+//! copies differ by less than any glyph, so a box edge between them is not a
+//! cut.
 //!
 //! Results are in reading order: fragments are grouped into bands with the
 //! same rule as layout lines (vertical overlap of at least half the smaller
 //! height), bands top to bottom, fragments left to right, ties by snapshot
 //! index; parts of one fragment are in byte order.
 //!
-//! Only usable fragments (usable quality, nonblank text, valid box) are
+//! Only usable fragments (usable quality, a visible character, valid box) are
 //! considered; others are skipped, never reported as errors. Fragment IDs are
 //! not checked for uniqueness: [`crate::inspect`] issues unique IDs.
-//! Each call sorts the page's usable fragments by text and top for duplicate
-//! detection, comparing each with the same-text fragments in its top band
-//! (O(n log n + n·k), k such fragments), then analyzes each fragment whose box
-//! intersects the selection box in time linear in its text, and sorts the
-//! selected fragments.
+//!
+//! Cost per call, for n fragments of which m are near the box: one pass over
+//! the n fragments, O(m log m) to sort the m by text and box, and at most
+//! [`MAX_COPY_COMPARISONS`] comparisons of a fragment with an earlier
+//! same-text one in its top band (union-find with path compression, so each
+//! is nearly constant). Comparisons are skipped over identical boxes, over
+//! fragments already in the same group, and over same-top fragments too far
+//! to the left, so ordinary pages, chains of copies and identical copies
+//! need O(m). A page that needs more (for example thousands of distinct
+//! same-text boxes in one band that are not copies) fails with
+//! [`SelectError::LimitExceeded`] instead of taking quadratic time. Copies
+//! the box intersects are then analyzed, identical boxes of a group once, in
+//! time linear in their text until one is selected, and the selected
+//! fragments are sorted.
 //!
 //! [`ImageTransform::normalized_box_to_display`]: crate::geometry::ImageTransform::normalized_box_to_display
 use std::ops::RangeInclusive;
@@ -168,28 +266,67 @@ pub const NARROW_ADVANCE_MIN_EM: f64 = 0.2;
 /// one em wide).
 pub const NARROW_ADVANCE_MAX_EM: f64 = 1.05;
 
-/// Plausible fragment height per width-derived em for one horizontal line.
-/// Outside it, interior edges are unbounded.
-pub const HEIGHT_PER_ESTIMATED_EM: RangeInclusive<f64> = 0.7..=1.6;
+/// Plausible fragment height per width-derived em for one horizontal line of
+/// uncondensed text. Outside it, interior edges are unbounded. The upper end
+/// is the condensed-run check: unscaled `請求番号： INV-0012` and `時間：9:00`
+/// in Helvetica-like metrics are at 1.011, while `ご請求書番号：INV-0012`
+/// condensed to 95 % is at 1.032 and to 90 % at 1.089.
+pub const HEIGHT_PER_ESTIMATED_EM: RangeInclusive<f64> = 0.7..=1.02;
 
 /// Overprinted copies: same text and every edge within this fraction of the
 /// smaller fragment height (1.1 Display units at 11 pt).
 pub const DUPLICATE_EDGE_TOLERANCE_EM: f64 = 0.1;
 
+/// Most comparisons between same-text fragments one call makes while looking
+/// for overprinted copies (see the module docs); beyond it the call fails
+/// with [`SelectError::LimitExceeded`].
+pub const MAX_COPY_COMPARISONS: usize = 1_000_000;
+
 /// Delimiters of a known split; mirrors layout's inline delimiters.
 const DELIMITERS: [char; 2] = ['：', ':'];
+
+/// Colon-like characters: layout's delimiters and lookalikes it does not
+/// split at. Any of them may separate a label from a value.
+const COLON_LIKE: [char; 12] = [
+    ':', '：', '∶', '︰', '﹕', '︓', '꞉', '˸', 'ː', '⁚', '⦂', '׃',
+];
+
+/// Equals signs, which may separate a label from a value (`Total = 12000`).
+const EQUALS_LIKE: [char; 3] = ['=', '＝', '﹦'];
+
+/// Characters other than digits and colons that may join the parts of a
+/// time, ratio or date-time.
+const NUMERIC_JOINERS: [char; 16] = [
+    '/', '／', '-', '－', '‐', '‑', '–', '—', '−', '~', '～', '〜', '.', '．', ',', '，',
+];
 
 /// What a selected span is within its fragment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
-    /// A whole fragment with no known split. It may still be a label of a
-    /// pair across fragments.
+    /// A whole fragment of clean text with no U+3000 inside (see the module
+    /// docs). Fillable, but it may still be a label on its own or a label and
+    /// value separated by a space.
     Whole,
-    /// The label part of a known split. Never a fill value.
+    /// The label part of a known split, or a whole fragment that is a bare
+    /// label (`請求番号：`). Never a fill value.
     Label,
-    /// The value part of a known split.
+    /// The value part of a known split: the rest of the run after the
+    /// delimiter. Fillable, but it may still carry the next field when no
+    /// delimiter separates it.
     Value,
+    /// A whole fragment that may hold a label with its value, or several
+    /// fields, that select cannot separate. Never a fill value.
+    Mixed,
+}
+
+impl Role {
+    /// Whether a span with this role may become a fill value: `Whole` and
+    /// `Value`, and only from [`in_box`], after the caller checks in the
+    /// module docs.
+    pub fn is_fillable(self) -> bool {
+        matches!(self, Self::Whole | Self::Value)
+    }
 }
 
 /// A selected source span and its role.
@@ -207,12 +344,17 @@ pub enum SelectError {
     /// between its parts.
     #[error("selection box cuts source fragment {fragment_id} outside a known split")]
     SplitsSourceRun { fragment_id: String },
+    /// Looking for overprinted copies near the box needed more than
+    /// [`MAX_COPY_COMPARISONS`] comparisons.
+    #[error("selection exceeded its overprinted-copy comparison limit")]
+    LimitExceeded,
 }
 
 /// Spans fully inside `bbox` on `page`, in reading order. A fragment the box
 /// covers only in part contributes the parts of its known split that the box
-/// contains; any other partial cover is an error. See the module docs for
-/// which spans may become fill values.
+/// contains; any other partial cover is an error, as is
+/// [`SelectError::LimitExceeded`]. See the module docs for which spans may
+/// become fill values.
 pub fn in_box(
     fragments: &[SourceFragment],
     page: u32,
@@ -223,14 +365,34 @@ pub fn in_box(
 
 /// Spans `bbox` may touch on `page`, in reading order: whole runs, or the
 /// parts of a known split the box may touch. Inclusive, for diagnostics and
-/// candidate display: it must not be used to produce fill values. Never fails
-/// for a valid box.
+/// candidate display: it must not be used to produce fill values. Fails only
+/// for an invalid box or [`SelectError::LimitExceeded`].
 pub fn overlapping(
     fragments: &[SourceFragment],
     page: u32,
     bbox: Rect,
 ) -> Result<Vec<Selected>, SelectError> {
     select(fragments, page, bbox, Mode::Overlapping)
+}
+
+/// Whether `text` starts with `label`, ignoring whitespace and invisible
+/// characters in both. select does not normalize: pass both in the caller's
+/// own normalized form (for example NFKC and lowercase, as fill compares
+/// labels). A label without visible characters never matches.
+pub fn starts_with_label(text: &str, label: &str) -> bool {
+    let label = visible_text(label);
+    !label.is_empty() && visible_text(text).starts_with(&label)
+}
+
+/// Whether `text` holds `label` anywhere, ignoring whitespace and invisible
+/// characters in both; normalization as for [`starts_with_label`].
+pub fn contains_label(text: &str, label: &str) -> bool {
+    let label = visible_text(label);
+    !label.is_empty() && visible_text(text).contains(&label)
+}
+
+fn visible_text(text: &str) -> String {
+    text.chars().filter(|&c| is_visible(c)).collect()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -254,16 +416,26 @@ fn select(
 ) -> Result<Vec<Selected>, SelectError> {
     bbox.validate().map_err(|_| SelectError::InvalidBox)?;
     let mut selected = Vec::new();
-    for copies in overprint_groups(fragments, page) {
+    for copies in overprint_groups(fragments, page, bbox)? {
         // Prefer a copy the box selects, then one it misses; report a cut
         // only when the box cuts every copy.
         let mut missed = false;
         let mut cut = None;
         let mut chosen = None;
+        let mut tested: Vec<Rect> = Vec::new();
         for index in copies {
-            if !intersects(bbox, fragments[index].bbox) {
+            let r = fragments[index].bbox;
+            if !intersects(bbox, r) {
                 missed = true;
                 continue;
+            }
+            // Copies share their text, so an identical box gives the same
+            // answer; at most a few distinct boxes per group are expected.
+            if tested.len() < 8 {
+                if tested.contains(&r) {
+                    continue;
+                }
+                tested.push(r);
             }
             match Source::new(&fragments[index]).select(bbox, mode) {
                 Ok(Some(items)) => {
@@ -291,8 +463,17 @@ fn intersects(a: Rect, b: Rect) -> bool {
     a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
 }
 
+fn grow(r: Rect, by: f64) -> Rect {
+    Rect {
+        left: r.left - by,
+        top: r.top - by,
+        right: r.right + by,
+        bottom: r.bottom + by,
+    }
+}
+
 fn usable(f: &SourceFragment) -> bool {
-    f.quality == Quality::Usable && !f.raw_text.trim().is_empty() && f.bbox.validate().is_ok()
+    f.quality == Quality::Usable && f.raw_text.chars().any(is_visible) && f.bbox.validate().is_ok()
 }
 
 fn whole(f: &SourceFragment) -> Span {
@@ -305,53 +486,106 @@ fn whole(f: &SourceFragment) -> Span {
     }
 }
 
-/// Usable fragments on `page`, grouped into overprinted copies (see the
-/// module docs): each group in snapshot order, groups by their first index.
-fn overprint_groups(fragments: &[SourceFragment], page: u32) -> Vec<Vec<usize>> {
+/// Usable fragments on `page` near `bbox`, grouped into overprinted copies
+/// (see the module docs): each group in snapshot order, groups by their first
+/// index.
+fn overprint_groups(
+    fragments: &[SourceFragment],
+    page: u32,
+    bbox: Rect,
+) -> Result<Vec<Vec<usize>>, SelectError> {
     let candidates: Vec<usize> = (0..fragments.len())
-        .filter(|&i| fragments[i].page == page && usable(&fragments[i]))
+        .filter(|&i| {
+            let f = &fragments[i];
+            f.page == page
+                && usable(f)
+                && intersects(
+                    grow(bbox, DUPLICATE_EDGE_TOLERANCE_EM * f.bbox.height()),
+                    f.bbox,
+                )
+        })
         .collect();
-    let mut order = candidates.clone();
+    let n = candidates.len();
+    let at = |place: usize| &fragments[candidates[place]];
+    // Positions into `candidates`, by text and box: within one text, tops
+    // ascend, same tops by left, and identical boxes are adjacent.
+    let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&a, &b| {
-        let (fa, fb) = (&fragments[a], &fragments[b]);
+        let (fa, fb) = (&fragments[candidates[a]], &fragments[candidates[b]]);
         fa.raw_text
             .cmp(&fb.raw_text)
             .then(fa.bbox.top.total_cmp(&fb.bbox.top))
+            .then(fa.bbox.left.total_cmp(&fb.bbox.left))
+            .then(fa.bbox.right.total_cmp(&fb.bbox.right))
+            .then(fa.bbox.bottom.total_cmp(&fb.bbox.bottom))
             .then(a.cmp(&b))
     });
-    // The lowest index each fragment is a copy of; always lower than itself.
-    let mut copy_of: Vec<Option<usize>> = vec![None; fragments.len()];
-    for (position, &j) in order.iter().enumerate() {
-        let b = &fragments[j];
-        // The pairwise tolerance never exceeds this fraction of b's height.
-        let band = DUPLICATE_EDGE_TOLERANCE_EM * b.bbox.height();
-        for &i in order[..position].iter().rev() {
-            let a = &fragments[i];
-            if a.raw_text != b.raw_text || b.bbox.top - a.bbox.top > band {
-                break;
-            }
-            if same_place(a.bbox, b.bbox) {
-                let (low, high) = (i.min(j), i.max(j));
-                copy_of[high] = Some(copy_of[high].map_or(low, |c| c.min(low)));
+    let mut sets = DisjointSets::new(n);
+    // For each place in `order`, the first place of its run with the same
+    // text, the same text and top, the same text and box, and the same set
+    // when it was processed (sets only merge, so that run stays one set).
+    let (mut text_start, mut top_start) = (vec![0; n], vec![0; n]);
+    let (mut box_start, mut set_start) = (vec![0; n], vec![0; n]);
+    let mut budget = MAX_COPY_COMPARISONS;
+    for k in 0..n {
+        let b = at(order[k]);
+        let (mut same_text, mut same_top, mut same_box) = (false, false, false);
+        if k > 0 {
+            let a = at(order[k - 1]);
+            same_text = a.raw_text == b.raw_text;
+            same_top = same_text && a.bbox.top == b.bbox.top;
+            same_box = same_text && a.bbox == b.bbox;
+        }
+        text_start[k] = if same_text { text_start[k - 1] } else { k };
+        top_start[k] = if same_top { top_start[k - 1] } else { k };
+        box_start[k] = if same_box { box_start[k - 1] } else { k };
+        if same_box {
+            sets.union(order[k - 1], order[k]);
+        } else {
+            // The pairwise tolerance never exceeds this fraction of b's height.
+            let band = DUPLICATE_EDGE_TOLERANCE_EM * b.bbox.height();
+            let mut root = sets.find(order[k]);
+            let mut p = k;
+            while p > text_start[k] {
+                p -= 1;
+                let a = at(order[p]);
+                if b.bbox.top - a.bbox.top > band {
+                    break;
+                }
+                budget = budget.checked_sub(1).ok_or(SelectError::LimitExceeded)?;
+                if sets.find(order[p]) == root {
+                    p = set_start[p];
+                } else if same_place(a.bbox, b.bbox) {
+                    sets.union(order[p], order[k]);
+                    root = sets.find(order[k]);
+                    p = set_start[p];
+                } else if a.bbox.top == b.bbox.top && b.bbox.left - a.bbox.left > band {
+                    // Earlier boxes with this top are further left still.
+                    p = top_start[p];
+                } else {
+                    p = box_start[p];
+                }
             }
         }
+        set_start[k] = if k > text_start[k] && sets.find(order[k - 1]) == sets.find(order[k]) {
+            set_start[k - 1]
+        } else {
+            k
+        };
     }
-    let mut group_of: Vec<Option<usize>> = vec![None; fragments.len()];
+    let mut group_of: Vec<Option<usize>> = vec![None; n];
     let mut groups: Vec<Vec<usize>> = Vec::new();
-    for i in candidates {
-        let mut root = i;
-        while let Some(lower) = copy_of[root] {
-            root = lower;
-        }
+    for (position, &index) in candidates.iter().enumerate() {
+        let root = sets.find(position);
         match group_of[root] {
-            Some(group) => groups[group].push(i),
+            Some(group) => groups[group].push(index),
             None => {
                 group_of[root] = Some(groups.len());
-                groups.push(vec![i]);
+                groups.push(vec![index]);
             }
         }
     }
-    groups
+    Ok(groups)
 }
 
 fn same_place(a: Rect, b: Rect) -> bool {
@@ -364,6 +598,49 @@ fn same_place(a: Rect, b: Rect) -> bool {
     ]
     .iter()
     .all(|(x, y)| (x - y).abs() <= tolerance)
+}
+
+/// Union-find over `0..n` with path compression and union by size.
+struct DisjointSets {
+    parent: Vec<usize>,
+    size: Vec<usize>,
+}
+
+impl DisjointSets {
+    fn new(n: usize) -> Self {
+        Self {
+            parent: (0..n).collect(),
+            size: vec![1; n],
+        }
+    }
+
+    fn find(&mut self, x: usize) -> usize {
+        let mut root = x;
+        while self.parent[root] != root {
+            root = self.parent[root];
+        }
+        let mut node = x;
+        while self.parent[node] != root {
+            let next = self.parent[node];
+            self.parent[node] = root;
+            node = next;
+        }
+        root
+    }
+
+    fn union(&mut self, a: usize, b: usize) {
+        let (a, b) = (self.find(a), self.find(b));
+        if a == b {
+            return;
+        }
+        let (big, small) = if self.size[a] >= self.size[b] {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        self.parent[small] = big;
+        self.size[big] += self.size[small];
+    }
 }
 
 /// A part of a fragment: its role, the span returned for it, the byte range
@@ -397,7 +674,8 @@ impl<'a> Source<'a> {
         } else {
             height_em
         };
-        let plausible = HEIGHT_PER_ESTIMATED_EM.contains(&(height_em / width_em));
+        let plausible = HEIGHT_PER_ESTIMATED_EM.contains(&(height_em / width_em))
+            && !f.raw_text.chars().any(has_no_advance);
         let em = plausible.then(|| (height_em.min(width_em), height_em.max(width_em)));
         let tolerance =
             (ESTIMATED_EDGE_TOLERANCE_EM * height_em.min(width_em)).max(MEASURED_EDGE_SLACK);
@@ -414,10 +692,11 @@ impl<'a> Source<'a> {
             None => {
                 let text = &f.raw_text;
                 let start = text.len() - text.trim_start().len();
+                let end = text.trim_end().len();
                 vec![Part {
-                    role: Role::Whole,
+                    role: text.get(start..end).map_or(Role::Mixed, whole_role),
                     span: whole(f),
-                    range: (start, text.trim_end().len()),
+                    range: (start, end),
                     estimate: None,
                 }]
             }
@@ -603,8 +882,121 @@ fn is_wide(c: char) -> bool {
         | 0x20000..=0x3FFFD)
 }
 
+/// Combining marks, kana voicing marks, zero-width and format characters and
+/// variation selectors: no advance or glyph of their own.
+fn is_zero_width(c: char) -> bool {
+    matches!(c as u32,
+        0x00AD
+        | 0x0300..=0x036F
+        | 0x1AB0..=0x1AFF
+        | 0x1DC0..=0x1DFF
+        | 0x200B..=0x200F
+        | 0x202A..=0x202E
+        | 0x2060..=0x206F
+        | 0x20D0..=0x20FF
+        | 0x3099..=0x309A
+        | 0xFE00..=0xFE0F
+        | 0xFE20..=0xFE2F
+        | 0xFEFF
+        | 0xE0100..=0xE01EF)
+}
+
+/// A character whose advance the class weights cannot estimate.
+fn has_no_advance(c: char) -> bool {
+    c.is_control() || is_zero_width(c)
+}
+
+fn is_visible(c: char) -> bool {
+    !(c.is_whitespace() || has_no_advance(c))
+}
+
 fn is_digit(c: char) -> bool {
     c.is_ascii_digit() || ('０'..='９').contains(&c)
+}
+
+/// Whether `text` is clean (see the module docs).
+fn is_clean(text: &str) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    let url = url_chars(&chars);
+    let mut visible = false;
+    let mut numeric_shape = true;
+    let mut numeric_colon = false;
+    for (k, &c) in chars.iter().enumerate() {
+        if !is_visible(c) {
+            continue;
+        }
+        visible = true;
+        numeric_shape &=
+            !url[k] && (is_digit(c) || COLON_LIKE.contains(&c) || NUMERIC_JOINERS.contains(&c));
+        if url[k] {
+            continue;
+        }
+        if EQUALS_LIKE.contains(&c) {
+            return false;
+        }
+        if COLON_LIKE.contains(&c) {
+            if chars.get(k + 1..k + 3) == Some(&['/', '/'][..]) {
+                continue;
+            }
+            let before = chars[..k].iter().rev().find(|&&c| is_visible(c));
+            let after = chars[k + 1..].iter().find(|&&c| is_visible(c));
+            if !(before.is_some_and(|&c| is_digit(c)) && after.is_some_and(|&c| is_digit(c))) {
+                return false;
+            }
+            numeric_colon = true;
+        }
+    }
+    visible && (numeric_shape || !numeric_colon)
+}
+
+/// Marks the characters of whitespace-separated tokens that start with a URL
+/// scheme (`scheme://`, the scheme an ASCII letter then letters, digits, `+`,
+/// `-` or `.`).
+fn url_chars(chars: &[char]) -> Vec<bool> {
+    let mut url = vec![false; chars.len()];
+    let mut start = 0;
+    while start < chars.len() {
+        if chars[start].is_whitespace() {
+            start += 1;
+            continue;
+        }
+        let end = chars[start..]
+            .iter()
+            .position(|c| c.is_whitespace())
+            .map_or(chars.len(), |offset| start + offset);
+        let token = &chars[start..end];
+        let scheme = token
+            .iter()
+            .position(|&c| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
+            .unwrap_or(token.len());
+        if scheme > 0
+            && token[0].is_ascii_alphabetic()
+            && token.get(scheme..scheme + 3) == Some(&[':', '/', '/'][..])
+        {
+            url[start..end].fill(true);
+        }
+        start = end;
+    }
+    url
+}
+
+/// The role of a whole fragment whose trimmed text is `content`.
+fn whole_role(content: &str) -> Role {
+    if is_clean(content) && !content.contains('\u{3000}') {
+        return Role::Whole;
+    }
+    let visible = content.trim_end_matches(|c: char| !is_visible(c));
+    match visible.chars().next_back() {
+        Some(last) if COLON_LIKE.contains(&last) => {
+            let label = &visible[..visible.len() - last.len_utf8()];
+            if is_clean(label) {
+                Role::Label
+            } else {
+                Role::Mixed
+            }
+        }
+        _ => Role::Mixed,
+    }
 }
 
 /// The label and value of the one inline pair layout derives from `f` alone,
@@ -642,7 +1034,8 @@ fn known_split(f: &SourceFragment) -> Option<(Span, Span)> {
         && text.get(value.end..)?.trim().is_empty();
     let number = label_text.chars().next_back().is_some_and(is_digit)
         && value_text.chars().next().is_some_and(is_digit);
-    (one_delimiter && trimmed && !number).then(|| (label.clone(), value.clone()))
+    let clean = is_clean(label_text) && is_clean(value_text);
+    (one_delimiter && trimmed && !number && clean).then(|| (label.clone(), value.clone()))
 }
 
 /// Spans of one selected fragment, keyed by its snapshot index.
