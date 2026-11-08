@@ -35,8 +35,9 @@
 //! Only the best-scoring candidates decide (an exact label over a partial
 //! one). The field is filled only when every one of them may be committed
 //! and they agree; a held candidate among them leaves the field ambiguous,
-//! and a lower-scoring candidate never fills the field. A [`Hold`] states
-//! the first failed condition, in the order above.
+//! and a lower-scoring candidate never fills the field. A candidate's
+//! `holds` list every failed condition, in the order above, and its `hold`
+//! is the first of them.
 //!
 //! Work is bounded by [`FillLimits`]: layout hypotheses per document, work
 //! units over layout and matching (see [`DEFAULT_MAX_WORK`]), and an
@@ -221,8 +222,10 @@ pub enum FillStatus {
     LimitExceeded,
 }
 
-/// Why a candidate may not be committed offline: the first failed
-/// condition of the commit policy (see the module documentation).
+/// Why a candidate may not be committed offline: a failed condition of the
+/// commit policy (see the module documentation). Variants are declared in
+/// the order of the conditions; [`FillCandidate::holds`] lists every failed
+/// condition in this order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Hold {
@@ -263,9 +266,13 @@ pub struct FillCandidate {
     pub value: Option<Value>,
     pub score: f64,
     pub placement: Placement,
-    /// Set when this candidate may not be filled offline.
+    /// The first failed condition (the first of [`Self::holds`]); set when
+    /// this candidate may not be filled offline.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hold: Option<Hold>,
+    /// Every failed condition, in the order of the commit policy.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub holds: Vec<Hold>,
     pub evidence: Vec<FillEvidence>,
 }
 
@@ -468,7 +475,8 @@ struct Cache {
 struct Candidate {
     pair: usize,
     score: f64,
-    hold: Option<Hold>,
+    /// Every failed condition of the commit policy, in order.
+    holds: Vec<Hold>,
     value: Option<Value>,
 }
 
@@ -529,18 +537,25 @@ impl Context<'_> {
             let Some(value) = prepared.value.as_ref() else {
                 continue;
             };
-            // The first failed condition of the commit policy, in order.
-            let hold = found
-                .hold
-                .or((pair.binding == Binding::Geometric).then_some(Hold::GeometricOnly))
-                .or((value.evidence.len() > 1).then_some(Hold::MultiLine))
-                .or((field.field_type == FieldType::Text && value.several)
-                    .then_some(Hold::SeveralValues));
+            // Every failed condition of the commit policy, in order.
+            let holds: Vec<Hold> = [
+                (found.partial, Hold::PartialLabel),
+                (found.one_sided, Hold::OneSidedQualifier),
+                (pair.binding == Binding::Geometric, Hold::GeometricOnly),
+                (value.evidence.len() > 1, Hold::MultiLine),
+                (
+                    field.field_type == FieldType::Text && value.several,
+                    Hold::SeveralValues,
+                ),
+            ]
+            .into_iter()
+            .filter_map(|(failed, hold)| failed.then_some(hold))
+            .collect();
             let value = self.typed_value(index, field.field_type, cache, budget)?;
             candidates.push(Candidate {
                 pair: index,
                 score: found.score,
-                hold,
+                holds,
                 value,
             });
         }
@@ -688,7 +703,7 @@ impl Context<'_> {
         };
         // A held candidate (for example a table row) never determines one
         // value, even when the candidates agree or only one fits the type.
-        let held = top.iter().any(|c| c.hold.is_some());
+        let held = top.iter().any(|c| !c.holds.is_empty());
         let status = if held {
             FillStatus::Ambiguous
         } else if field.field_type == FieldType::Text {
@@ -737,7 +752,8 @@ impl Context<'_> {
                         value: candidate.value.clone(),
                         score: candidate.score,
                         placement: self.pairs[candidate.pair].placement,
-                        hold: candidate.hold,
+                        hold: candidate.holds.first().copied(),
+                        holds: candidate.holds.clone(),
                         evidence,
                     });
                 }
@@ -838,24 +854,30 @@ fn normalize_label(s: &str) -> Label {
 const HONORIFICS: [char; 3] = ['ご', '御', 'お'];
 
 /// A label comparison: its score and why it may not be committed
-/// ([`Hold::PartialLabel`] or [`Hold::OneSidedQualifier`]).
+/// ([`Hold::PartialLabel`], [`Hold::OneSidedQualifier`] or both).
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Match {
     score: f64,
-    hold: Option<Hold>,
+    /// [`Hold::PartialLabel`]: one base contains the other.
+    partial: bool,
+    /// [`Hold::OneSidedQualifier`]: only one label has qualifiers.
+    one_sided: bool,
 }
 
 impl Match {
     const NONE: Self = Self {
         score: 0.0,
-        hold: None,
+        partial: false,
+        one_sided: false,
     };
+
+    fn held(self) -> bool {
+        self.partial || self.one_sided
+    }
 
     /// The higher score; at equal scores, a match without a hold.
     fn better(self, other: Self) -> Self {
-        if other.score > self.score
-            || other.score == self.score && self.hold.is_some() && other.hold.is_none()
-        {
+        if other.score > self.score || other.score == self.score && self.held() && !other.held() {
             other
         } else {
             self
@@ -868,7 +890,7 @@ impl Match {
 /// short/long and is [`Hold::PartialLabel`]. Equal qualifiers keep the
 /// score, different ones on both sides never match, and a qualifier on one
 /// side scales the score by that label's base share and is
-/// [`Hold::OneSidedQualifier`] (unless the base is already partial).
+/// [`Hold::OneSidedQualifier`] (as well as partial when the base is).
 fn label_score(a: &Label, b: &Label) -> Match {
     let base = if a.base == b.base || a.stem == b.stem {
         1.0
@@ -887,11 +909,12 @@ fn label_score(a: &Label, b: &Label) -> Match {
         }
         short.base_chars as f64 / long.base_chars as f64
     };
-    let partial = (base < 1.0).then_some(Hold::PartialLabel);
+    let partial = base < 1.0;
     if a.qualifiers == b.qualifiers {
         return Match {
             score: base,
-            hold: partial,
+            partial,
+            one_sided: false,
         };
     }
     let share = match (a.qualifiers.is_empty(), b.qualifiers.is_empty()) {
@@ -901,7 +924,8 @@ fn label_score(a: &Label, b: &Label) -> Match {
     };
     Match {
         score: base * share,
-        hold: partial.or(Some(Hold::OneSidedQualifier)),
+        partial,
+        one_sided: true,
     }
 }
 
@@ -1659,6 +1683,62 @@ mod tests {
     }
 
     #[test]
+    fn candidates_list_every_failed_condition_in_order() {
+        let fragments = [
+            frag(
+                "a",
+                "電話番号：03-1234-5678 FAX 03-1234-5679",
+                [60.0, 100.0, 260.0, 110.0],
+            ),
+            frag(
+                "b",
+                "連絡先（代表）：03-1234-5678、03-1234-5679",
+                [60.0, 130.0, 300.0, 140.0],
+            ),
+            frag("c", "住所", [60.0, 160.0, 80.0, 170.0]),
+            frag("d", "東京都架空区1-2-3", [200.0, 160.0, 290.0, 170.0]),
+            frag("e", "テストビル5階", [200.0, 172.0, 270.0, 182.0]),
+            frag("f", "(旧) 発送日：2026/11/08", [60.0, 200.0, 200.0, 210.0]),
+        ];
+        let result = fill(
+            "doc",
+            &fragments,
+            &form(json!({"fields":[
+                {"id":"phone","label":"電話"},
+                {"id":"contact","label":"連絡先"},
+                {"id":"address","label":"住所"},
+                {"id":"sent","label":"発送"}
+            ]})),
+        );
+        // Before: only the first failed condition was kept (partial_label,
+        // one_sided_qualifier, geometric_only, partial_label).
+        for (id, holds) in [
+            ("phone", vec![Hold::PartialLabel, Hold::SeveralValues]),
+            (
+                "contact",
+                vec![Hold::OneSidedQualifier, Hold::SeveralValues],
+            ),
+            ("address", vec![Hold::GeometricOnly, Hold::MultiLine]),
+            ("sent", vec![Hold::PartialLabel, Hold::OneSidedQualifier]),
+        ] {
+            let candidate = &result.fields[id].candidates[0];
+            assert_eq!(held(&result, id), Some(holds[0]), "{id}");
+            assert_eq!(candidate.holds, holds, "{id}");
+        }
+        let json = serde_json::to_value(&result.fields["phone"].candidates[0]).unwrap();
+        assert_eq!(json["hold"], json!("partial_label"));
+        assert_eq!(json["holds"], json!(["partial_label", "several_values"]));
+        // A committed value has no holds to report.
+        let one = [frag("a", "電話：03-1234-5678", [60.0, 100.0, 160.0, 110.0])];
+        let result = fill(
+            "doc",
+            &one,
+            &form(json!({"fields":[{"id":"phone","label":"電話"}]})),
+        );
+        assert_eq!(result.fields["phone"].status, FillStatus::Filled);
+    }
+
+    #[test]
     fn partial_labels_are_candidates_only() {
         // Before: each of these filled the form field from the partial label.
         let cases = [
@@ -1700,7 +1780,7 @@ mod tests {
         // Only one leading honorific (here the rest is a partial match), and
         // never the whole label.
         let twice = label_score(&normalize_label("ごご住所"), &normalize_label("住所"));
-        assert_eq!(twice.hold, Some(Hold::PartialLabel));
+        assert!(twice.partial && !twice.one_sided);
         assert_eq!(normalize_label("ご").stem, "ご");
         let fragments = [frag(
             "a",

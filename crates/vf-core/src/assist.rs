@@ -3,10 +3,11 @@
 //!
 //! Only fields that the offline matcher left `ambiguous` are sent. Each one
 //! becomes a `choice` question whose options are that field's offered
-//! candidates plus `none`. A candidate is offered unless choosing it would
-//! still not give one value of the field's type: its [`Hold`] is
-//! [`Hold::SeveralValues`] or [`Hold::MultiLine`], or the field is a date,
-//! amount or number and the candidate has no normalized `value`. Option keys
+//! candidates plus `none`. A candidate is offered only when choosing it
+//! gives one value of the field's type: every failed condition in its
+//! `holds` (not only the first, `hold`) is [`Hold::PartialLabel`],
+//! [`Hold::OneSidedQualifier`] or [`Hold::GeometricOnly`], and for a date,
+//! amount or number field it has a normalized `value`. Option keys
 //! keep the candidate's index in `candidates` (`c0`, `c1`, …), so a key
 //! stays auditable when an earlier candidate is not offered. A field without
 //! an offered candidate is not sent and stays `ambiguous`. A question
@@ -422,11 +423,20 @@ pub fn assist<T: Transport, C: Clock>(
     Ok(out)
 }
 
-/// Whether choosing `candidate` would give one value of the field's type.
-/// A candidate holding several values or lines would not, nor would a date,
-/// amount or number that did not normalize.
+/// Whether choosing `candidate` would give one value of the field's type:
+/// every failed condition (its `hold` and all of its `holds`) concerns only
+/// the label or how the value is tied to it ([`Hold::PartialLabel`],
+/// [`Hold::OneSidedQualifier`], [`Hold::GeometricOnly`]), and a date, amount
+/// or number candidate has a normalized value. A candidate whose value has
+/// several lines or values fails even when its first hold is a label one.
 fn offered(field: &FormField, candidate: &FillCandidate) -> bool {
-    !matches!(candidate.hold, Some(Hold::SeveralValues | Hold::MultiLine))
+    let choosable = |hold: &Hold| {
+        matches!(
+            hold,
+            Hold::PartialLabel | Hold::OneSidedQualifier | Hold::GeometricOnly
+        )
+    };
+    candidate.hold.iter().chain(&candidate.holds).all(choosable)
         && (field.field_type == FieldType::Text || candidate.value.is_some())
 }
 
@@ -1595,15 +1605,16 @@ mod tests {
         assert_eq!(clip("短い", MAX_VALUE_CHARS), "短い");
     }
 
-    /// The only test in this binary that installs a logger.
-    fn held_candidate(hold: Option<Hold>, value: Option<Value>) -> FillCandidate {
+    /// A candidate failing `holds`, in order (`hold` is the first).
+    fn held_candidate(holds: &[Hold], value: Option<Value>) -> FillCandidate {
         FillCandidate {
             label: "ラベル".into(),
             raw: "原文".into(),
             value,
             score: 1.0,
             placement: vf_source::layout::Placement::Right,
-            hold,
+            hold: holds.first().copied(),
+            holds: holds.to_vec(),
             evidence: Vec::new(),
         }
     }
@@ -1612,28 +1623,164 @@ mod tests {
     fn only_candidates_that_give_one_typed_value_are_offered() {
         let text = &form(json!([{"id":"x","label":"x"}])).fields[0];
         let amount = &form(json!([{"id":"x","label":"x","type":"amount"}])).fields[0];
-        for hold in [
-            None,
-            Some(Hold::PartialLabel),
-            Some(Hold::OneSidedQualifier),
-            Some(Hold::GeometricOnly),
-        ] {
-            assert!(offered(text, &held_candidate(hold, None)), "{hold:?}");
+        let choosable: [&[Hold]; 6] = [
+            &[],
+            &[Hold::PartialLabel],
+            &[Hold::OneSidedQualifier],
+            &[Hold::GeometricOnly],
+            &[Hold::PartialLabel, Hold::OneSidedQualifier],
+            &[Hold::OneSidedQualifier, Hold::GeometricOnly],
+        ];
+        for holds in choosable {
+            assert!(offered(text, &held_candidate(holds, None)), "{holds:?}");
             assert!(
-                offered(amount, &held_candidate(hold, Some(json!(1)))),
-                "{hold:?}"
+                offered(amount, &held_candidate(holds, Some(json!(1)))),
+                "{holds:?}"
             );
-            assert!(!offered(amount, &held_candidate(hold, None)), "{hold:?}");
+            assert!(!offered(amount, &held_candidate(holds, None)), "{holds:?}");
         }
-        for hold in [Hold::SeveralValues, Hold::MultiLine] {
+        // Before: only the first hold was checked, so a several-values or
+        // multi-line candidate behind a label or binding hold was offered.
+        let never: [&[Hold]; 6] = [
+            &[Hold::SeveralValues],
+            &[Hold::MultiLine],
+            &[Hold::PartialLabel, Hold::SeveralValues],
+            &[Hold::OneSidedQualifier, Hold::SeveralValues],
+            &[Hold::GeometricOnly, Hold::MultiLine],
+            &[Hold::PartialLabel, Hold::GeometricOnly, Hold::MultiLine],
+        ];
+        for holds in never {
+            assert!(!offered(text, &held_candidate(holds, None)), "{holds:?}");
             assert!(
-                !offered(text, &held_candidate(Some(hold), None)),
-                "{hold:?}"
+                !offered(amount, &held_candidate(holds, Some(json!(1)))),
+                "{holds:?}"
             );
-            assert!(
-                !offered(amount, &held_candidate(Some(hold), Some(json!(1)))),
-                "{hold:?}"
+        }
+        // An inconsistently built candidate is judged by its `hold` as well.
+        let mut hidden = held_candidate(&[], None);
+        hidden.hold = Some(Hold::MultiLine);
+        assert!(!offered(text, &hidden));
+    }
+
+    /// Each document hides a value with several values or lines behind a
+    /// label or binding hold (its first `hold`), next to a choosable
+    /// candidate with the same score. The fake Jev picks the hidden
+    /// candidate's key: it was never offered, so the answer is invalid and
+    /// the field stays ambiguous. Alone (the first `alone` fragments), the
+    /// hidden candidate is not sent at all. Before: the hidden candidate was
+    /// offered and filled (`jev_choice`) with two phone numbers or two lines.
+    #[test]
+    fn hidden_several_or_multi_line_candidates_are_never_filled_by_jev() {
+        let cases: [(&str, Vec<SourceFragment>, usize, &str, Vec<Hold>); 3] = [
+            (
+                "partial label, two phone numbers",
+                vec![
+                    frag(
+                        "a",
+                        "電話番号：03-1234-5678 FAX 03-1234-5679",
+                        [60.0, 100.0, 260.0, 110.0],
+                    ),
+                    frag("b", "電話番号：03-9999-0000", [60.0, 130.0, 170.0, 140.0]),
+                ],
+                1,
+                "電話",
+                vec![Hold::PartialLabel, Hold::SeveralValues],
+            ),
+            (
+                "one-sided qualifier, two phone numbers",
+                vec![
+                    frag(
+                        "a",
+                        "連絡先（代表）：03-1234-5678、03-1234-5679",
+                        [60.0, 100.0, 300.0, 110.0],
+                    ),
+                    frag(
+                        "b",
+                        "連絡先（窓口）：03-9999-0000",
+                        [60.0, 130.0, 220.0, 140.0],
+                    ),
+                ],
+                1,
+                "連絡先",
+                vec![Hold::OneSidedQualifier, Hold::SeveralValues],
+            ),
+            (
+                "geometric binding, two lines",
+                vec![
+                    frag("a", "住所", [60.0, 100.0, 80.0, 110.0]),
+                    frag("b", "東京都架空区1-2-3", [200.0, 100.0, 290.0, 110.0]),
+                    frag("c", "テストビル5階", [200.0, 112.0, 270.0, 122.0]),
+                    frag("d", "住所", [60.0, 160.0, 80.0, 170.0]),
+                    frag("e", "大阪府架空市4-5-6", [200.0, 160.0, 290.0, 170.0]),
+                ],
+                3,
+                "住所",
+                vec![Hold::GeometricOnly, Hold::MultiLine],
+            ),
+        ];
+        for (name, fragments, alone, label, hidden) in cases {
+            let form = form(json!([{"id":"x","label":label}]));
+            let before = fill::fill("doc", &fragments, &form);
+            let field = &before.fields["x"];
+            assert_eq!(field.status, FillStatus::Ambiguous, "{name}");
+            assert_eq!(field.candidates.len(), 2, "{name}");
+            let bad = field
+                .candidates
+                .iter()
+                .position(|c| c.holds == hidden)
+                .unwrap_or_else(|| panic!("{name}: {:?}", field.candidates));
+            assert_eq!(field.candidates[bad].hold, Some(hidden[0]), "{name}");
+            assert_eq!(field.candidates[1 - bad].holds, hidden[..1], "{name}");
+            let key = format!("c{bad}");
+            let pick = {
+                let key = key.clone();
+                move |_: &serde_json::Map<String, Value>| key.clone()
+            };
+            let spread = {
+                let key = key.clone();
+                move |criteria: &serde_json::Map<String, Value>, _: &str| {
+                    let mut p = one_hot(criteria, NONE);
+                    p[NONE] = json!(0.0);
+                    p[key.as_str()] = json!(1.0);
+                    p
+                }
+            };
+            let (out, fake, before) = run_on(
+                &fragments,
+                &form,
+                vec![answer(pick, spread, json!({}))],
+                ExecutionConfig {
+                    max_attempts: 1,
+                    ..Default::default()
+                },
             );
+            let requests = fake.requests();
+            assert_eq!(requests.len(), 1, "{name}");
+            let criteria = requests[0]["questions"]["q0"]["criteria"]
+                .as_object()
+                .expect("criteria object");
+            let offered: Vec<&str> = criteria.keys().map(String::as_str).collect();
+            assert_eq!(offered, [format!("c{}", 1 - bad).as_str(), NONE], "{name}");
+            assert_eq!(out.fill.fields["x"], before.fields["x"], "{name}");
+            assert_eq!(
+                out.assist["x"].outcome,
+                AssistOutcome::AnswerInvalid,
+                "{name}"
+            );
+            // Without the choosable candidate the field is not sent at all.
+            let (out, fake, before) = run_on(
+                &fragments[..alone],
+                &form,
+                Vec::new(),
+                ExecutionConfig::default(),
+            );
+            let field = &before.fields["x"];
+            assert_eq!(field.status, FillStatus::Ambiguous, "{name}");
+            assert_eq!(field.candidates.len(), 1, "{name}");
+            assert_eq!(field.candidates[0].holds, hidden, "{name}");
+            assert!(fake.requests().is_empty(), "{name}");
+            assert!(out.assist.is_empty(), "{name}");
+            assert_eq!(out.fill.fields["x"], *field, "{name}");
         }
     }
 
@@ -1715,6 +1862,7 @@ mod tests {
         assert_eq!(out.assist["amount"].outcome, AssistOutcome::AnswerInvalid);
     }
 
+    /// The only test in this binary that installs a logger.
     #[test]
     fn logs_never_contain_bodies_source_text_or_credentials() {
         use std::io::Write;

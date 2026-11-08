@@ -43,7 +43,7 @@ voltfill fill input.pdf examples/forms/invoice.json -o result.json
 3. **値が1つ**: 値が1行であること。文字列の値は、さらに値を2つ以上含まないこと（下記）。
 4. **型に合う**: 日付・金額・数値は、値全体が下の表の書式に一致すること（一致しなければ `invalid`）。
 
-最上位の得点の候補（完全一致があれば完全一致、なければ最も近い部分一致）だけで決めます。そのすべてが4条件を満たし、同じ値を許すときだけ埋めます。最上位に `hold` 付きの候補が1つでもあれば `ambiguous` で、得点の低い候補で埋めることはしません（例: 同じラベルが「ラベル：値」と区切り記号のない形の両方にあれば埋めません）。`hold` は、上の順で最初に満たさなかった条件を示します。
+最上位の得点の候補（完全一致があれば完全一致、なければ最も近い部分一致）だけで決めます。そのすべてが4条件を満たし、同じ値を許すときだけ埋めます。最上位に `hold` 付きの候補が1つでもあれば `ambiguous` で、得点の低い候補で埋めることはしません（例: 同じラベルが「ラベル：値」と区切り記号のない形の両方にあれば埋めません）。候補の `holds` は満たさなかった条件をすべて上の順で示し、`hold` はその最初の条件です。
 
 | `hold` | 理由 |
 |---|---|
@@ -72,7 +72,7 @@ voltfill fill input.pdf examples/forms/invoice.json -o result.json
 | `invalid` | 最上位の候補の値がどれも型の書式に合わない。`raw` と `candidates` を返す |
 | `limit_exceeded` | 処理量の上限を超えたため評価していない（ライブラリの `fill` のみ。CLIはエラーで終了） |
 
-`evidence` はページ・原文片のIDとバイト範囲・座標（PDFポイント、左上原点）です。1つの片を「ラベル：値」で分けた場合の座標は文字幅からの推定で、`precision: "estimated"` と示します。`candidates` は得点順に最大5件で、それぞれ文書のラベル・原文・正規化値・得点・配置（`inline` / `right` / `below` / `column`）・`hold`・`evidence` を持ちます。
+`evidence` はページ・原文片のIDとバイト範囲・座標（PDFポイント、左上原点）です。1つの片を「ラベル：値」で分けた場合の座標は文字幅からの推定で、`precision: "estimated"` と示します。`candidates` は得点順に最大5件で、それぞれ文書のラベル・原文・正規化値・得点・配置（`inline` / `right` / `below` / `column`）・`hold`・`holds`・`evidence` を持ちます。
 
 | 型 | 受け付ける書式（全角は半角に正規化） |
 |---|---|
@@ -109,7 +109,7 @@ voltfill fill input.pdf examples/forms/invoice.json --remote -o result.json
 ```
 
 - 送るのは項目のラベル・型・別名と、選択肢にした候補ごとのページ・原文のラベルと値だけです。ページ画像・前後の行・ほかの項目は送りません。候補の文は選択対象の文書データで指示ではないと、要求に明記します。
-- 選択肢は、選べば1つの値になる候補と `none` です。`hold` が `partial_label`・`one_sided_qualifier`・`geometric_only` の候補は選択肢にします。選んでも1つの値にならない候補（`hold` が `several_values`・`multi_line` の候補と、日付・金額・数値の項目で正規化値のない候補）は選択肢にせず、送りもしません。キーは `candidates` での位置（`c0`・`c1`…）のままで、選択肢にしなかった候補のキーは不正な回答です。選択肢にできる候補がない項目は送らず、`ambiguous` のまま候補を返します。
+- 選択肢は、選べば1つの値になる候補と `none` です。満たさなかった条件（`holds`）がすべてラベルか結び付きの理由（`partial_label`・`one_sided_qualifier`・`geometric_only`）である候補だけを選択肢にします。`holds` にそれ以外の理由（`multi_line`・`several_values`）を含む候補は、最初の理由（`hold`）がラベルや結び付きでも、選んでも1つの値にならないため選択肢にせず、送りもしません。日付・金額・数値の項目で正規化値のない候補も同じです。キーは `candidates` での位置（`c0`・`c1`…）のままで、選択肢にしなかった候補のキーは不正な回答です。選択肢にできる候補がない項目は送らず、`ambiguous` のまま候補を返します。
 - 選ばれた候補が確率の単独最大で、確率の合計が1のときだけ `filled`（`method: "jev_choice"`）にし、`raw`・`value`・`evidence` はその候補の原文から取ります。`none` が単独最大なら `not_found`、同率・不正な回答（確率の合計が1でないものを含む）・送信失敗では `ambiguous` のままです。送った項目は `candidates` を残します。
 - 結果には `model`・`assist`（項目ごとの質問ID・`outcome`・選ばれたキー）・`usage`・`jev_responses` が加わります。`jev_responses` は再試行・エラー・不完全な本文を含む全試行の受信本文です。
 - `outcome` は、回答を得た場合が `selected`・`none_selected`・`not_unique_maximum` です。失敗には `answer_invalid`・`request_failed`・`budget_exhausted`（上限に達したか予算が停止していて、そのバッチかその再試行を送らなかった）・`usage_exceeded_budget`・`deadline_exceeded`・`request_too_large`・`cancelled` があります。`usage_exceeded_budget` は、受信して解析できた回答の使用量が予約か費用上限を超えた場合です。その回答は使わず（本文は残します）、以降のバッチも送りません。`cancelled` はライブラリの呼び出し側が中止させた場合で、CLIからは発生しません。
@@ -277,7 +277,7 @@ cargo test -p vf-core --test eval -- --nocapture
 - 値を期待した項目を別の値で埋めた、または空欄を期待した項目を埋めた。項目の `known_wrong`（`{"status": "filled", "raw": …, "value": …, "reason": …}`）と原文・正規化値が完全に一致する出力だけは除く
 - `known_wrong` を記録した項目の出力が記録と変わった。直った場合も別の誤った値になった場合も失敗にし、ケースの更新を求める
 - 対応済みのケースで、期待した値が空欄になった、または空欄の状態（`not_found`・`ambiguous`・`invalid`）が期待と違う
-- 空欄を期待した項目に書いた、最上位の候補の確定できない理由（`hold`。理由がなければ `"none"`）または原文（`candidate`）が期待と違う。オフラインで確定しない値は、正しい値が最上位の候補であることを `candidate` で確かめます
+- 空欄を期待した項目に書いた、最上位の候補の確定できない理由（`hold`。理由がなければ `"none"`）、すべての理由（`holds`）または原文（`candidate`）が期待と違う。オフラインで確定しない値は、正しい値が最上位の候補であることを `candidate` で確かめます
 - 埋めた値と `invalid` の原文のEvidenceが、原文片の正確な切り出しでない、期待した値の場合に期待したランを指さない、生成時に配置した位置と0.05pt以内で一致しない、または `precision` が片全体なら `run`・一部なら `estimated` でない
 - 埋めていない項目が正規化値を持つ、または `invalid` 以外の項目が原文やEvidenceを持つ
 - 対応済みのケースで、抽出した片がランと1対1でない。ランの結合を確かめるケース（例: 数字が別のランに分かれた金額）は、期待する片の原文を `fragments` に書きます

@@ -83,6 +83,10 @@ struct Expect {
     /// `"none"` when that candidate has none. Unset, the reason is not checked.
     #[serde(default)]
     hold: Option<String>,
+    /// With `abstain`: every failed condition (`holds`) of the first (best)
+    /// candidate, in order. Unset, only `hold` is checked.
+    #[serde(default)]
+    holds: Option<Vec<String>>,
     /// With `abstain`: the exact `raw` text of the first (best) candidate,
     /// for example the true value of a field that may not be committed
     /// offline. Unset, the candidates are not checked.
@@ -175,6 +179,7 @@ struct Check<'a> {
     known: Option<(Output, &'a str)>,
     currently_correct: bool,
     hold: Option<&'a str>,
+    holds: Option<&'a [String]>,
     candidate: Option<&'a str>,
 }
 
@@ -304,9 +309,17 @@ fn resolve<'a>(at: &str, case: &'a Case, field: &FormField) -> Check<'a> {
         _ => panic!("{at}: set either raw (with value and source) or abstain"),
     };
     assert!(
-        expect.hold.is_none() && expect.candidate.is_none() || expect.abstain.is_some(),
-        "{at}: hold and candidate are checked for abstentions only"
+        expect.hold.is_none() && expect.holds.is_none() && expect.candidate.is_none()
+            || expect.abstain.is_some(),
+        "{at}: hold, holds and candidate are checked for abstentions only"
     );
+    if let (Some(hold), Some(holds)) = (&expect.hold, &expect.holds) {
+        assert_eq!(
+            holds.first(),
+            Some(hold),
+            "{at}: hold must be the first of holds"
+        );
+    }
     let known = expect
         .known_wrong
         .as_ref()
@@ -330,6 +343,7 @@ fn resolve<'a>(at: &str, case: &'a Case, field: &FormField) -> Check<'a> {
         known,
         currently_correct: expect.currently_correct,
         hold: expect.hold.as_deref(),
+        holds: expect.holds.as_deref(),
         candidate: expect.candidate.as_deref(),
     }
 }
@@ -553,6 +567,17 @@ fn first_hold(got: &FieldFill) -> Option<String> {
     })
 }
 
+/// Every failed condition (`holds`) of the field's first candidate.
+fn first_holds(got: &FieldFill) -> Option<Vec<String>> {
+    got.candidates.first().map(|c| {
+        c.holds
+            .iter()
+            .filter_map(|h| serde_json::to_value(h).ok())
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect()
+    })
+}
+
 /// Unfilled fields carry no value; only `invalid` may keep the raw text, and
 /// then with its evidence.
 fn check_shape(at: &str, got: &FieldFill, problems: &mut Vec<String>) {
@@ -771,6 +796,16 @@ fn evaluation_set_has_no_unexpected_wrong_fills() {
                 problems.push(format!(
                     "{at}: first candidate hold {:?}, expected {hold:?}",
                     first_hold(got)
+                ));
+            }
+            if let Some(holds) = check.holds
+                && got.status != FillStatus::Filled
+                && first_holds(got).as_deref() != Some(holds)
+            {
+                all_pass = false;
+                problems.push(format!(
+                    "{at}: first candidate holds {:?}, expected {holds:?}",
+                    first_holds(got)
                 ));
             }
             let first = got.candidates.first().map(|c| c.raw.as_str());
