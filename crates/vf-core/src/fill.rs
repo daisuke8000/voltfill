@@ -20,7 +20,9 @@
 //!   ([`Binding::Delimiter`]): `label：value` in one fragment, or a `label：`
 //!   fragment followed by the value fragment to its right on the same line.
 //!   Right neighbours without a delimiter, values below labels, table and
-//!   list columns are [`Hold::GeometricOnly`].
+//!   list columns are [`Hold::GeometricOnly`]. A label and value separated
+//!   only by whitespace inside one fragment ([`Binding::Whitespace`],
+//!   `発行日 2026年11月8日`) is [`Hold::NoDelimiter`]; see below.
 //! - (c) One value: the value is a single line ([`Hold::MultiLine`]
 //!   otherwise; a multi-line value ends before a line that reads as one of
 //!   the form's labels), no plain fragment follows the value's fragment on
@@ -46,6 +48,20 @@
 //! and a lower-scoring candidate never fills the field. A candidate's
 //! `holds` list every failed condition, in the order above, and its `hold`
 //! is the first of them.
+//!
+//! Whitespace-only splits are the weakest hypothesis: layout makes them only
+//! where a fragment starts with text that equals one of the form's labels or
+//! hints exactly (condition a, honorific allowed), and the same text also
+//! starts sentences. The same test runs over the words of the value, so a
+//! value that holds another label or hint (`姓 山田 名 太郎` with `姓` and
+//! `名`, a header row `品名 数量 単価 金額`) is not offered; see
+//! [`layout::analyze_with_labels`] for the bounds. A field keeps such a
+//! candidate only when `no_delimiter`
+//! is its sole hold: one that also fails (c) or (d) is dropped, not listed,
+//! since model assistance chooses among listed candidates. They rank after
+//! every other candidate and never join their best group, so they never
+//! change the decision of a field that has another candidate; a field with
+//! only whitespace-only candidates is `ambiguous`.
 //!
 //! Work is bounded by [`FillLimits`]: layout hypotheses per document, work
 //! units over layout and matching (see [`DEFAULT_MAX_WORK`]), and an
@@ -247,6 +263,9 @@ pub enum Hold {
     /// The value is tied to its label by position only: a right neighbour
     /// without a delimiter, a value below the label, or a table or list row.
     GeometricOnly,
+    /// Label and value are separated only by whitespace inside one fragment
+    /// (`発行日 2026年11月8日`); the only hold such a candidate may carry.
+    NoDelimiter,
     /// The value spans more than one line.
     MultiLine,
     /// A plain fragment follows the value's fragment on its line, at any
@@ -362,7 +381,31 @@ pub fn fill_with_limits(
                 .collect(),
         });
     }
-    let layout = layout::analyze_within(fragments, limits.max_pairs, &mut budget)?;
+    // Whitespace-only splits start with a form label or hint, and their
+    // values hold none, compared exactly as `label_score` does (base or
+    // stem, then qualifiers).
+    let mut exact = BTreeSet::new();
+    for name in form
+        .fields
+        .iter()
+        .flat_map(|f| std::iter::once(&f.label).chain(&f.hints))
+    {
+        budget.spend_bytes(name)?;
+        let label = normalize_label(name);
+        if !label.base.is_empty() {
+            exact.insert((label.stem, label.qualifiers));
+        }
+    }
+    let mut is_label = |text: &str| {
+        let label = normalize_label(text);
+        !label.base.is_empty() && exact.contains(&(label.stem, label.qualifiers))
+    };
+    let layout = layout::analyze_with_labels(
+        fragments,
+        limits.max_pairs,
+        Some(&mut is_label),
+        &mut budget,
+    )?;
     let pairs = layout.pairs;
     budget.spend(fragments.len() as u64)?;
     let texts: HashMap<&str, &SourceFragment> =
@@ -578,6 +621,16 @@ impl Context<'_> {
             .filter_map(|(failed, hold)| failed.then_some(hold))
             .collect();
             let value = self.typed_value(index, field.field_type, cache, budget)?;
+            // A whitespace-only split is offered only when `no_delimiter`
+            // would be its sole hold (see the module documentation).
+            let holds = if pair.binding == Binding::Whitespace {
+                if !holds.is_empty() || field.field_type != FieldType::Text && value.is_none() {
+                    continue;
+                }
+                vec![Hold::NoDelimiter]
+            } else {
+                holds
+            };
             candidates.push(Candidate {
                 pair: index,
                 score: found.score,
@@ -714,15 +767,17 @@ impl Context<'_> {
         cache: &Cache,
         budget: &mut Budget,
     ) -> Result<FieldFill, FillError> {
-        // Stable: equal scores keep document order.
-        candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
+        // Whitespace-only splits rank after every other candidate and never
+        // join their best group. Stable: equal scores keep document order.
+        let spaced = |c: &Candidate| self.pairs[c.pair].binding == Binding::Whitespace;
+        candidates.sort_by(|a, b| spaced(a).cmp(&spaced(b)).then(b.score.total_cmp(&a.score)));
         candidates.dedup_by(|a, b| self.pairs[a.pair].value == self.pairs[b.pair].value);
         let Some(best) = candidates.first() else {
             return Ok(empty(FillStatus::NotFound));
         };
         let top: Vec<&Candidate> = candidates
             .iter()
-            .take_while(|c| (c.score - best.score).abs() < 1e-9)
+            .take_while(|c| spaced(c) == spaced(best) && (c.score - best.score).abs() < 1e-9)
             .collect();
         let raw = |c: &Candidate| {
             cache.slots[c.pair]
@@ -3717,5 +3772,290 @@ mod tests {
             parse_form(br#"{"fields":[{"id":"a","label":"x","extra":1}]}"#).unwrap_err(),
             FormError::Invalid
         );
+    }
+
+    #[test]
+    fn whitespace_splits_are_candidates_with_no_delimiter() {
+        let fragments = [
+            frag("a", "発行日 2026年11月8日", [60.0, 100.0, 160.0, 110.0]),
+            frag("b", "合計 ¥12,100", [60.0, 124.0, 120.0, 134.0]),
+            frag("c", "請求番号 INV-0012", [60.0, 148.0, 145.0, 158.0]),
+            frag("d", "ご住所 東京都架空区1-2-3", [60.0, 172.0, 180.0, 182.0]),
+        ];
+        let result = fill(
+            "doc",
+            &fragments,
+            &form(json!({"fields":[
+                {"id":"issued","label":"発行日","type":"date"},
+                {"id":"total","label":"合計","type":"amount"},
+                {"id":"no","label":"請求番号"},
+                {"id":"address","label":"住所"}
+            ]})),
+        );
+        // Before: not_found (no hypothesis without a delimiter). Now one
+        // candidate each, never committed offline.
+        for (id, label, raw, value) in [
+            (
+                "issued",
+                "発行日",
+                "2026年11月8日",
+                Some(json!("2026-11-08")),
+            ),
+            ("total", "合計", "¥12,100", Some(json!(12100))),
+            ("no", "請求番号", "INV-0012", None),
+            ("address", "ご住所", "東京都架空区1-2-3", None),
+        ] {
+            let field = &result.fields[id];
+            assert_eq!(field.status, FillStatus::Ambiguous, "{id}");
+            assert!(field.raw.is_none() && field.value.is_none(), "{id}");
+            let [candidate] = &field.candidates[..] else {
+                panic!("{id}: {:?}", field.candidates);
+            };
+            assert_eq!(candidate.hold, Some(Hold::NoDelimiter), "{id}");
+            assert_eq!(candidate.placement, Placement::Inline, "{id}");
+            assert_eq!(
+                (candidate.label.as_str(), candidate.raw.as_str()),
+                (label, raw)
+            );
+            assert_eq!(candidate.value, value, "{id}");
+            let [evidence] = &candidate.evidence[..] else {
+                panic!("{id}: one line");
+            };
+            let fragment = fragments
+                .iter()
+                .find(|f| f.id == evidence.fragment_id)
+                .unwrap();
+            assert_eq!(&fragment.raw_text[evidence.start..evidence.end], raw);
+            assert_eq!(evidence.end, fragment.raw_text.len(), "{id}");
+            assert_eq!(evidence.precision, Precision::Estimated, "{id}");
+        }
+    }
+
+    #[test]
+    fn other_candidates_outrank_whitespace_splits() {
+        let issued = form(json!({"fields":[{"id":"issued","label":"発行日","type":"date"}]}));
+        let run = |first: SourceFragment, second: Option<SourceFragment>| {
+            let mut fragments = vec![first];
+            fragments.extend(second);
+            fragments.push(frag(
+                "w",
+                "発行日 2026年12月1日",
+                [60.0, 148.0, 160.0, 158.0],
+            ));
+            fill("doc", &fragments, &issued).fields["issued"].clone()
+        };
+        // A delimiter value commits; the whitespace split adds no ambiguity.
+        let field = run(
+            frag("a", "発行日：2026年11月8日", [60.0, 100.0, 165.0, 110.0]),
+            None,
+        );
+        assert_eq!(field.status, FillStatus::Filled);
+        assert_eq!(field.value, Some(json!("2026-11-08")));
+        assert!(field.candidates.is_empty());
+        // Held candidates (a partial label, a position-only value) still
+        // decide the field, and whitespace splits trail them.
+        for (field, hold) in [
+            (
+                run(
+                    frag("a", "再発行日：2026年11月9日", [60.0, 100.0, 175.0, 110.0]),
+                    None,
+                ),
+                Hold::PartialLabel,
+            ),
+            (
+                run(
+                    frag("a", "発行日", [60.0, 100.0, 90.0, 110.0]),
+                    Some(frag("b", "2026/11/08", [200.0, 100.0, 250.0, 110.0])),
+                ),
+                Hold::GeometricOnly,
+            ),
+        ] {
+            assert_eq!(field.status, FillStatus::Ambiguous);
+            let holds: Vec<_> = field.candidates.iter().map(|c| c.hold).collect();
+            assert_eq!(holds, [Some(hold), Some(Hold::NoDelimiter)]);
+            assert_eq!(field.candidates[1].raw, "2026年12月1日");
+        }
+    }
+
+    #[test]
+    fn whitespace_splits_failing_another_condition_are_dropped() {
+        let fragments = [
+            frag(
+                "a",
+                "発行日 2026年11月8日以前の請求書は無効です",
+                [60.0, 100.0, 260.0, 110.0],
+            ),
+            frag("b", "合計 金額は別紙のとおり", [60.0, 124.0, 170.0, 134.0]),
+            frag(
+                "c",
+                "TEL 03-1234-5678 FAX 03-1234-5679",
+                [60.0, 148.0, 225.0, 158.0],
+            ),
+            frag(
+                "d",
+                "備考 午前中の配達を希望します。",
+                [60.0, 172.0, 225.0, 182.0],
+            ),
+            frag("e", "不在時は宅配ボックスへ。", [60.0, 186.0, 180.0, 196.0]),
+            frag("f", "品名 数量 単価 金額", [60.0, 220.0, 155.0, 230.0]),
+            frag("g", "氏名 は自署してください", [60.0, 244.0, 175.0, 254.0]),
+        ];
+        let result = fill(
+            "doc",
+            &fragments,
+            &form(json!({"fields":[
+                {"id":"issued","label":"発行日","type":"date"},
+                {"id":"reissued","label":"再発行日","type":"date"},
+                {"id":"total","label":"合計","type":"amount"},
+                {"id":"phone","label":"電話番号","hints":["TEL"]},
+                {"id":"fax","label":"FAX"},
+                {"id":"note","label":"備考"},
+                {"id":"item","label":"品名"},
+                {"id":"quantity","label":"数量","type":"number"},
+                {"id":"amount","label":"金額","type":"amount"},
+                {"id":"name","label":"氏名"}
+            ]})),
+        );
+        // Grammar (a date or amount followed by text), several values,
+        // two lines, a partial label and a header row: nothing is offered.
+        for id in [
+            "issued", "reissued", "total", "phone", "fax", "note", "item", "quantity", "amount",
+        ] {
+            let field = &result.fields[id];
+            assert_eq!(field.status, FillStatus::NotFound, "{id}: {field:?}");
+        }
+        // A sentence after a text label is offered, never committed.
+        let name = &result.fields["name"];
+        assert_eq!(name.status, FillStatus::Ambiguous);
+        assert_eq!(name.candidates[0].raw, "は自署してください");
+        assert_eq!(name.candidates[0].hold, Some(Hold::NoDelimiter));
+        // Without its continuation line the note is a one-line candidate.
+        let note = fill(
+            "doc",
+            &fragments[3..4],
+            &form(json!({"fields":[{"id":"note","label":"備考"}]})),
+        );
+        assert_eq!(
+            note.fields["note"].candidates[0].raw,
+            "午前中の配達を希望します。"
+        );
+    }
+
+    #[test]
+    fn whitespace_values_holding_another_form_label_are_dropped() {
+        let fragments = [
+            frag("a", "姓 山田 名 太郎", [60.0, 100.0, 150.0, 110.0]),
+            frag(
+                "b",
+                "氏名 山田太郎\u{3000}所属 経理部",
+                [60.0, 124.0, 200.0, 134.0],
+            ),
+            frag(
+                "c",
+                "会社名 株式会社サンプル 担当 山田",
+                [60.0, 148.0, 230.0, 158.0],
+            ),
+            frag(
+                "d",
+                "First Name John Last Name Smith",
+                [60.0, 172.0, 230.0, 182.0],
+            ),
+            frag("e", "品名 数量 単価 金額", [60.0, 196.0, 155.0, 206.0]),
+        ];
+        let people = form(json!({"fields":[
+            {"id":"family","label":"姓"},
+            {"id":"given","label":"名"},
+            {"id":"name","label":"氏名"},
+            {"id":"section","label":"所属"},
+            {"id":"company","label":"会社名"},
+            {"id":"person","label":"担当"},
+            {"id":"first","label":"First Name"},
+            {"id":"last","label":"Last Name"},
+            {"id":"item","label":"品名"},
+            {"id":"amount","label":"金額","type":"amount"}
+        ]}));
+        // Before: `山田 名 太郎` (姓), `山田太郎　所属 経理部` (氏名),
+        // `株式会社サンプル 担当 山田` (会社名), `John Last Name Smith`
+        // (First Name) and `数量 単価 金額` (品名) were `no_delimiter`
+        // candidates that model assistance could choose.
+        let result = fill("doc", &fragments, &people);
+        for (id, field) in &result.fields {
+            assert_eq!(field.status, FillStatus::NotFound, "{id}: {field:?}");
+        }
+        // Without the other label the value is offered.
+        let result = fill(
+            "doc",
+            &[frag("a", "姓 山田", [60.0, 100.0, 95.0, 110.0])],
+            &people,
+        );
+        assert_eq!(result.fields["family"].candidates[0].raw, "山田");
+        assert_eq!(result.fields["given"].status, FillStatus::NotFound);
+        // A label of several words matches as a whole.
+        let result = fill(
+            "doc",
+            &[frag("a", "合計 金額 ¥12,100", [60.0, 100.0, 140.0, 110.0])],
+            &form(json!({"fields":[{"id":"total","label":"合計金額","type":"amount"}]})),
+        );
+        let total = &result.fields["total"];
+        assert_eq!(total.candidates[0].raw, "¥12,100");
+        assert_eq!(total.candidates[0].hold, Some(Hold::NoDelimiter));
+    }
+
+    #[test]
+    fn whitespace_splits_stay_within_the_default_budget() {
+        // 1,000 `合計 1` on one line over five lines of `x`, 100,000 spaces
+        // and `y`. Before: BudgetExceeded under the default limits (5.0e8
+        // layout units).
+        let mut fragments: Vec<SourceFragment> = (0..1_000)
+            .map(|i| {
+                let left = 60.0 + 40.0 * f64::from(i);
+                frag(
+                    &format!("l{i}"),
+                    "合計 1",
+                    [left, 100.0, left + 25.0, 110.0],
+                )
+            })
+            .collect();
+        let long = format!("x{}y", " ".repeat(100_000));
+        for k in 0..5 {
+            let top = 114.0 + 14.0 * f64::from(k);
+            fragments.push(frag(
+                &format!("c{k}"),
+                &long,
+                [60.0, top, 600.0, top + 10.0],
+            ));
+        }
+        let total = form(json!({"fields":[{"id":"total","label":"合計","type":"amount"}]}));
+        let result = fill_with_limits("doc", &fragments, &total, &FillLimits::default()).unwrap();
+        assert_eq!(result.fields["total"].status, FillStatus::Ambiguous);
+    }
+
+    #[test]
+    fn a_wrapped_sentence_is_cut_before_a_label_line() {
+        // Known limit: a wrapped sentence whose next line starts with a form
+        // label and a space ends before that line. The cut note is still
+        // only a `no_delimiter` candidate, never committed offline.
+        let fragments = [
+            frag("a", "備考 お支払いは", [60.0, 100.0, 140.0, 110.0]),
+            frag(
+                "b",
+                "合計 金額の確定後にお願いします",
+                [60.0, 114.0, 220.0, 124.0],
+            ),
+        ];
+        let result = fill(
+            "doc",
+            &fragments,
+            &form(json!({"fields":[
+                {"id":"note","label":"備考"},
+                {"id":"total","label":"合計","type":"amount"}
+            ]})),
+        );
+        let note = &result.fields["note"];
+        assert_eq!(note.status, FillStatus::Ambiguous);
+        assert_eq!(note.candidates.len(), 1);
+        assert_eq!(note.candidates[0].raw, "お支払いは");
+        assert_eq!(note.candidates[0].hold, Some(Hold::NoDelimiter));
+        assert_eq!(result.fields["total"].status, FillStatus::NotFound);
     }
 }

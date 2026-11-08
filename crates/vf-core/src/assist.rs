@@ -6,7 +6,8 @@
 //! candidates plus `none`. A candidate is offered only when choosing it
 //! gives one value of the field's type: every failed condition in its
 //! `holds` (not only the first, `hold`) is [`Hold::PartialLabel`],
-//! [`Hold::OneSidedQualifier`] or [`Hold::GeometricOnly`], and for a date,
+//! [`Hold::OneSidedQualifier`], [`Hold::GeometricOnly`] or
+//! [`Hold::NoDelimiter`], and for a date,
 //! amount or number field it has a normalized `value`. Option keys
 //! keep the candidate's index in `candidates` (`c0`, `c1`, …), so a key
 //! stays auditable when an earlier candidate is not offered. A field without
@@ -426,7 +427,8 @@ pub fn assist<T: Transport, C: Clock>(
 /// Whether choosing `candidate` would give one value of the field's type:
 /// every failed condition (its `hold` and all of its `holds`) concerns only
 /// the label or how the value is tied to it ([`Hold::PartialLabel`],
-/// [`Hold::OneSidedQualifier`], [`Hold::GeometricOnly`]), and a date, amount
+/// [`Hold::OneSidedQualifier`], [`Hold::GeometricOnly`],
+/// [`Hold::NoDelimiter`]), and a date, amount
 /// or number candidate has a normalized value. A candidate whose value has
 /// several lines or values, or may be cut short ([`Hold::SplitValue`]),
 /// fails even when its first hold is a label or binding one.
@@ -434,7 +436,7 @@ fn offered(field: &FormField, candidate: &FillCandidate) -> bool {
     let choosable = |hold: &Hold| {
         matches!(
             hold,
-            Hold::PartialLabel | Hold::OneSidedQualifier | Hold::GeometricOnly
+            Hold::PartialLabel | Hold::OneSidedQualifier | Hold::GeometricOnly | Hold::NoDelimiter
         )
     };
     candidate.hold.iter().chain(&candidate.holds).all(choosable)
@@ -1625,11 +1627,12 @@ mod tests {
     fn only_candidates_that_give_one_typed_value_are_offered() {
         let text = &form(json!([{"id":"x","label":"x"}])).fields[0];
         let amount = &form(json!([{"id":"x","label":"x","type":"amount"}])).fields[0];
-        let choosable: [&[Hold]; 6] = [
+        let choosable: [&[Hold]; 7] = [
             &[],
             &[Hold::PartialLabel],
             &[Hold::OneSidedQualifier],
             &[Hold::GeometricOnly],
+            &[Hold::NoDelimiter],
             &[Hold::PartialLabel, Hold::OneSidedQualifier],
             &[Hold::OneSidedQualifier, Hold::GeometricOnly],
         ];
@@ -1643,7 +1646,8 @@ mod tests {
         }
         // Before: only the first hold was checked, so a several-values or
         // multi-line candidate behind a label or binding hold was offered.
-        let never: [&[Hold]; 8] = [
+        let never: [&[Hold]; 9] = [
+            &[Hold::NoDelimiter, Hold::SplitValue],
             &[Hold::SeveralValues],
             &[Hold::MultiLine],
             &[Hold::SplitValue],
@@ -1959,5 +1963,158 @@ mod tests {
         ] {
             assert!(!logs.contains(canary), "{canary}");
         }
+    }
+
+    #[test]
+    fn a_whitespace_only_candidate_can_be_chosen() {
+        let form = form(json!([{"id":"issued","label":"発行日","type":"date"}]));
+        let fragments = [frag(
+            "a",
+            "発行日 2026年11月8日",
+            [60.0, 100.0, 160.0, 110.0],
+        )];
+        let before = fill::fill("doc", &fragments, &form);
+        let candidate = &before.fields["issued"].candidates[0];
+        assert_eq!(before.fields["issued"].status, FillStatus::Ambiguous);
+        assert_eq!(candidate.hold, Some(fill::Hold::NoDelimiter));
+        let time = Time::default();
+        let reply = answer(key_with("2026年11月8日"), one_hot, json!({}));
+        let mut fake = Fake::new(vec![reply], &time);
+        let secret = Secret::try_new(SECRET.into()).expect("synthetic bearer is valid");
+        let out = assist(
+            before.clone(),
+            &form,
+            &options(ExecutionConfig::default()),
+            &secret,
+            &mut fake,
+            &mut time.clone(),
+        )
+        .expect("valid options never fail after validation");
+        let issued = &out.fill.fields["issued"];
+        assert_eq!(issued.status, FillStatus::Filled);
+        assert_eq!(issued.method, Some(METHOD));
+        assert_eq!(issued.raw.as_deref(), Some("2026年11月8日"));
+        assert_eq!(issued.value, Some(json!("2026-11-08")));
+        assert_eq!(issued.evidence, candidate.evidence);
+    }
+
+    #[test]
+    fn whitespace_splits_failing_another_condition_are_never_sent() {
+        // Several values, two lines and a date followed by text: offline fill
+        // drops these `no_delimiter` splits, so Jev is never offered them.
+        let form = form(json!([
+            {"id":"phone","label":"電話番号","hints":["TEL"]},
+            {"id":"note","label":"備考"},
+            {"id":"issued","label":"発行日","type":"date"},
+            {"id":"delivered","label":"納品日","type":"date"}
+        ]));
+        let fragments = [
+            frag(
+                "a",
+                "発行日 2026年11月8日以前の請求書は無効です",
+                [60.0, 100.0, 260.0, 110.0],
+            ),
+            frag(
+                "b",
+                "TEL 03-1234-5678 FAX 03-1234-5679",
+                [60.0, 148.0, 225.0, 158.0],
+            ),
+            frag(
+                "c",
+                "備考 午前中の配達を希望します。",
+                [60.0, 172.0, 225.0, 182.0],
+            ),
+            frag("d", "不在時は宅配ボックスへ。", [60.0, 186.0, 180.0, 196.0]),
+            frag("e", "納品日 2026年11月10日", [60.0, 220.0, 165.0, 230.0]),
+        ];
+        let before = fill::fill("doc", &fragments, &form);
+        for id in ["phone", "note", "issued"] {
+            let field = &before.fields[id];
+            assert_eq!(field.status, FillStatus::NotFound, "{id}: {field:?}");
+            assert!(field.candidates.is_empty(), "{id}");
+        }
+        // Every `no_delimiter` candidate is one line and, for a typed field,
+        // has a normalized value: its only hold is the missing delimiter.
+        for field in &form.fields {
+            for candidate in &before.fields[&field.id].candidates {
+                if candidate.hold == Some(fill::Hold::NoDelimiter) {
+                    assert_eq!(candidate.evidence.len(), 1, "{}", field.id);
+                    assert!(
+                        field.field_type == FieldType::Text || candidate.value.is_some(),
+                        "{}",
+                        field.id
+                    );
+                }
+            }
+        }
+        let delivered = &before.fields["delivered"];
+        assert_eq!(delivered.status, FillStatus::Ambiguous);
+        assert_eq!(delivered.candidates.len(), 1);
+        assert_eq!(delivered.candidates[0].hold, Some(fill::Hold::NoDelimiter));
+
+        let time = Time::default();
+        let reply = answer(key_with("2026年11月10日"), one_hot, json!({}));
+        let mut fake = Fake::new(vec![reply], &time);
+        let secret = Secret::try_new(SECRET.into()).expect("synthetic bearer is valid");
+        let out = assist(
+            before.clone(),
+            &form,
+            &options(ExecutionConfig::default()),
+            &secret,
+            &mut fake,
+            &mut time.clone(),
+        )
+        .expect("valid options never fail after validation");
+        let requests = fake.requests();
+        assert_eq!(requests.len(), 1);
+        let questions = requests[0]["questions"]
+            .as_object()
+            .expect("questions object");
+        assert_eq!(questions.keys().collect::<Vec<_>>(), ["q0"]);
+        let criteria = questions["q0"]["criteria"]
+            .as_object()
+            .expect("criteria object");
+        assert_eq!(criteria.keys().collect::<Vec<_>>(), ["c0", NONE]);
+        let raw = String::from_utf8(fake.bodies.borrow()[0].clone()).expect("UTF-8 request");
+        for unsent in ["03-1234-5678", "午前中", "不在時", "以前"] {
+            assert!(!raw.contains(unsent), "{unsent}");
+        }
+        assert_eq!(out.fill.fields["delivered"].status, FillStatus::Filled);
+        assert_eq!(
+            out.fill.fields["delivered"].value,
+            Some(json!("2026-11-10"))
+        );
+        assert_unsent_fields_unchanged(&out, &before);
+    }
+
+    #[test]
+    fn a_whitespace_value_holding_another_label_is_never_sent() {
+        // Before: 姓 had the `no_delimiter` candidate `山田 名 太郎`, and a
+        // Jev choosing it filled 姓 with both names.
+        let form = form(json!([
+            {"id":"family","label":"姓"},
+            {"id":"given","label":"名"}
+        ]));
+        let fragments = [frag("a", "姓 山田 名 太郎", [60.0, 100.0, 150.0, 110.0])];
+        let before = fill::fill("doc", &fragments, &form);
+        for id in ["family", "given"] {
+            let field = &before.fields[id];
+            assert_eq!(field.status, FillStatus::NotFound, "{id}: {field:?}");
+            assert!(field.candidates.is_empty(), "{id}");
+        }
+        let time = Time::default();
+        let mut fake = Fake::new(Vec::new(), &time);
+        let secret = Secret::try_new(SECRET.into()).expect("synthetic bearer is valid");
+        let out = assist(
+            before.clone(),
+            &form,
+            &options(ExecutionConfig::default()),
+            &secret,
+            &mut fake,
+            &mut time.clone(),
+        )
+        .expect("valid options never fail after validation");
+        assert!(fake.requests().is_empty());
+        assert_unsent_fields_unchanged(&out, &before);
     }
 }

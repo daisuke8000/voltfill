@@ -50,7 +50,7 @@ pub(super) fn analyze(
     fragments: &[SourceFragment],
     max_pairs: usize,
     budget: &mut Budget,
-    frame: impl Fn(&[SourceFragment], usize, &mut Budget) -> Result<Layout, LayoutError>,
+    mut frame: impl FnMut(&[SourceFragment], usize, &mut Budget) -> Result<Layout, LayoutError>,
 ) -> Result<Layout, LayoutError> {
     let mut layout = frame(fragments, max_pairs, budget)?;
     let mut turned_any = false;

@@ -1,0 +1,17 @@
+{
+  "description": "行間の詰まった「ラベル 値」の行。値の続きの行は、フォームのラベル（敬語の「お」を含む）と空白で始まる行の手前で終わる。フォームにないラベルの行（振込先）は前の値の続きと区別できないため、その値は2行とみなして候補にもしない（not_found）",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "発行日 2026年11月8日"},
+    {"x": 60, "y": 114, "text": "お支払期限 2026年12月31日"},
+    {"x": 60, "y": 128, "text": "振込先 サンプル銀行 本店"}
+  ],
+  "form": {"fields": [
+    {"id": "issued", "label": "発行日", "type": "date"},
+    {"id": "due", "label": "支払期限", "type": "date"}
+  ]},
+  "expect": {
+    "issued": {"abstain": "ambiguous", "hold": "no_delimiter", "candidate": "2026年11月8日"},
+    "due": {"abstain": "not_found"}
+  }
+}
