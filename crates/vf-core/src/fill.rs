@@ -1474,12 +1474,38 @@ fn states_scale(label: &Label) -> bool {
         .any(|(at, _)| label.base[..at].ends_with(NOTE_SCALES));
     in_base
         || unit_note(&label.base)
-        || label.qualifiers.iter().any(|q| {
-            let scale = q
-                .trim_start_matches("単位")
-                .trim_start_matches([':', '：', 'は']);
-            SCALE_WORDS.iter().any(|word| scale.starts_with(word)) || unit_note(q)
-        })
+        || label
+            .qualifiers
+            .iter()
+            .any(|q| qualifier_states_scale(q) || unit_note(q))
+}
+
+/// Whether one bracketed qualifier scales amounts: any of its parts
+/// (split at `・` `、` `,` `/` `:` and spaces; a comma between digits is
+/// kept) starts with a scale word after an optional `単位` and `は`
+/// (`（千円）`, `（税込・千円）`, `（金額：千円）`, `（円、千円）`), or is a
+/// number other than 1 followed by `円` (`（1,000円）`, `（1000円）`).
+fn qualifier_states_scale(qualifier: &str) -> bool {
+    let chars: Vec<char> = qualifier.nfkc().collect();
+    let mut joined = String::with_capacity(qualifier.len());
+    for (i, &c) in chars.iter().enumerate() {
+        let digit = |j: usize| chars.get(j).is_some_and(char::is_ascii_digit);
+        if c == ',' && i > 0 && digit(i - 1) && digit(i + 1) {
+            continue;
+        }
+        joined.push(c);
+    }
+    joined.split(['・', '、', ',', '/', ':', ' ']).any(|part| {
+        let part = part.trim_start_matches("単位").trim_start_matches('は');
+        if SCALE_WORDS.iter().any(|word| part.starts_with(word)) {
+            return true;
+        }
+        let digits = part
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(part.len());
+        let (number, rest) = part.split_at(digits);
+        !number.is_empty() && number.trim_start_matches('0') != "1" && rest.starts_with('円')
+    })
 }
 
 /// Deterministic whole-text normalization; `None` when the text is not
@@ -3317,6 +3343,15 @@ mod tests {
             "金額（十億円、税込）",
             "金額百円",
             "金額十円",
+            // Before: a scale after another word in the brackets, or a
+            // number of yen, was missed.
+            "売上高（税込・千円）",
+            "売上高（税抜、千円）",
+            "売上高（金額：千円）",
+            "売上高（円・千円）",
+            "売上高（1000円）",
+            "売上高（１，０００円）",
+            "売上高（1,000円）",
         ] {
             assert!(states_scale(&normalize_label(label)), "{label}");
         }
@@ -3325,6 +3360,8 @@ mod tests {
             "金額（税込）",
             "金額（税抜）",
             "消費税（10%）",
+            "金額（1円）",
+            "金額（税込・円）",
             "金額円",
             "円",
         ] {
