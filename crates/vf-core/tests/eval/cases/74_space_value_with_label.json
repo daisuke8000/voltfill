@@ -1,0 +1,35 @@
+{
+  "description": "空白だけで分けた値の中に、フォームの別のラベル（空白を含む First Name・Last Name も1つのラベルとして）がある。値の先頭の語でなくても、2つ目のラベルを含む値は候補にしない（not_found）。先頭の列名がフォームにない表の見出しも同じ",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "姓 山田 名 太郎"},
+    {"x": 60, "y": 124, "text": "氏名 山田太郎　所属 経理部"},
+    {"x": 60, "y": 148, "text": "会社名 株式会社サンプル 担当 山田"},
+    {"x": 60, "y": 172, "text": "First Name John Last Name Smith"},
+    {"x": 60, "y": 196, "text": "品名 数量 単価 金額"}
+  ],
+  "form": {"fields": [
+    {"id": "family_name", "label": "姓"},
+    {"id": "given_name", "label": "名"},
+    {"id": "name", "label": "氏名"},
+    {"id": "section", "label": "所属"},
+    {"id": "company", "label": "会社名"},
+    {"id": "person", "label": "担当"},
+    {"id": "first_name", "label": "First Name"},
+    {"id": "last_name", "label": "Last Name"},
+    {"id": "item", "label": "品名"},
+    {"id": "amount", "label": "金額", "type": "amount"}
+  ]},
+  "expect": {
+    "family_name": {"abstain": "not_found"},
+    "given_name": {"abstain": "not_found"},
+    "name": {"abstain": "not_found"},
+    "section": {"abstain": "not_found"},
+    "company": {"abstain": "not_found"},
+    "person": {"abstain": "not_found"},
+    "first_name": {"abstain": "not_found"},
+    "last_name": {"abstain": "not_found"},
+    "item": {"abstain": "not_found"},
+    "amount": {"abstain": "not_found"}
+  }
+}

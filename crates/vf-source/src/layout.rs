@@ -24,13 +24,18 @@
 //! - [`Binding::Geometric`]: position only — a right neighbour without a
 //!   delimiter or further than [`MAX_DELIMITER_GAP_EM`] em, a value directly
 //!   below the label, or a row of a column.
+//! - [`Binding::Whitespace`]: one fragment that starts with a label and
+//!   continues after spacing only (`発行日 2026年11月8日`). Layout cannot
+//!   tell a label from the first word of a sentence, so these are produced
+//!   only by [`analyze_with_labels`], whose caller decides which text is a
+//!   label.
 //!
 //! A value to the right (and an inline value) takes continuation lines in
 //! its column; a value with more than one line is still one pair, with one
 //! span per line. Not supported: values in multi-row tables and stacked
-//! lists (only flagged, see [`Placement::Column`]), AcroForm values,
+//! lists (only flagged, see [`Placement::Column`]), AcroForm values and
 //! true vertical writing (vertical writing mode fonts, glyphs stacked one
-//! per run), and splits without a delimiter (for example `発行日 2026年…`).
+//! per run).
 //!
 //! Hypotheses are conservative ("a wrong value is worse than an empty one"):
 //! - A fragment with more than one `label：` delimiter (for example
@@ -78,16 +83,20 @@
 //! hypotheses per document, each value holds at most [`MAX_VALUE_LINES`]
 //! spans and each label at most [`MAX_COLUMN_ROWS`] column rows, every
 //! search is limited to [`MAX_WINDOW`] fragments, and each usable fragment's
-//! text is read twice (classified and measured) however many pairs use it.
-//! The limits cover all orientations together: the pair cap counts every
-//! orientation's hypotheses, and turned copies, their analysis and the
-//! mapping back spend from the same budget. [`LayoutLimits::max_work`] and
+//! text is read twice (classified and measured) however many pairs use it;
+//! with labels, [`analyze_with_labels`] also reads a bounded prefix of each
+//! fragment without a delimiter and, when that prefix is a label, the rest
+//! of the fragment once more (see there for the units). The limits cover all
+//! orientations together: the pair cap counts every orientation's
+//! hypotheses, and turned copies, their analysis and the mapping back spend
+//! from the same budget. [`LayoutLimits::max_work`] and
 //! [`LayoutLimits::deadline`] stop the analysis with a typed error (see
 //! [`analyze_within`] for the units).
 use crate::budget::{Budget, BudgetError};
 use crate::geometry::Rect;
 use crate::source::{Orientation, Quality, SourceFragment};
 use serde::Serialize;
+use std::collections::VecDeque;
 use std::time::Instant;
 
 mod orient;
@@ -114,6 +123,14 @@ pub const DEFAULT_MAX_PAIRS: usize = 50_000;
 pub const MAX_DELIMITER_GAP_EM: f64 = 4.0;
 /// Default work units for [`analyze`] (see [`analyze_within`]).
 pub const DEFAULT_MAX_WORK: u64 = 200_000_000;
+/// Most spacing runs of one fragment tried as the end of a label, and most
+/// words of a value tried as one label ([`Binding::Whitespace`], see
+/// [`analyze_with_labels`]).
+pub const MAX_SPACED_SPLITS: usize = 4;
+/// Longest label, in bytes, tried before spacing in one fragment, and
+/// longest spacing run after it ([`Binding::Whitespace`]); also the longest
+/// run of words of a value tried as a label.
+pub const MAX_SPACED_LABEL_BYTES: usize = 96;
 
 /// Resource limits for [`analyze`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,7 +205,8 @@ pub struct Line {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Placement {
-    /// Label and value in one fragment, split at a delimiter.
+    /// Label and value in one fragment, split at a delimiter (or, with
+    /// [`Binding::Whitespace`], at whitespace).
     Inline,
     /// Value is the next fragment on the same line in reading order (to the
     /// right for upright text).
@@ -216,6 +234,10 @@ pub enum Binding {
     /// [`MAX_DELIMITER_GAP_EM`] em, a value below the label or a row of a
     /// column.
     Geometric,
+    /// Whitespace only, inside one fragment ([`Placement::Inline`]): a
+    /// fragment without a delimiter that starts with a caller-recognized
+    /// label (`発行日 2026年11月8日`). See [`analyze_with_labels`].
+    Whitespace,
 }
 
 /// A label/value hypothesis. `value` holds one span per line, in reading order.
@@ -280,8 +302,56 @@ pub fn analyze_within(
     max_pairs: usize,
     budget: &mut Budget,
 ) -> Result<Layout, LayoutError> {
+    analyze_with_labels(fragments, max_pairs, None, budget)
+}
+
+/// [`analyze_within`], plus [`Binding::Whitespace`] hypotheses when
+/// `is_label` is given: it receives candidate label text (a fragment's text
+/// up to a spacing run, or one to [`MAX_SPACED_SPLITS`] words of a value
+/// with the spacing between them) and answers whether that text is a label.
+///
+/// Spacing is ASCII space, tab and the ideographic space U+3000; other
+/// whitespace (no-break or em spaces) separates neither labels nor words. A
+/// fragment without a delimiter is split after a label at each of its first
+/// [`MAX_SPACED_SPLITS`] spacing runs that start within
+/// [`MAX_SPACED_LABEL_BYTES`] and are at most as long; a longer run ends the
+/// search. The rest of the fragment is the value, an exact byte range with
+/// an estimated box. A rest that holds another label is not a value: at each
+/// of its words, the runs of one to [`MAX_SPACED_SPLITS`] words within
+/// [`MAX_SPACED_LABEL_BYTES`] are tried, so `姓 山田 名 太郎` (labels `姓`,
+/// `名`), `First Name John Last Name Smith` (`Last Name`) and a header row
+/// `品名 数量 単価 金額` (`金額`) give no value. Only the fragment's own rest
+/// is checked, not its continuation lines. The value takes continuation
+/// lines as an inline value does, but ends before a line that itself starts
+/// with a label and spacing, so stacked `label value` lines stay separate.
+/// That rule also cuts a wrapped sentence before a line that starts with a
+/// label and spacing (`備考 お支払いは` / `合計 金額を…`).
+///
+/// Each `is_label` call costs one unit per byte passed, charged before the
+/// call. Searching a fragment for a label costs the bytes it may read (at
+/// most 196: a label and a spacing run of [`MAX_SPACED_LABEL_BYTES`] each
+/// and one character), charged before the search; each fragment is searched
+/// once. Checking a value for labels costs
+/// its rest's bytes, charged before the check, plus the tried runs: at most
+/// 11 units per byte of the rest.
+///
+/// # Errors
+/// As [`analyze_within`].
+pub fn analyze_with_labels(
+    fragments: &[SourceFragment],
+    max_pairs: usize,
+    mut is_label: Option<&mut dyn FnMut(&str) -> bool>,
+    budget: &mut Budget,
+) -> Result<Layout, LayoutError> {
     budget.check_deadline()?;
-    orient::analyze(fragments, max_pairs, budget, analyze_frame)
+    orient::analyze(fragments, max_pairs, budget, |frame, max, budget| {
+        // Reborrow for this orientation's frame only.
+        let is_label: Option<&mut dyn FnMut(&str) -> bool> = match is_label.as_mut() {
+            Some(f) => Some(&mut **f),
+            None => None,
+        };
+        analyze_frame(frame, max, is_label, budget)
+    })
 }
 
 /// [`analyze_within`] for upright fragments only: turned ones are skipped
@@ -289,6 +359,7 @@ pub fn analyze_within(
 fn analyze_frame(
     fragments: &[SourceFragment],
     max_pairs: usize,
+    is_label: Option<&mut dyn FnMut(&str) -> bool>,
     budget: &mut Budget,
 ) -> Result<Layout, LayoutError> {
     budget.check_deadline()?;
@@ -381,6 +452,27 @@ fn analyze_frame(
             for position in 0..line.fragments.len() {
                 if measures[line.fragments[position]].kind.can_label() {
                     page.below(i, position, &mut pairs, budget)?;
+                }
+            }
+        }
+    }
+    if let Some(is_label) = is_label {
+        // Each plain fragment is searched for label splits once; the values
+        // below only read the result.
+        let mut splits = vec![Vec::new(); fragments.len()];
+        for line in &lines {
+            budget.spend(1 + line.fragments.len() as u64)?;
+            for &f in &line.fragments {
+                if measures[f].kind == Kind::Plain {
+                    splits[f] = page.label_splits(f, is_label, budget)?;
+                }
+            }
+        }
+        for (i, line) in lines.iter().enumerate() {
+            budget.spend(1 + line.fragments.len() as u64)?;
+            for (position, &f) in line.fragments.iter().enumerate() {
+                if !splits[f].is_empty() {
+                    page.spaced(i, position, &splits, is_label, &mut pairs, budget)?;
                 }
             }
         }
@@ -588,10 +680,27 @@ impl Page<'_> {
         to: usize,
         budget: &mut Budget,
     ) -> Result<Span, BudgetError> {
+        let measure = &self.measures[f];
+        self.part(
+            f,
+            (measure.at[from], measure.em[from]),
+            (measure.at[to], measure.em[to]),
+            budget,
+        )
+    }
+
+    /// The span of fragment `f` between two byte offsets, each with the
+    /// estimated advance in em before it. Costs as [`Page::span`].
+    fn part(
+        &self,
+        f: usize,
+        (start, em_start): (usize, f64),
+        (end, em_end): (usize, f64),
+        budget: &mut Budget,
+    ) -> Result<Span, BudgetError> {
         let fragment = &self.fragments[f];
         budget.spend(1 + fragment.id.len() as u64)?;
         let measure = &self.measures[f];
-        let (start, end) = (measure.at[from], measure.at[to]);
         if start == 0 && end == fragment.raw_text.len() {
             return Ok(Span {
                 fragment_id: fragment.id.clone(),
@@ -604,8 +713,8 @@ impl Page<'_> {
         let (left, right) = if measure.total > 0.0 {
             let width = fragment.bbox.width();
             (
-                fragment.bbox.left + width * measure.em[from] / measure.total,
-                fragment.bbox.left + width * measure.em[to] / measure.total,
+                fragment.bbox.left + width * em_start / measure.total,
+                fragment.bbox.left + width * em_end / measure.total,
             )
         } else {
             (fragment.bbox.left, fragment.bbox.right)
@@ -1015,6 +1124,203 @@ fn char_em(c: char) -> f64 {
     if wide { 1.0 } else { 0.5 }
 }
 
+/// A whitespace split of a plain fragment: where the label ends and where
+/// the value starts (byte offsets), each with the estimated advance in em
+/// before it.
+type Split = [(usize, f64); 2];
+
+/// Spacing that may separate a label from its value, and the words of a
+/// value ([`Binding::Whitespace`]): ASCII space, tab and the ideographic
+/// space U+3000. Other whitespace (no-break or em spaces) does not separate.
+fn is_spacing(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\u{3000}')
+}
+
+/// Most bytes [`Page::label_splits`] reads from one fragment: a label of
+/// [`MAX_SPACED_LABEL_BYTES`], a spacing run of as many bytes and the first
+/// character of the value.
+const MAX_SPACED_SCAN_BYTES: usize = 2 * MAX_SPACED_LABEL_BYTES + 4;
+
+/// The words of `text` (maximal runs of non-spacing characters, see
+/// [`is_spacing`]) as byte ranges.
+fn words(text: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
+    let mut at = 0;
+    text.split_inclusive(is_spacing).filter_map(move |piece| {
+        let start = at;
+        at += piece.len();
+        // Only the last character of a piece can be spacing.
+        let word = piece.strip_suffix(is_spacing).unwrap_or(piece);
+        (!word.is_empty()).then_some((start, start + word.len()))
+    })
+}
+
+impl Page<'_> {
+    /// [`Binding::Whitespace`] hypotheses for the plain fragment `f` on line
+    /// `line` (see [`analyze_with_labels`]): one per split in `splits[f]`
+    /// whose value holds no label ([`Page::label_in_value`]), with the rest
+    /// of the fragment as the value. `splits` holds every fragment's
+    /// [`Page::label_splits`], computed once.
+    fn spaced(
+        &self,
+        line: usize,
+        position: usize,
+        splits: &[Vec<Split>],
+        is_label: &mut dyn FnMut(&str) -> bool,
+        pairs: &mut Pairs,
+        budget: &mut Budget,
+    ) -> Result<(), LayoutError> {
+        let f = self.lines[line].fragments[position];
+        let label_at = self.label_in_value(f, &splits[f], is_label, budget)?;
+        let kept = splits[f]
+            .iter()
+            .filter(|[_, value_start]| label_at.is_none_or(|at| at < value_start.0));
+        let mut kept = kept.peekable();
+        if kept.peek().is_none() {
+            return Ok(());
+        }
+        // The value ends before a line that is one plain fragment starting
+        // with a label and spacing.
+        let mut stop = (line + 1 + MAX_VALUE_LINES).min(self.lines.len());
+        for next in line + 1..stop {
+            budget.spend(1)?;
+            if let [g] = self.lines[next].fragments[..]
+                && !splits[g].is_empty()
+            {
+                stop = next;
+                break;
+            }
+        }
+        let page = Page {
+            fragments: self.fragments,
+            measures: self.measures,
+            lines: &self.lines[..stop],
+        };
+        let fragment = &self.fragments[f];
+        let measure = &self.measures[f];
+        let end = (measure.at[END], measure.em[END]);
+        for &[label_end, value_start] in kept {
+            let label = page.part(f, (measure.at[START], measure.em[START]), label_end, budget)?;
+            let first = page.part(f, value_start, end, budget)?;
+            let height = fragment.bbox.height();
+            let column = Column {
+                from: fragment.bbox.left - 0.5 * height,
+                to: first.bbox.left + 1.5 * height,
+                label: None,
+            };
+            if let Some((value, split)) = page.value(line, position, first, column, budget)? {
+                pairs.push(Pair {
+                    page: self.lines[line].page,
+                    label,
+                    value,
+                    placement: Placement::Inline,
+                    binding: Binding::Whitespace,
+                    split,
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Splits of the plain fragment `f` at one of its first
+    /// [`MAX_SPACED_SPLITS`] spacing runs ([`is_spacing`]) that start within
+    /// [`MAX_SPACED_LABEL_BYTES`] of its text and are at most as many bytes
+    /// long, where `is_label` accepts the text before the run. A longer run
+    /// ends the search. Reads at most [`MAX_SPACED_SCAN_BYTES`] of the text,
+    /// charged before the scan, and charges each `is_label` call its bytes
+    /// before the call.
+    fn label_splits(
+        &self,
+        f: usize,
+        is_label: &mut dyn FnMut(&str) -> bool,
+        budget: &mut Budget,
+    ) -> Result<Vec<Split>, BudgetError> {
+        let text = self.fragments[f].raw_text.as_str();
+        let measure = &self.measures[f];
+        let (start, end) = (measure.at[START], measure.at[END]);
+        budget.spend((end - start).min(MAX_SPACED_SCAN_BYTES) as u64)?;
+        let mut splits = Vec::new();
+        let mut em = measure.em[START];
+        let mut run: Option<(usize, f64)> = None;
+        let mut runs = 0;
+        // The text is trimmed, so every spacing run is followed by a value.
+        for (i, c) in text[start..end].char_indices() {
+            let at = start + i;
+            if is_spacing(c) {
+                match run {
+                    // The label would be too long.
+                    None if i > MAX_SPACED_LABEL_BYTES => break,
+                    None => run = Some((at, em)),
+                    // The run would be too long.
+                    Some((run_start, _))
+                        if at + c.len_utf8() - run_start > MAX_SPACED_LABEL_BYTES =>
+                    {
+                        break;
+                    }
+                    Some(_) => {}
+                }
+            } else if let Some(label_end) = run.take() {
+                budget.spend((label_end.0 - start) as u64)?;
+                if is_label(&text[start..label_end.0]) {
+                    splits.push([label_end, (at, em)]);
+                }
+                runs += 1;
+                if runs == MAX_SPACED_SPLITS {
+                    break;
+                }
+            } else if i >= MAX_SPACED_LABEL_BYTES {
+                break;
+            }
+            em += char_em(c);
+        }
+        Ok(splits)
+    }
+
+    /// The last word start in the values of `splits` (the rest of the plain
+    /// fragment `f` from its first split's value) at which a label starts:
+    /// one of the next [`MAX_SPACED_SPLITS`] runs of words from there, up to
+    /// [`MAX_SPACED_LABEL_BYTES`] long and passed with its spacing, that
+    /// `is_label` accepts (so `Last Name` is tried as a whole). A split whose
+    /// value starts at or before it holds a label. Stops at the first label in
+    /// every value. Charges the rest's bytes before the scan and each
+    /// `is_label` call its bytes before the call: at most about ten units per
+    /// byte of the rest.
+    fn label_in_value(
+        &self,
+        f: usize,
+        splits: &[Split],
+        is_label: &mut dyn FnMut(&str) -> bool,
+        budget: &mut Budget,
+    ) -> Result<Option<usize>, BudgetError> {
+        let (Some([_, (from, _)]), Some([_, (last, _)])) = (splits.first(), splits.last()) else {
+            return Ok(None);
+        };
+        let text = &self.fragments[f].raw_text[..self.measures[f].at[END]];
+        budget.spend((text.len() - from) as u64)?;
+        let mut found = None;
+        // Starts of the latest words whose run up to the current word may
+        // still be a label.
+        let mut starts: VecDeque<usize> = VecDeque::with_capacity(MAX_SPACED_SPLITS);
+        for (start, end) in words(&text[*from..]) {
+            let (start, end) = (from + start, from + end);
+            if starts.len() == MAX_SPACED_SPLITS {
+                starts.pop_front();
+            }
+            starts.push_back(start);
+            starts.retain(|&s| end - s <= MAX_SPACED_LABEL_BYTES);
+            for &s in &starts {
+                budget.spend((end - s) as u64)?;
+                if is_label(&text[s..end]) {
+                    if s >= *last {
+                        return Ok(Some(s));
+                    }
+                    found = found.max(Some(s));
+                }
+            }
+        }
+        Ok(found)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1046,6 +1352,27 @@ mod tests {
             .map(|s| {
                 let f = fragments.iter().find(|f| f.id == s.fragment_id).unwrap();
                 f.raw_text[s.start..s.end].to_owned()
+            })
+            .collect()
+    }
+
+    /// Layout with whitespace splits after any of `labels` (exact text).
+    fn spaced(fragments: &[SourceFragment], labels: &[&str]) -> Layout {
+        let mut is_label = |text: &str| labels.contains(&text);
+        let mut budget = Budget::new(u64::MAX, None);
+        analyze_with_labels(fragments, usize::MAX, Some(&mut is_label), &mut budget).unwrap()
+    }
+
+    fn values(fragments: &[SourceFragment], layout: &Layout) -> Vec<(String, Vec<String>)> {
+        layout
+            .pairs
+            .iter()
+            .filter(|p| p.binding == Binding::Whitespace)
+            .map(|p| {
+                (
+                    texts(fragments, std::slice::from_ref(&p.label)).remove(0),
+                    texts(fragments, &p.value),
+                )
             })
             .collect()
     }
@@ -1912,5 +2239,331 @@ mod tests {
             Err(LayoutError::DeadlineExceeded)
         );
         assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn whitespace_splits_follow_caller_labels_with_exact_ranges() {
+        // 10 em at 10 pt: `発行日` is 3 em, the space 0.5 em.
+        let fragments = vec![
+            frag("a", "発行日 2026年11月8日", [60.0, 100.0, 160.0, 110.0]),
+            frag("b", "合計\u{3000}¥12,100", [60.0, 124.0, 116.0, 134.0]),
+            // Two runs joined by the extractor with an inserted space.
+            frag("c", "請求番号 INV-0012", [60.0, 148.0, 129.0, 158.0]),
+        ];
+        // Without labels there is no whitespace hypothesis at all.
+        assert!(analyze(&fragments).pairs.is_empty());
+        let layout = spaced(&fragments, &["発行日", "合計", "請求番号"]);
+        assert_eq!(
+            values(&fragments, &layout),
+            [
+                ("発行日".to_owned(), vec!["2026年11月8日".to_owned()]),
+                ("合計".to_owned(), vec!["¥12,100".to_owned()]),
+                ("請求番号".to_owned(), vec!["INV-0012".to_owned()]),
+            ]
+        );
+        let pair = &layout.pairs[0];
+        assert_eq!(pair.placement, Placement::Inline);
+        assert_eq!((pair.label.start, pair.label.end), (0, "発行日".len()));
+        let value = &pair.value[0];
+        assert_eq!(
+            (value.start, value.end),
+            ("発行日 ".len(), fragments[0].raw_text.len())
+        );
+        assert_eq!(
+            (pair.label.precision, value.precision),
+            (Precision::Estimated, Precision::Estimated)
+        );
+        assert!((pair.label.bbox.right - 90.0).abs() < 1e-9);
+        assert!((value.bbox.left - 95.0).abs() < 1e-9);
+        assert!((value.bbox.right - 160.0).abs() < 1e-9);
+        // Only an exact label is split: no other text, and never a fragment
+        // with a delimiter (inline, `label：` or opaque).
+        let fragments = vec![
+            frag("a", "発行日：2026年11月8日", [60.0, 100.0, 165.0, 110.0]),
+            frag(
+                "b",
+                "TEL：03-1234-5678 FAX：03-1234-5679",
+                [60.0, 124.0, 230.0, 134.0],
+            ),
+            frag("c", "再発行日 2026年11月9日", [60.0, 148.0, 170.0, 158.0]),
+        ];
+        let layout = spaced(&fragments, &["発行日", "TEL", "FAX"]);
+        assert!(values(&fragments, &layout).is_empty());
+        assert_eq!(layout.pairs.len(), 1);
+        assert_eq!(layout.pairs[0].binding, Binding::Delimiter);
+    }
+
+    #[test]
+    fn whitespace_values_end_before_the_next_label_row() {
+        let fragments = vec![
+            frag("a", "発行日 2026年11月8日", [60.0, 100.0, 160.0, 110.0]),
+            frag("b", "支払期限 2026年12月31日", [60.0, 114.0, 175.0, 124.0]),
+            frag("c", "備考 午前中に配達", [60.0, 128.0, 145.0, 138.0]),
+        ];
+        let lines = |labels: &[&str]| values(&fragments, &spaced(&fragments, labels));
+        assert_eq!(
+            lines(&["発行日", "支払期限", "備考"]),
+            [
+                ("発行日".to_owned(), vec!["2026年11月8日".to_owned()]),
+                ("支払期限".to_owned(), vec!["2026年12月31日".to_owned()]),
+                ("備考".to_owned(), vec!["午前中に配達".to_owned()]),
+            ]
+        );
+        // A row whose label is unknown reads as a continuation line: the
+        // value spans two lines (fill holds or drops it, never cuts it).
+        assert_eq!(
+            lines(&["発行日", "備考"]),
+            [
+                (
+                    "発行日".to_owned(),
+                    vec![
+                        "2026年11月8日".to_owned(),
+                        "支払期限 2026年12月31日".to_owned()
+                    ]
+                ),
+                ("備考".to_owned(), vec!["午前中に配達".to_owned()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn whitespace_rests_starting_with_a_label_are_header_rows() {
+        let fragments = vec![frag(
+            "a",
+            "品名 数量 単価 金額",
+            [60.0, 100.0, 155.0, 110.0],
+        )];
+        assert!(values(&fragments, &spaced(&fragments, &["品名", "数量", "金額"])).is_empty());
+        // Unknown column titles are a plain value; fill treats it as text.
+        assert_eq!(
+            values(&fragments, &spaced(&fragments, &["品名"])),
+            [("品名".to_owned(), vec!["数量 単価 金額".to_owned()])]
+        );
+        // Every accepted prefix is a hypothesis of its own.
+        let fragments = vec![frag("a", "合計 金額 ¥12,100", [60.0, 100.0, 140.0, 110.0])];
+        assert_eq!(
+            values(&fragments, &spaced(&fragments, &["合計", "合計 金額"])),
+            [
+                ("合計".to_owned(), vec!["金額 ¥12,100".to_owned()]),
+                ("合計 金額".to_owned(), vec!["¥12,100".to_owned()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn whitespace_splits_are_bounded() {
+        let fragments = vec![frag("a", "a b c d e f g", [60.0, 100.0, 125.0, 110.0])];
+        let ask = |accept: &str| {
+            let mut asked = Vec::new();
+            let mut is_label = |text: &str| {
+                asked.push(text.to_owned());
+                text == accept
+            };
+            let mut budget = Budget::new(u64::MAX, None);
+            analyze_with_labels(&fragments, usize::MAX, Some(&mut is_label), &mut budget).unwrap();
+            asked
+        };
+        // Labels end at the first MAX_SPACED_SPLITS runs.
+        assert_eq!(ask(""), ["a", "a b", "a b c", "a b c d"]);
+        // Each word of the value starts at most MAX_SPACED_SPLITS tries, of
+        // one to MAX_SPACED_SPLITS words.
+        let value: Vec<&str> = vec![
+            "b", "b c", "c", "b c d", "c d", "d", "b c d e", "c d e", "d e", "e", "c d e f",
+            "d e f", "e f", "f", "d e f g", "e f g", "f g", "g",
+        ];
+        assert_eq!(ask("a")[MAX_SPACED_SPLITS..], value);
+        // A spacing run longer than MAX_SPACED_LABEL_BYTES ends the search.
+        let gap = |n: usize| format!("合計{}1", " ".repeat(n));
+        let fragments = vec![
+            frag(
+                "a",
+                &gap(MAX_SPACED_LABEL_BYTES),
+                [60.0, 100.0, 600.0, 110.0],
+            ),
+            frag(
+                "b",
+                &gap(MAX_SPACED_LABEL_BYTES + 1),
+                [60.0, 124.0, 600.0, 134.0],
+            ),
+        ];
+        let layout = spaced(&fragments, &["合計"]);
+        assert_eq!(
+            values(&fragments, &layout),
+            [("合計".to_owned(), vec!["1".to_owned()])]
+        );
+        assert_eq!(layout.pairs[0].label.fragment_id, "a");
+        // A label longer than MAX_SPACED_LABEL_BYTES is not tried, and a long
+        // fragment without spacing is read only up to MAX_SPACED_SCAN_BYTES
+        // (196, as documented in analyze_with_labels and the README).
+        assert_eq!(MAX_SPACED_SCAN_BYTES, 196);
+        let long = format!("{} 値", "x".repeat(MAX_SPACED_LABEL_BYTES + 1));
+        let text = "あ".repeat(1_000_000);
+        let fragments = vec![
+            frag("a", &long, [60.0, 100.0, 600.0, 110.0]),
+            frag("b", &text, [60.0, 124.0, 600.0, 134.0]),
+        ];
+        let used = |labels: bool| {
+            let mut asked = 0;
+            let mut is_label = |_: &str| {
+                asked += 1;
+                true
+            };
+            let mut budget = Budget::new(u64::MAX, None);
+            let layout = analyze_with_labels(
+                &fragments,
+                usize::MAX,
+                labels.then_some(&mut is_label as &mut dyn FnMut(&str) -> bool),
+                &mut budget,
+            )
+            .unwrap();
+            assert!(layout.pairs.is_empty());
+            (u64::MAX - budget.remaining(), asked)
+        };
+        let (without, _) = used(false);
+        let (with, asked) = used(true);
+        assert_eq!(asked, 0);
+        // Charged before reading: all of `a` (shorter than the bound), the
+        // bound of `b`, and one unit plus one per fragment for each of the
+        // two lines in each of the two passes.
+        assert!(long.len() < MAX_SPACED_SCAN_BYTES);
+        assert_eq!(
+            with - without,
+            (long.len() + MAX_SPACED_SCAN_BYTES + 2 * 2 * 2) as u64
+        );
+    }
+
+    #[test]
+    fn whitespace_values_holding_another_label_are_not_values() {
+        // Before: each of these offered the rest of the fragment, another
+        // label included, as one value (`姓` → `山田 名 太郎`).
+        for (text, labels) in [
+            ("姓 山田 名 太郎", &["姓", "名"][..]),
+            ("姓 山田 名", &["姓", "名"]),
+            ("氏名 山田太郎\u{3000}所属 経理部", &["氏名", "所属"]),
+            ("会社名 株式会社サンプル 担当 山田", &["会社名", "担当"]),
+            // A label of several words is tried as a whole (`Last Name`).
+            (
+                "First Name John Last Name Smith",
+                &["First Name", "Last Name"],
+            ),
+            // A header row whose first column title is unknown.
+            ("品名 数量 単価 金額", &["品名", "金額"]),
+        ] {
+            let fragments = vec![frag("a", text, [60.0, 100.0, 200.0, 110.0])];
+            assert!(
+                values(&fragments, &spaced(&fragments, labels)).is_empty(),
+                "{text}"
+            );
+        }
+        // A value without another label is kept.
+        let fragments = vec![frag("a", "姓 山田", [60.0, 100.0, 95.0, 110.0])];
+        assert_eq!(
+            values(&fragments, &spaced(&fragments, &["姓", "名"])),
+            [("姓".to_owned(), vec!["山田".to_owned()])]
+        );
+        // Only the splits whose value holds the label are dropped: `金額`
+        // starts the value of `合計`, not that of `合計 金額`.
+        let fragments = vec![frag("a", "合計 金額 ¥12,100", [60.0, 100.0, 140.0, 110.0])];
+        assert_eq!(
+            values(
+                &fragments,
+                &spaced(&fragments, &["合計", "合計 金額", "金額"])
+            ),
+            [("合計 金額".to_owned(), vec!["¥12,100".to_owned()])]
+        );
+    }
+
+    #[test]
+    fn only_ascii_space_tab_and_ideographic_space_split() {
+        let fragments = vec![
+            frag("a", "合計 ¥1", [60.0, 100.0, 100.0, 110.0]),
+            frag("b", "合計\t¥2", [60.0, 124.0, 100.0, 134.0]),
+            frag("c", "合計\u{3000}¥3", [60.0, 148.0, 100.0, 158.0]),
+            frag("d", "合計\u{a0}¥4", [60.0, 172.0, 100.0, 182.0]),
+            frag("e", "合計\u{2003}¥5", [60.0, 196.0, 100.0, 206.0]),
+        ];
+        let split: Vec<_> = values(&fragments, &spaced(&fragments, &["合計"]))
+            .into_iter()
+            .map(|(_, value)| value.concat())
+            .collect();
+        assert_eq!(split, ["¥1", "¥2", "¥3"]);
+        // Inside a value, other spaces do not separate words either.
+        let fragments = vec![frag("a", "姓 山田\u{a0}名", [60.0, 100.0, 120.0, 110.0])];
+        assert_eq!(
+            values(&fragments, &spaced(&fragments, &["姓", "名"])),
+            [("姓".to_owned(), vec!["山田\u{a0}名".to_owned()])]
+        );
+    }
+
+    /// `n` fragments `合計 1` on one line, then five lines of `x`, `spaces`
+    /// spaces and `y`.
+    fn label_row_over_long_runs(n: usize, spaces: usize) -> Vec<SourceFragment> {
+        let mut fragments: Vec<SourceFragment> = (0..n)
+            .map(|i| {
+                let left = 60.0 + 40.0 * i as f64;
+                frag(
+                    &format!("l{i}"),
+                    "合計 1",
+                    [left, 100.0, left + 25.0, 110.0],
+                )
+            })
+            .collect();
+        let long = format!("x{}y", " ".repeat(spaces));
+        for k in 0..5 {
+            let top = 114.0 + 14.0 * f64::from(k);
+            fragments.push(frag(
+                &format!("c{k}"),
+                &long,
+                [60.0, top, 600.0, top + 10.0],
+            ));
+        }
+        fragments
+    }
+
+    /// Work units of [`analyze_with_labels`] without and with `labels`.
+    fn spaced_work(fragments: &[SourceFragment], labels: &[&str]) -> (u64, u64) {
+        let used = |with: bool| {
+            let mut is_label = |text: &str| labels.contains(&text);
+            let mut budget = Budget::new(u64::MAX, None);
+            analyze_with_labels(
+                fragments,
+                usize::MAX,
+                with.then_some(&mut is_label as &mut dyn FnMut(&str) -> bool),
+                &mut budget,
+            )
+            .unwrap();
+            u64::MAX - budget.remaining()
+        };
+        (used(false), used(true))
+    }
+
+    #[test]
+    fn whitespace_work_is_linear_in_the_input() {
+        let fragments = label_row_over_long_runs(1_000, 100_000);
+        let input: u64 = fragments.iter().map(|f| f.raw_text.len() as u64).sum();
+        let (without, with) = spaced_work(&fragments, &["合計"]);
+        eprintln!(
+            "label row: input {input} bytes, without {without}, with {with} ({:.2}x input)",
+            with as f64 / input as f64
+        );
+        // Before: 5.0e8 units (987x the input): each `合計 1` re-scanned the
+        // five long runs below it to their ends.
+        assert!(with - without <= input, "{without} -> {with}");
+        // The words of a value: the scan reads each byte once, and a byte is
+        // in at most 1 + 2 + 3 + 4 tried runs of words (MAX_SPACED_SPLITS),
+        // so at most 11 units per byte. Short words (`x x x …`) and words
+        // that fill MAX_SPACED_LABEL_BYTES in four (`xxx… xxx…`) come close.
+        for word in [1, 23] {
+            let text = format!("合計 {}", vec!["x".repeat(word); 25_000].join(" "));
+            let fragments = vec![frag("a", &text, [60.0, 100.0, 600.0, 110.0])];
+            let input = text.len() as u64;
+            let (without, with) = spaced_work(&fragments, &["合計"]);
+            eprintln!(
+                "value words of {word} bytes: input {input} bytes, without {without}, with {with} \
+                 ({:.2} units per byte)",
+                (with - without) as f64 / input as f64
+            );
+            assert!(with - without <= 11 * input, "{without} -> {with}");
+        }
     }
 }

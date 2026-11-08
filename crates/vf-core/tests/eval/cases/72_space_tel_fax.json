@@ -1,0 +1,15 @@
+{
+  "description": "区切り記号のない「TEL 番号 FAX 番号」の1つのラン。TELの後ろには電話番号が2つある（several_values）ため、空白で分けた候補にもしない。FAXは片の先頭にないため分けない",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "TEL 03-1234-5678 FAX 03-1234-5679"}
+  ],
+  "form": {"fields": [
+    {"id": "phone", "label": "電話番号", "hints": ["TEL"]},
+    {"id": "fax", "label": "FAX番号", "hints": ["FAX"]}
+  ]},
+  "expect": {
+    "phone": {"abstain": "not_found"},
+    "fax": {"abstain": "not_found"}
+  }
+}
