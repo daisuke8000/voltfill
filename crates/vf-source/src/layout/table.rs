@@ -33,6 +33,13 @@
 //!   outside every column sits beside aligned cells, only one column has a
 //!   cell (a wrapped cell cannot be told from a one-cell row), or the line
 //!   has more than [`MAX_TABLE_COLUMNS`] fragments.
+//! - Turned text: a line with a turned fragment beside upright ones is
+//!   irregular. A line whose fragments are all turned (a margin stamp; such
+//!   lines follow the page's upright lines) is skipped unless its box meets
+//!   the table's region: from the header's left to its right (the columns)
+//!   and from the header's top to the page bottom while rows are read, or to
+//!   the bottom of the last row (the header's, without rows) below a stop.
+//!   A turned line meeting the region is irregular (it may be in the rows).
 //! - Row pitch: the distance between the baselines of the header and the
 //!   first row and of consecutive rows. A row closer to the line above than
 //!   3/4 of the table's pitch (the upper median of those distances)
@@ -63,7 +70,8 @@
 //! [`TableEnd::Subtotal`] when all are subtotals, and without totals lines
 //! the stop's own end ([`TableEnd::Unaligned`] or [`TableEnd::Gap`]).
 //!
-//! Work: one unit per line read and per fragment of a line, two per byte
+//! Work: one unit per line read and two per fragment of a line (the turned
+//! check and reading), two per byte
 //! of a line fragment's text (the caller's totals check and the delimiter
 //! check) and one per byte of a header fragment's, one per column compared
 //! with a fragment, one per row for the pitch, and the cost of
@@ -182,6 +190,16 @@ pub fn read_table(
         fragments,
         columns: &columns,
         page: head.page,
+        // Rows are open: the region reaches the page bottom.
+        region: Rect {
+            left: columns.iter().map(|c| c.left).fold(f64::INFINITY, f64::min),
+            top: head.bbox.top,
+            right: columns
+                .iter()
+                .map(|c| c.right)
+                .fold(f64::NEG_INFINITY, f64::max),
+            bottom: f64::INFINITY,
+        },
     };
     let body = &lines[header + 1..];
     let mut previous = head.bbox;
@@ -193,6 +211,9 @@ pub fn read_table(
         budget.spend(1)?;
         if line.page != head.page {
             break;
+        }
+        if reader.outside(line, budget)? {
+            continue;
         }
         let gap = line.bbox.top - previous.bottom;
         let height = head.bbox.height().max(line.bbox.height());
@@ -218,7 +239,7 @@ pub fn read_table(
                 continue;
             }
             Read::Row(_) | Read::Irregular { .. } => TableEnd::Irregular,
-            Read::Totals(kind) => reader.below(
+            Read::Totals(kind) => reader.stopped(previous).below(
                 &body[i..],
                 limit,
                 Some(kind),
@@ -232,7 +253,9 @@ pub fn read_table(
                 } else {
                     TableEnd::Unaligned
                 };
-                reader.below(&body[i..], limit, None, end, budget, &mut totals)?
+                reader
+                    .stopped(previous)
+                    .below(&body[i..], limit, None, end, budget, &mut totals)?
             }
         };
         break;
@@ -256,14 +279,47 @@ fn wrapped_row(baselines: &[f64]) -> Option<usize> {
     pitches.iter().position(|&p| p < 0.75 * pitch)
 }
 
+#[derive(Clone, Copy)]
 struct Reader<'a> {
     fragments: &'a [SourceFragment],
     /// Header fragment boxes, left to right.
     columns: &'a [Rect],
     page: u32,
+    /// The table's region for turned lines: the columns' left to right, the
+    /// header's top to the page bottom (rows open) or to the last row's
+    /// bottom (rows stopped).
+    region: Rect,
 }
 
 impl Reader<'_> {
+    /// The reader below rows that stopped after `last` (the last row, or the
+    /// header without rows).
+    fn stopped(self, last: Rect) -> Self {
+        Reader {
+            region: Rect {
+                bottom: last.bottom,
+                ..self.region
+            },
+            ..self
+        }
+    }
+
+    /// Whether every fragment of `line` is turned and its box misses the
+    /// table's region (touching edges meet it): such a line is skipped.
+    fn outside(&self, line: &Line, budget: &mut Budget) -> Result<bool, BudgetError> {
+        budget.spend(line.fragments.len() as u64)?;
+        let turned = line
+            .fragments
+            .iter()
+            .all(|&f| self.fragments[f].orientation != Orientation::Deg0);
+        let r = self.region;
+        let meets = line.bbox.left <= r.right
+            && r.left <= line.bbox.right
+            && line.bbox.top <= r.bottom
+            && r.top <= line.bbox.bottom;
+        Ok(turned && !meets)
+    }
+
     fn read(
         &self,
         line: &Line,
@@ -375,6 +431,9 @@ impl Reader<'_> {
             budget.spend(1)?;
             if line.page != self.page {
                 break;
+            }
+            if self.outside(line, budget)? {
+                continue;
             }
             let gap = line.bbox.top - previous.bottom;
             let read = self.read(line, budget, totals)?;
@@ -955,6 +1014,84 @@ mod tests {
         let last = turned.len() - 1;
         turned[last].orientation = Orientation::Deg270;
         assert_eq!(read_with(&turned).end, TableEnd::Irregular);
+    }
+
+    /// `text` turned a quarter turn on page 1, 10 pt wide, from `top` down.
+    fn turned_at(id: &str, text: &str, left: f64, top: f64) -> SourceFragment {
+        let height = 10.0 * text.chars().count() as f64;
+        SourceFragment {
+            orientation: Orientation::Deg90,
+            ..frag(id, 1, text, [left, top, left + 10.0, top + height])
+        }
+    }
+
+    /// `read`, after checking that `fragments` make `lines` lines.
+    fn read_lines(fragments: &[SourceFragment], lines: usize) -> (Vec<Vec<String>>, TableEnd) {
+        let layout = analyze(fragments, &LayoutLimits::default()).unwrap();
+        assert_eq!(layout.lines.len(), lines, "{:?}", layout.lines);
+        read(fragments)
+    }
+
+    #[test]
+    fn turned_text_away_from_the_table_is_skipped() {
+        let rows = [["りんご", "3", "¥300"], ["みかん", "2", "¥500"]];
+        // A margin stamp right of the columns (which end at 460), beside the
+        // header and the rows.
+        let stamp = turned_at("s", "CONFIDENTIAL", 560.0, 100.0);
+        let mut fragments = table(&rows);
+        fragments.push(stamp.clone());
+        assert_eq!(read_lines(&fragments, 4), (texts(&rows), TableEnd::PageEnd));
+        // The same below a closing total.
+        fragments.extend([
+            at("g", "合計", 300.0, 154.0),
+            at("gv", "¥800", 440.0, 154.0),
+        ]);
+        assert_eq!(read_lines(&fragments, 5), (texts(&rows), TableEnd::Total));
+        // A stamp above the header in the columns' span.
+        let mut fragments = table(&rows);
+        fragments.push(turned_at("s", "DRAFT", 200.0, 20.0));
+        assert_eq!(read_lines(&fragments, 4), (texts(&rows), TableEnd::PageEnd));
+        // Below a stop, turned text under the last row (beside the totals)
+        // is not in the rows.
+        let mut fragments = table(&rows);
+        fragments.extend([
+            at("g", "合計", 300.0, 154.0),
+            at("gv", "¥800", 440.0, 154.0),
+            turned_at("s", "CONFIDENTIAL", 200.0, 150.0),
+        ]);
+        assert_eq!(read_lines(&fragments, 5), (texts(&rows), TableEnd::Total));
+    }
+
+    #[test]
+    fn turned_text_in_the_table_region_holds_the_table() {
+        let rows = [["りんご", "3", "¥300"], ["みかん", "2", "¥500"]];
+        // Across the rows between two columns, or touching the header.
+        for stamp in [
+            turned_at("s", "CONFIDENTIAL", 200.0, 110.0),
+            turned_at("s", "DRAFT", 200.0, 50.0),
+        ] {
+            let mut fragments = table(&rows);
+            fragments.push(stamp);
+            assert_eq!(read_lines(&fragments, 4).1, TableEnd::Irregular);
+        }
+        // While rows are read, the region reaches the page bottom.
+        let mut fragments = table(&rows);
+        fragments.push(turned_at("s", "CONFIDENTIAL", 200.0, 400.0));
+        assert_eq!(
+            read_lines(&fragments, 4),
+            (texts(&rows), TableEnd::Irregular)
+        );
+        // Below a stop, turned text reaching into the rows.
+        let mut fragments = table(&rows);
+        fragments.extend([
+            at("g", "合計", 300.0, 154.0),
+            at("gv", "¥800", 440.0, 154.0),
+            turned_at("s", "CONFIDENTIAL", 200.0, 130.0),
+        ]);
+        assert_eq!(
+            read_lines(&fragments, 5),
+            (texts(&rows), TableEnd::Irregular)
+        );
     }
 
     #[test]
