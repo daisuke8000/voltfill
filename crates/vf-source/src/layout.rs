@@ -6,12 +6,19 @@
 //! character classes (full width = 1 em, otherwise 0.5 em) and marked
 //! [`Precision::Estimated`]; they are never reported as measured.
 //!
-//! Supported: horizontal text, inline `label：value` / `label: value` in one
-//! fragment, a value to the right on the same line (with continuation lines
-//! in the value's column), and a single value directly below the label.
-//! Not supported yet: values in multi-row tables and stacked lists (only
-//! flagged, see [`Placement::Column`]), AcroForm values, vertical text, and
-//! splits without a delimiter (for example `発行日 2026年…`).
+//! Each pair records how its value is tied to its label ([`Binding`]):
+//! - [`Binding::Delimiter`]: an inline `label：value` / `label: value` in one
+//!   fragment, or a fragment ending with its only delimiter (`label：`)
+//!   followed by the next fragment to its right on the same line.
+//! - [`Binding::Geometric`]: position only — a right neighbour without a
+//!   delimiter, a value directly below the label, or a row of a column.
+//!
+//! A value to the right (and an inline value) takes continuation lines in
+//! its column; a value with more than one line is still one pair, with one
+//! span per line. Not supported: values in multi-row tables and stacked
+//! lists (only flagged, see [`Placement::Column`]), AcroForm values,
+//! vertical text, and splits without a delimiter (for example
+//! `発行日 2026年…`).
 //!
 //! Hypotheses are conservative ("a wrong value is worse than an empty one"):
 //! - A fragment with more than one `label：` delimiter (for example
@@ -19,9 +26,13 @@
 //!   each value cannot be told apart from the start of the next label. Such a
 //!   fragment, a `label：value` fragment and a bare `label：` fragment are
 //!   never read as the value of another label.
-//! - A value to the right runs over at most [`MAX_VALUE_LINES`] lines; a
-//!   longer run is dropped rather than cut off. Continuation stops at a line
-//!   that is itself a `label：value` pair or ends with a delimiter.
+//! - A value runs over at most [`MAX_VALUE_LINES`] lines; a longer run is
+//!   dropped rather than cut off. Continuation stops at a line that is itself
+//!   a `label：value` pair or ends with a delimiter. Continuation lines of a
+//!   value to the right start within half a line height of the value's left
+//!   edge. Continuation lines of an inline value start anywhere from the
+//!   fragment's left edge (a value wrapped back under its label) to 1.5 line
+//!   heights right of the value's estimated start.
 //! - A value directly below a label is taken only when the cells to the
 //!   right of the label and of the value (if any) line up as one column, so
 //!   the label cell of the next row (`役職` with its own value `課長`) is not
@@ -43,9 +54,9 @@
 //!
 //! Work, time and memory are bounded: [`LayoutLimits::max_pairs`] caps the
 //! hypotheses per document, each value holds at most [`MAX_VALUE_LINES`]
-//! spans and each label at most [`MAX_COLUMN_ROWS`] column rows, and every
-//! search is limited to [`MAX_WINDOW`] fragments, so the work is
-//! O(n log n) in the number of fragments plus linear in their text.
+//! spans and each label at most [`MAX_COLUMN_ROWS`] column rows, every
+//! search is limited to [`MAX_WINDOW`] fragments, and each fragment's text is
+//! read twice (classified and measured) however many pairs use it.
 //! [`LayoutLimits::max_work`] and [`LayoutLimits::deadline`] stop the
 //! analysis with a typed error (see [`analyze_within`] for the units).
 use crate::budget::{Budget, BudgetError};
@@ -54,8 +65,8 @@ use crate::source::{Quality, SourceFragment};
 use serde::Serialize;
 use std::time::Instant;
 
-/// Most lines one value to the right may span: its first line plus
-/// continuation lines. A value that would run longer is dropped, not truncated.
+/// Most lines one value may span: its first line plus continuation lines.
+/// A value that would run longer is dropped, not truncated.
 pub const MAX_VALUE_LINES: usize = 5;
 /// Most data rows examined (and reported) below one label ([`Placement::Column`]).
 pub const MAX_COLUMN_ROWS: usize = 5;
@@ -151,6 +162,19 @@ pub enum Placement {
     Column,
 }
 
+/// How a pair's value is tied to its label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Binding {
+    /// An explicit delimiter: a `label：value` fragment ([`Placement::Inline`]),
+    /// or a fragment that ends with its only delimiter (`label：`) and the
+    /// next fragment to its right on the same line ([`Placement::Right`]).
+    Delimiter,
+    /// Position only: a right neighbour without a delimiter, a value below
+    /// the label or a row of a column.
+    Geometric,
+}
+
 /// A label/value hypothesis. `value` holds one span per line, in reading order.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Pair {
@@ -158,6 +182,7 @@ pub struct Pair {
     pub label: Span,
     pub value: Vec<Span>,
     pub placement: Placement,
+    pub binding: Binding,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -178,16 +203,20 @@ pub fn analyze(fragments: &[SourceFragment], limits: &LayoutLimits) -> Result<La
 /// Build lines and label/value hypotheses, spending work from `budget`.
 ///
 /// Work units: one per fragment and per sort comparison while grouping
-/// lines, one per byte of fragment text classified or split into spans, and
-/// one per line and per fragment examined in a search. Searches are bounded
-/// ([`MAX_VALUE_LINES`], [`MAX_COLUMN_ROWS`], [`MAX_WINDOW`]), so the total
-/// is O(n log n) in fragments plus linear in their text.
+/// lines; two per byte of fragment text, which is classified and measured
+/// once per fragment; one per line and per fragment examined in a search;
+/// and one plus the fragment id's length per span written into a pair.
+/// Searches are bounded ([`MAX_VALUE_LINES`], [`MAX_COLUMN_ROWS`],
+/// [`MAX_WINDOW`]), and a span reuses its fragment's measurements instead of
+/// reading the text again, so the units count all work that grows with the
+/// input.
 ///
 /// # Errors
 /// [`LayoutError::LimitExceeded`] as soon as the document would produce more
 /// than `max_pairs` hypotheses, [`LayoutError::BudgetExceeded`] when the
 /// budget runs out and [`LayoutError::DeadlineExceeded`] once its deadline
-/// has passed (checked at least every [`crate::budget::CHECK_INTERVAL`] units).
+/// has passed (checked at least every [`crate::budget::CHECK_INTERVAL`]
+/// units, and before reading any text longer than that).
 pub fn analyze_within(
     fragments: &[SourceFragment],
     max_pairs: usize,
@@ -195,14 +224,15 @@ pub fn analyze_within(
 ) -> Result<Layout, LayoutError> {
     budget.check_deadline()?;
     let lines = group_lines(fragments, budget)?;
-    let mut kinds = Vec::with_capacity(fragments.len());
+    let mut measures = Vec::with_capacity(fragments.len());
     for fragment in fragments {
-        budget.spend_bytes(&fragment.raw_text)?;
-        kinds.push(classify(fragment));
+        // Classification and measurement each read the text once.
+        budget.spend(2 * u64::try_from(fragment.raw_text.len()).unwrap_or(u64::MAX / 2))?;
+        measures.push(Measure::new(fragment));
     }
     let page = Page {
         fragments,
-        kinds: &kinds,
+        measures: &measures,
         lines: &lines,
     };
     let mut pairs = Pairs {
@@ -212,29 +242,58 @@ pub fn analyze_within(
     for (i, line) in lines.iter().enumerate() {
         budget.spend(1 + line.fragments.len() as u64)?;
         for &f in &line.fragments {
-            if let Kind::Inline { at, after } = kinds[f] {
-                budget.spend_bytes(&fragments[f].raw_text)?;
-                pairs.push(inline_pair(&fragments[f], at, after))?;
+            if !matches!(measures[f].kind, Kind::Inline { .. }) {
+                continue;
+            }
+            let label = page.span(f, START, LABEL_END, budget)?;
+            let first = page.span(f, VALUE_START, END, budget)?;
+            let height = fragments[f].bbox.height();
+            // A wrapped inline value continues under its label or under
+            // its own (estimated) start.
+            let column = Column {
+                from: fragments[f].bbox.left - 0.5 * height,
+                to: first.bbox.left + 1.5 * height,
+            };
+            if let Some(value) = page.value(i, first, column, budget)? {
+                pairs.push(Pair {
+                    page: line.page,
+                    label,
+                    value,
+                    placement: Placement::Inline,
+                    binding: Binding::Delimiter,
+                })?;
             }
         }
         for window in line.fragments.windows(2) {
             let (label, value) = (window[0], window[1]);
-            if !kinds[label].can_label() || kinds[value] != Kind::Plain {
+            if !measures[label].kind.can_label() || measures[value].kind != Kind::Plain {
                 continue;
             }
-            if let Some(value) = page.value(i, value, budget)? {
-                budget.spend_bytes(&fragments[label].raw_text)?;
+            let first = page.span(value, START, END, budget)?;
+            let left = fragments[value].bbox.left;
+            let half = 0.5 * fragments[value].bbox.height();
+            let column = Column {
+                from: left - half,
+                to: left + half,
+            };
+            if let Some(value) = page.value(i, first, column, budget)? {
+                let binding = if measures[label].kind == Kind::Label {
+                    Binding::Delimiter
+                } else {
+                    Binding::Geometric
+                };
                 pairs.push(Pair {
                     page: line.page,
-                    label: label_span(&fragments[label]),
+                    label: page.span(label, START, LABEL_END, budget)?,
                     value,
                     placement: Placement::Right,
+                    binding,
                 })?;
             }
         }
         if lines.get(i + 1).is_some_and(|next| next.page == line.page) {
             for position in 0..line.fragments.len() {
-                if kinds[line.fragments[position]].can_label() {
+                if measures[line.fragments[position]].kind.can_label() {
                     page.below(i, position, &mut pairs, budget)?;
                 }
             }
@@ -319,6 +378,77 @@ fn classify(f: &SourceFragment) -> Kind {
     }
 }
 
+/// Offset slots of a [`Measure`].
+const START: usize = 0;
+const END: usize = 1;
+const LABEL_END: usize = 2;
+const VALUE_START: usize = 3;
+
+/// A fragment's kind and the byte offsets of its parts with the estimated
+/// advance before each, computed once so that spans never re-read the text.
+#[derive(Debug, Clone, Copy)]
+struct Measure {
+    kind: Kind,
+    /// [`START`] and [`END`] of the trimmed text, [`LABEL_END`] (the label
+    /// without its delimiter; for an inline fragment, the end of its label
+    /// side) and [`VALUE_START`] (an inline fragment's value; otherwise the
+    /// trimmed start).
+    at: [usize; 4],
+    /// Advance in em before each offset of `at`.
+    em: [f64; 4],
+    /// Advance in em of the whole text.
+    total: f64,
+}
+
+impl Measure {
+    fn new(f: &SourceFragment) -> Self {
+        let text = f.raw_text.as_str();
+        let kind = classify(f);
+        let start = text.len() - text.trim_start().len();
+        let end = text.trim_end().len();
+        let (label_end, value_start) = match kind {
+            Kind::Inline { at, after } => (
+                text[..at].trim_end().len(),
+                after + (text[after..].len() - text[after..].trim_start().len()),
+            ),
+            _ => {
+                // `請求番号：` → `請求番号`.
+                let trimmed = text[start..end]
+                    .trim_end_matches(DELIMITERS)
+                    .trim_end_matches(char::is_whitespace);
+                let label_end = if trimmed.is_empty() {
+                    end
+                } else {
+                    start + trimmed.len()
+                };
+                (label_end, start)
+            }
+        };
+        let at = [start, end, label_end, value_start];
+        let mut em = [0.0; 4];
+        let mut total = 0.0;
+        for (i, c) in text.char_indices() {
+            for (slot, &offset) in at.iter().enumerate() {
+                if offset == i {
+                    em[slot] = total;
+                }
+            }
+            total += char_em(c);
+        }
+        for (slot, &offset) in at.iter().enumerate() {
+            if offset == text.len() {
+                em[slot] = total;
+            }
+        }
+        Self {
+            kind,
+            at,
+            em,
+            total,
+        }
+    }
+}
+
 /// What a line holds in a column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Cell {
@@ -330,31 +460,88 @@ enum Cell {
     Crowded,
 }
 
-/// The analyzed fragments with their kinds and lines.
+/// Where continuation lines of a value may start (left edges, in points).
+#[derive(Debug, Clone, Copy)]
+struct Column {
+    from: f64,
+    to: f64,
+}
+
+/// The analyzed fragments with their measurements and lines.
 struct Page<'a> {
     fragments: &'a [SourceFragment],
-    kinds: &'a [Kind],
+    measures: &'a [Measure],
     lines: &'a [Line],
 }
 
 impl Page<'_> {
-    /// The value starting at fragment `first` on line `line`, with follow-on
-    /// lines in the same column. A line is merged only when it has a single
-    /// plain fragment aligned with the value, so stacked label rows
-    /// (小計 / 合計) and `label：` lines stay separate. `None` when the value
-    /// would exceed [`MAX_VALUE_LINES`].
+    fn kind(&self, f: usize) -> Kind {
+        self.measures[f].kind
+    }
+
+    /// The span of fragment `f` from offset slot `from` to slot `to`.
+    /// Costs one unit plus the fragment id's length; the text is not read.
+    fn span(
+        &self,
+        f: usize,
+        from: usize,
+        to: usize,
+        budget: &mut Budget,
+    ) -> Result<Span, BudgetError> {
+        let fragment = &self.fragments[f];
+        budget.spend(1 + fragment.id.len() as u64)?;
+        let measure = &self.measures[f];
+        let (start, end) = (measure.at[from], measure.at[to]);
+        if start == 0 && end == fragment.raw_text.len() {
+            return Ok(Span {
+                fragment_id: fragment.id.clone(),
+                start,
+                end,
+                bbox: fragment.bbox,
+                precision: Precision::Run,
+            });
+        }
+        let (left, right) = if measure.total > 0.0 {
+            let width = fragment.bbox.width();
+            (
+                fragment.bbox.left + width * measure.em[from] / measure.total,
+                fragment.bbox.left + width * measure.em[to] / measure.total,
+            )
+        } else {
+            (fragment.bbox.left, fragment.bbox.right)
+        };
+        Ok(Span {
+            fragment_id: fragment.id.clone(),
+            start,
+            end,
+            bbox: Rect {
+                left,
+                top: fragment.bbox.top,
+                right: right.max(left + f64::EPSILON),
+                bottom: fragment.bbox.bottom,
+            },
+            precision: Precision::Estimated,
+        })
+    }
+
+    /// The value starting with `first` on line `line`, with follow-on lines
+    /// whose single plain fragment starts in `column`. A line is merged only
+    /// when it has a single plain fragment, so stacked label rows (小計 /
+    /// 合計) and `label：` lines stay separate. `None` when the value would
+    /// exceed [`MAX_VALUE_LINES`].
     fn value(
         &self,
         line: usize,
-        first: usize,
+        first: Span,
+        column: Column,
         budget: &mut Budget,
     ) -> Result<Option<Vec<Span>>, BudgetError> {
-        let start = &self.fragments[first];
-        let mut value = vec![whole(start)];
-        let mut last = start.bbox;
+        let page = self.lines[line].page;
+        let mut last = first.bbox;
+        let mut value = vec![first];
         for next_line in &self.lines[line + 1..] {
             budget.spend(1)?;
-            if next_line.page != start.page {
+            if next_line.page != page {
                 break;
             }
             let height = last.height();
@@ -362,16 +549,18 @@ impl Page<'_> {
                 break;
             };
             let next_fragment = &self.fragments[next];
+            let left = next_fragment.bbox.left;
             if next_line.bbox.top - last.bottom > height
-                || (next_fragment.bbox.left - start.bbox.left).abs() > 0.5 * height
-                || self.kinds[next] != Kind::Plain
+                || left < column.from
+                || left > column.to
+                || self.kind(next) != Kind::Plain
             {
                 break;
             }
             if value.len() >= MAX_VALUE_LINES {
                 return Ok(None);
             }
-            value.push(whole(next_fragment));
+            value.push(self.span(next, START, END, budget)?);
             last = next_fragment.bbox;
         }
         Ok(Some(value))
@@ -387,7 +576,8 @@ impl Page<'_> {
     ) -> Result<(), LayoutError> {
         let line = &self.lines[index];
         let next = &self.lines[index + 1];
-        let label = &self.fragments[line.fragments[position]];
+        let f = line.fragments[position];
+        let label = &self.fragments[f];
         let Some(slot) = self.below_slot(label, next, budget)? else {
             return Ok(());
         };
@@ -412,21 +602,22 @@ impl Page<'_> {
             _ => return Ok(()),
         }
         let (rows, cells) = self.data_rows(index + 1, slot, height, reach, budget)?;
-        budget.spend_bytes(&label.raw_text)?;
         if rows < 2 {
             return pairs.push(Pair {
                 page: line.page,
-                label: label_span(label),
-                value: vec![whole(first)],
+                label: self.span(f, START, LABEL_END, budget)?,
+                value: vec![self.span(next.fragments[slot], START, END, budget)?],
                 placement: Placement::Below,
+                binding: Binding::Geometric,
             });
         }
         for cell in cells {
             pairs.push(Pair {
                 page: line.page,
-                label: label_span(label),
-                value: vec![whole(&self.fragments[cell])],
+                label: self.span(f, START, LABEL_END, budget)?,
+                value: vec![self.span(cell, START, END, budget)?],
                 placement: Placement::Column,
+                binding: Binding::Geometric,
             })?;
         }
         Ok(())
@@ -451,7 +642,7 @@ impl Page<'_> {
             }
             budget.spend(1)?;
             let height = label.bbox.height().max(v.bbox.height());
-            if self.kinds[f] == Kind::Plain
+            if self.kind(f) == Kind::Plain
                 && (v.bbox.left - label.bbox.left).abs() <= height
                 && v.bbox.top - label.bbox.bottom <= height
                 && v.bbox.top >= label.bbox.bottom - 0.5 * height
@@ -535,7 +726,7 @@ impl Page<'_> {
             }
             budget.spend(1)?;
             match self.column_cell(line, cell.bbox, height, budget)? {
-                Cell::Found(f) if self.kinds[f] == Kind::Plain => cells.push(f),
+                Cell::Found(f) if self.kind(f) == Kind::Plain => cells.push(f),
                 Cell::Found(_) => break,
                 Cell::Crowded => {}
                 Cell::Blank => {
@@ -655,77 +846,6 @@ fn union(a: Rect, b: Rect) -> Rect {
         top: a.top.min(b.top),
         right: a.right.max(b.right),
         bottom: a.bottom.max(b.bottom),
-    }
-}
-
-fn whole(f: &SourceFragment) -> Span {
-    let start = f.raw_text.len() - f.raw_text.trim_start().len();
-    let end = f.raw_text.trim_end().len();
-    span(f, start, end)
-}
-
-/// A label fragment without a trailing delimiter, e.g. `請求番号：` → `請求番号`.
-fn label_span(f: &SourceFragment) -> Span {
-    let full = whole(f);
-    let text = &f.raw_text[full.start..full.end];
-    let trimmed = text
-        .trim_end_matches(DELIMITERS)
-        .trim_end_matches(char::is_whitespace);
-    if trimmed.is_empty() || trimmed.len() == text.len() {
-        return full;
-    }
-    span(f, full.start, full.start + trimmed.len())
-}
-
-/// A span over `start..end` (byte offsets on char boundaries) of `f`.
-fn span(f: &SourceFragment, start: usize, end: usize) -> Span {
-    let text = &f.raw_text;
-    if start == 0 && end == text.len() {
-        return Span {
-            fragment_id: f.id.clone(),
-            start,
-            end,
-            bbox: f.bbox,
-            precision: Precision::Run,
-        };
-    }
-    let weight = |s: &str| s.chars().map(char_em).sum::<f64>();
-    let total = weight(text);
-    let (left, right) = if total > 0.0 {
-        let width = f.bbox.width();
-        (
-            f.bbox.left + width * weight(&text[..start]) / total,
-            f.bbox.left + width * weight(&text[..end]) / total,
-        )
-    } else {
-        (f.bbox.left, f.bbox.right)
-    };
-    Span {
-        fragment_id: f.id.clone(),
-        start,
-        end,
-        bbox: Rect {
-            left,
-            top: f.bbox.top,
-            right: right.max(left + f64::EPSILON),
-            bottom: f.bbox.bottom,
-        },
-        precision: Precision::Estimated,
-    }
-}
-
-/// The `label：value` pair of an [`Kind::Inline`] fragment.
-fn inline_pair(f: &SourceFragment, at: usize, after: usize) -> Pair {
-    let text = &f.raw_text;
-    let label_start = text.len() - text.trim_start().len();
-    let label_end = text[..at].trim_end().len();
-    let value_start = after + (text[after..].len() - text[after..].trim_start().len());
-    let value_end = text.trim_end().len();
-    Pair {
-        page: f.page,
-        label: span(f, label_start, label_end),
-        value: vec![span(f, value_start, value_end)],
-        placement: Placement::Inline,
     }
 }
 
@@ -1034,7 +1154,7 @@ mod tests {
     }
 
     #[test]
-    fn crowded_lines_stay_near_linear_and_honour_budget_and_deadline() {
+    fn crowded_lines_stay_bounded_and_honour_budget_and_deadline() {
         // Before: every label scanned the whole line below (n^2 fragment
         // checks, 1.8 s for n = 40,000 in release). Now each search examines
         // at most MAX_WINDOW fragments, and the work is counted.
@@ -1042,7 +1162,7 @@ mod tests {
         let mut budget = Budget::new(u64::MAX, None);
         let layout = analyze_within(&fragments, usize::MAX, &mut budget).unwrap();
         let used = u64::MAX - budget.remaining();
-        // Grouping sorts (n log n) dominate; the searches add a constant per fragment.
+        // Grouping sorts (n log n), text and spans add a few units per fragment.
         let n = fragments.len() as u64;
         assert!(used < n * 64, "{used}");
         assert!(layout.pairs.iter().all(|p| p.placement == Placement::Right));
@@ -1359,5 +1479,126 @@ mod tests {
         let mut fragment = frag("a", "請求番号：INV-0012", [60.0, 119.0, 161.4, 130.0]);
         fragment.quality = Quality::Suspect;
         assert_eq!(analyze(&[fragment]), Layout::default());
+    }
+
+    #[test]
+    fn bindings_tell_delimiters_from_geometry() {
+        let fragments = [
+            frag("a", "請求日：", [60.0, 100.0, 100.0, 110.0]),
+            frag("b", "2026/11/08", [200.0, 100.0, 250.0, 110.0]),
+            frag("c", "担当", [60.0, 130.0, 80.0, 140.0]),
+            frag("d", "山田 太郎", [200.0, 130.0, 250.0, 140.0]),
+            frag("e", "件名：制作費", [60.0, 160.0, 120.0, 170.0]),
+            frag("f", "注文番号", [60.0, 190.0, 100.0, 200.0]),
+            frag("g", "ORD-1", [60.0, 204.0, 85.0, 214.0]),
+        ];
+        let layout = analyze(&fragments);
+        let binding = |label: &str| {
+            let pairs = find(&layout, &fragments, label);
+            assert_eq!(pairs.len(), 1, "{label}");
+            (pairs[0].placement, pairs[0].binding)
+        };
+        assert_eq!(binding("請求日"), (Placement::Right, Binding::Delimiter));
+        assert_eq!(binding("担当"), (Placement::Right, Binding::Geometric));
+        assert_eq!(binding("件名"), (Placement::Inline, Binding::Delimiter));
+        assert_eq!(binding("注文番号"), (Placement::Below, Binding::Geometric));
+    }
+
+    #[test]
+    fn inline_values_take_continuation_lines_in_their_column() {
+        // `住所：` is 3 full-width characters: the value starts near x=90.
+        let pair = |next: SourceFragment| {
+            let fragments = [
+                frag("a", "住所：東京都架空区1-2-3", [60.0, 100.0, 185.0, 110.0]),
+                next,
+            ];
+            let layout = analyze(&fragments);
+            let address = find(&layout, &fragments, "住所");
+            assert_eq!(address.len(), 1);
+            texts(&fragments, &address[0].value)
+        };
+        // Before: the inline value was always one line (a truncated address).
+        for left in [90.0, 60.0, 100.0] {
+            let next = frag("b", "テストビル5階", [left, 112.0, left + 70.0, 122.0]);
+            assert_eq!(pair(next), ["東京都架空区1-2-3", "テストビル5階"], "{left}");
+        }
+        // Lines further right, after a gap or with their own delimiter stay apart.
+        for next in [
+            frag("b", "テストビル5階", [200.0, 112.0, 270.0, 122.0]),
+            frag("b", "テストビル5階", [90.0, 125.0, 160.0, 135.0]),
+            frag("b", "電話番号：03-1234-5678", [60.0, 112.0, 170.0, 122.0]),
+        ] {
+            assert_eq!(pair(next), ["東京都架空区1-2-3"]);
+        }
+    }
+
+    /// `labels` short labels over their values, then four wide fragments of
+    /// `chars` characters with a trailing space under every label's column.
+    fn wide(labels: usize, chars: usize) -> Vec<SourceFragment> {
+        let mut fragments = Vec::new();
+        for i in 0..labels {
+            let x = 10.0 + 0.1 * i as f64;
+            fragments.push(frag(&format!("l{i}"), "項目", [x, 100.0, x + 20.0, 110.0]));
+            fragments.push(frag(&format!("v{i}"), "値", [x, 118.0, x + 10.0, 128.0]));
+        }
+        for row in 0..4 {
+            let top = 136.0 + 18.0 * row as f64;
+            let text = format!("{} ", "あ".repeat(chars));
+            fragments.push(frag(
+                &format!("w{row}"),
+                &text,
+                [0.0, top, 595.0, top + 10.0],
+            ));
+        }
+        fragments
+    }
+
+    #[test]
+    fn spans_reuse_fragment_measurements() {
+        // Before: every span of a fragment with surrounding spaces re-read
+        // the fragment's text, uncharged. Here each label's column rows end
+        // in the four wide fragments.
+        let fragments = wide(200, 33_000);
+        let bytes: u64 = fragments.iter().map(|f| f.raw_text.len() as u64).sum();
+        let mut budget = Budget::new(u64::MAX, None);
+        let layout = analyze_within(&fragments, usize::MAX, &mut budget).unwrap();
+        let used = u64::MAX - budget.remaining();
+        let column: Vec<_> = layout
+            .pairs
+            .iter()
+            .filter(|p| p.label.fragment_id == "l0" && p.placement == Placement::Column)
+            .map(|p| p.value[0].fragment_id.as_str())
+            .collect();
+        assert_eq!(column, ["v0", "w0", "w1", "w2", "w3"]);
+        assert!(
+            layout
+                .pairs
+                .iter()
+                .filter(|p| p.value[0].fragment_id == "w0")
+                .all(|p| p.value[0].precision == Precision::Estimated)
+        );
+        // Text is read twice in all; the rest is a constant per fragment and pair.
+        let pairs = layout.pairs.len() as u64;
+        let n = fragments.len() as u64;
+        assert!(used <= 2 * bytes + 64 * n + 64 * pairs, "{used}");
+        // 12 MB of wide text: before, 24 s in a debug build (the text was
+        // re-read for each of the 800 column rows); now the text is read twice.
+        let fragments = wide(200, 1_000_000);
+        let started = Instant::now();
+        let mut budget = Budget::new(u64::MAX, None);
+        analyze_within(&fragments, usize::MAX, &mut budget).unwrap();
+        assert!(started.elapsed().as_secs() < 6, "{:?}", started.elapsed());
+        // A deadline stops the analysis promptly.
+        let started = Instant::now();
+        let limits = LayoutLimits {
+            deadline: Some(started + std::time::Duration::from_millis(50)),
+            max_work: u64::MAX,
+            ..LayoutLimits::default()
+        };
+        assert_eq!(
+            super::analyze(&fragments, &limits),
+            Err(LayoutError::DeadlineExceeded)
+        );
+        assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
     }
 }
