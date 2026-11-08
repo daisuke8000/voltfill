@@ -274,7 +274,33 @@ fn an_unwritable_output_target_fails_before_inputs_credentials_or_sends() {
             "output_directory_not_found",
         ),
         (String::new(), "invalid_output_path"),
+        // These would fail only at the final rename, after sending.
+        (path(&temp.0.join("a".repeat(300))), "output_not_accessible"),
     ];
+    #[cfg(unix)]
+    {
+        let looped = temp.0.join("loop");
+        std::os::unix::fs::symlink(&looped, &looped).expect("create the symlink loop");
+        targets.push((path(&looped.join("result.json")), "output_not_accessible"));
+    }
+    #[cfg(unix)]
+    let unsearchable = {
+        use std::os::unix::fs::PermissionsExt;
+        let unsearchable = temp.0.join("unsearchable");
+        std::fs::create_dir(&unsearchable).expect("create the unsearchable directory");
+        std::fs::set_permissions(&unsearchable, std::fs::Permissions::from_mode(0o000))
+            .expect("make the directory unsearchable");
+        // A privileged user can still search it; skip that case then.
+        if std::fs::symlink_metadata(unsearchable.join("probe"))
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+        {
+            targets.push((
+                path(&unsearchable.join("result.json")),
+                "output_not_accessible",
+            ));
+        }
+        unsearchable
+    };
     #[cfg(unix)]
     let read_only = {
         use std::os::unix::fs::PermissionsExt;
@@ -316,6 +342,7 @@ fn an_unwritable_output_target_fails_before_inputs_credentials_or_sends() {
         use std::os::unix::fs::PermissionsExt;
         assert!(temporaries(&read_only).is_empty());
         std::fs::set_permissions(&read_only, std::fs::Permissions::from_mode(0o755)).ok();
+        std::fs::set_permissions(&unsearchable, std::fs::Permissions::from_mode(0o755)).ok();
     }
 }
 
@@ -395,13 +422,53 @@ fn the_api_key_file_is_never_an_output_target() {
     assert!(temporaries(&temp.0).is_empty());
 }
 
+/// Keeps a file immutable while it lives (`chflags uchg` on macOS, `chattr +i`
+/// on Linux), where this user may set the flag.
+struct Immutable(PathBuf);
+impl Immutable {
+    fn set(path: &Path) -> Option<Self> {
+        let (tool, flag) = if cfg!(target_os = "macos") {
+            ("chflags", "uchg")
+        } else if cfg!(target_os = "linux") {
+            ("chattr", "+i")
+        } else {
+            return None;
+        };
+        let status = Command::new(tool)
+            .arg(flag)
+            .arg(path)
+            .stderr(std::process::Stdio::null())
+            .status()
+            .ok()?;
+        status.success().then(|| Self(path.to_owned()))
+    }
+}
+impl Drop for Immutable {
+    fn drop(&mut self) {
+        let (tool, flag) = if cfg!(target_os = "macos") {
+            ("chflags", "nouchg")
+        } else {
+            ("chattr", "-i")
+        };
+        let _ = Command::new(tool).arg(flag).arg(&self.0).status();
+    }
+}
+
 #[test]
-fn a_result_that_cannot_replace_the_target_is_kept_and_its_path_reported() {
+fn a_result_that_cannot_replace_an_immutable_target_is_kept_and_its_path_reported() {
     let temp = Temp::new();
     let (pdf, form) = inputs(&temp);
-    // The directory is writable, so the preflight passes, but no file system
-    // accepts a 300-byte name: the final rename fails after the write.
-    let target = path(&temp.0.join("a".repeat(300)));
+    // The target is a regular file in a writable directory, so the preflight
+    // passes, but it cannot be replaced: the final rename fails after the
+    // write. Dropped before `temp`, so the directory can be removed.
+    let target = temp.0.join("result.json");
+    std::fs::write(&target, b"previous").expect("write the existing target");
+    let Some(_immutable) = Immutable::set(&target) else {
+        // chattr +i needs privileges on Linux.
+        eprintln!("skipped: this user cannot make a file immutable here");
+        return;
+    };
+    let target = path(&target);
     for logged in [false, true] {
         let mut args = vec!["fill", pdf.as_str(), form.as_str(), "-o", target.as_str()];
         if logged {
@@ -423,13 +490,21 @@ fn a_result_that_cannot_replace_the_target_is_kept_and_its_path_reported() {
             &report["error"]
         };
         assert_eq!(reason, "output_rename_failed", "{logged}");
+        assert!(report.get("result_on_stderr").is_none());
         let kept = Path::new(report["output_kept"].as_str().expect("the kept path"));
         assert_eq!(kept.parent(), Some(temp.0.as_path()));
+        let bytes = std::fs::read(kept).expect("the temporary file remains");
         let written: Value =
-            serde_json::from_slice(&std::fs::read(kept).expect("the temporary file remains"))
-                .expect("the kept result is complete JSON");
+            serde_json::from_slice(&bytes).expect("the kept result is complete JSON");
         assert_eq!(written["fields"]["no"]["raw"], "INV-7");
+        // The same command without -o prints the same result.
+        let stdout = cli(&["fill", &pdf, &form], &temp, &[]).stdout;
+        assert_eq!(bytes, stdout);
         std::fs::remove_file(kept).expect("remove the kept file");
     }
+    assert_eq!(
+        std::fs::read(&target).expect("read the target"),
+        b"previous"
+    );
     assert!(temporaries(&temp.0).is_empty());
 }

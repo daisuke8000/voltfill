@@ -15,7 +15,7 @@ use vf_legacy::jev::transport::{ExecutionConfig, Secret};
 use vf_legacy::model::{JevResponse, Strategy};
 use vf_legacy::{pdf, schema};
 
-const HELP: &str = "VOLTFILL — PDF extraction\n\nvoltfill run --config voltfill.yaml (or voltfill.toml / voltfill.json)\nvoltfill serve --config voltfill.yaml\nvoltfill serve --help\nvoltfill run INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --mock ANSWERS.json\nvoltfill inspect INPUT.pdf\nvoltfill fill INPUT.pdf FORM.json (offline: match form labels to PDF text)\nvoltfill fill INPUT.pdf FORM.json --remote (Jev chooses among ambiguous fields' source candidates)\nvoltfill validate SCHEMA.json\n\n--strategy text|vision|hybrid (default: text)\n--model ID (default: jev-1.14.0); images require a pinned version >= 1.14.0.\n--renderer pdfium|hayro selects an enabled renderer; no automatic fallback.\n--pdfium-lib PATH or VOLTFILL_PDFIUM_LIB_PATH selects PDFium when --renderer is omitted\n--pixels-per-point NUMBER sets render scale (default: 1.5).\n--config FILE (or -c FILE, default VOLTFILL_CONFIG) loads YAML/TOML launch settings or legacy JSON execution limits.\nPrecedence: CLI > selected file > environment > defaults.\n--resource-config FILE (or VOLTFILL_RESOURCE_CONFIG) lowers PDF/render ceilings.\nVOLTFILL_EXECUTION_CONFIG selects execution JSON when no execution section/file is supplied.\nVOLTFILL_MODEL, VOLTFILL_STRATEGY, VOLTFILL_RENDERER, VOLTFILL_PIXELS_PER_POINT\nand VOLTFILL_LOG_LEVEL provide startup defaults.\n--max-concurrency N (default: 2, at least 1); rate limits may reduce concurrency.\n--max-attempts 1|2|3 includes the first attempt (default: 3).\n--log-level off|error|warn|info|debug (default: off) enables JSON Lines logs.\nLogs use stderr with JSON on stdout; with --output FILE (or -o FILE),\nlogs use stdout and results go to the file. Debug logs cover VOLTFILL only.\n--dry-run inspects the input without sending requests.\n--evaluation-profile synthetic enables confidence filtering for local synthetic examples.\nBy default, resolved values are returned without a confidence cutoff.\n\nRemote mode requires VOLTFILL_JEV_ENDPOINT (trusted HTTPS, no URL fallback) and\nVOLTFILL_JEV_API_KEY or VOLTFILL_JEV_API_KEY_FILE (one explicit credential file). Vision/Hybrid select image input;\nno additional image permission flag is required. Reports retain original\nresponse bodies regardless of log level and remain evaluation-only.\nLong-form --pdf, --schema, --allow-remote and --execution-config are also supported.\n\nfill --remote sends only fields left ambiguous, as choices among their own source\ncandidates (label and value text, no images); values still come from the PDF.\nIt accepts --model, --max-attempts and --execution-config FILE (not --config);\nbatches are sent one at a time. If every sent field fails, the full result is\nstill written and the exit code is 4. Fields left ambiguous or not_found (also\nwhen every sent field ends in not_unique_maximum) exit 0: check each status.\nWithout --remote, fill reads no credentials.\n\n--output FILE is checked and its temporary file created in FILE's directory after\nconfiguration files are read and before inputs, credentials or requests. If the\nresult cannot replace FILE, the temporary file is kept and named in output_kept.\n";
+const HELP: &str = "VOLTFILL — PDF extraction\n\nvoltfill run --config voltfill.yaml (or voltfill.toml / voltfill.json)\nvoltfill serve --config voltfill.yaml\nvoltfill serve --help\nvoltfill run INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --mock ANSWERS.json\nvoltfill inspect INPUT.pdf\nvoltfill fill INPUT.pdf FORM.json (offline: match form labels to PDF text)\nvoltfill fill INPUT.pdf FORM.json --remote (Jev chooses among ambiguous fields' source candidates)\nvoltfill validate SCHEMA.json\n\n--strategy text|vision|hybrid (default: text)\n--model ID (default: jev-1.14.0); images require a pinned version >= 1.14.0.\n--renderer pdfium|hayro selects an enabled renderer; no automatic fallback.\n--pdfium-lib PATH or VOLTFILL_PDFIUM_LIB_PATH selects PDFium when --renderer is omitted\n--pixels-per-point NUMBER sets render scale (default: 1.5).\n--config FILE (or -c FILE, default VOLTFILL_CONFIG) loads YAML/TOML launch settings or legacy JSON execution limits.\nPrecedence: CLI > selected file > environment > defaults.\n--resource-config FILE (or VOLTFILL_RESOURCE_CONFIG) lowers PDF/render ceilings.\nVOLTFILL_EXECUTION_CONFIG selects execution JSON when no execution section/file is supplied.\nVOLTFILL_MODEL, VOLTFILL_STRATEGY, VOLTFILL_RENDERER, VOLTFILL_PIXELS_PER_POINT\nand VOLTFILL_LOG_LEVEL provide startup defaults.\n--max-concurrency N (default: 2, at least 1); rate limits may reduce concurrency.\n--max-attempts 1|2|3 includes the first attempt (default: 3).\n--log-level off|error|warn|info|debug (default: off) enables JSON Lines logs.\nLogs use stderr with JSON on stdout; with --output FILE (or -o FILE),\nlogs use stdout and results go to the file. Debug logs cover VOLTFILL only.\n--dry-run inspects the input without sending requests.\n--evaluation-profile synthetic enables confidence filtering for local synthetic examples.\nBy default, resolved values are returned without a confidence cutoff.\n\nRemote mode requires VOLTFILL_JEV_ENDPOINT (trusted HTTPS, no URL fallback) and\nVOLTFILL_JEV_API_KEY or VOLTFILL_JEV_API_KEY_FILE (one explicit credential file). Vision/Hybrid select image input;\nno additional image permission flag is required. Reports retain original\nresponse bodies regardless of log level and remain evaluation-only.\nLong-form --pdf, --schema, --allow-remote and --execution-config are also supported.\n\nfill --remote sends only fields left ambiguous, as choices among their own source\ncandidates (label and value text, no images); values still come from the PDF.\nIt accepts --model, --max-attempts and --execution-config FILE (not --config);\nbatches are sent one at a time. If every sent field fails, the full result is\nstill written and the exit code is 4. Fields left ambiguous or not_found (also\nwhen every sent field ends in not_unique_maximum) exit 0: check each status.\nWithout --remote, fill reads no credentials.\n\n--output FILE is checked and its temporary file created in FILE's directory after\nconfiguration files are read and before inputs, credentials or requests. If the\nresult cannot replace FILE (exit code 5), a file verified to hold all of it, in\nFILE's directory or else the working directory, is named in output_kept; if none\ncan hold it, stderr gets {\"error\":REASON,\"result\":RESULT}.\n";
 
 struct Args {
     command: String,
@@ -238,7 +238,16 @@ fn check_output_target(args: &Args, path: &str) -> Result<(), (u8, &'static str)
         Ok(m) if m.file_type().is_symlink() => return Err((5, "symlink_output_refused")),
         Ok(m) if m.is_dir() => return Err((5, "output_is_directory")),
         Ok(m) if !m.is_file() => return Err((5, "output_not_regular_file")),
-        _ => {}
+        Ok(_) => {}
+        // A missing target is created; a missing directory fails when the
+        // temporary file is created next to it.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) if error.kind() == io::ErrorKind::NotADirectory => {
+            return Err((5, "output_directory_not_found"));
+        }
+        // A name that is too long, a symlink loop or a directory that cannot
+        // be searched would only fail at the final rename, after sending.
+        Err(_) => return Err((5, "output_not_accessible")),
     }
     let canonical = target.canonicalize().ok();
     if [
@@ -282,14 +291,15 @@ impl Sink {
         check_output_target(args, path)?;
         PendingOutput::create(Path::new(path)).map(Self::File)
     }
-    /// The temporary file left in place because the result could not be moved
-    /// to the target.
-    fn kept(&self) -> Option<PathBuf> {
-        match self {
-            Self::File(pending) if matches!(pending.stage, Stage::Kept) => {
-                Some(pending.temporary.clone())
-            }
-            _ => None,
+    /// Where the result went when it could not be moved to the target.
+    fn fallback(&mut self) -> Option<Fallback> {
+        let Self::File(pending) = self else {
+            return None;
+        };
+        match &mut pending.stage {
+            Stage::Kept(path) => Some(Fallback::File(path.clone())),
+            Stage::Unsaved(bytes) => Some(Fallback::Stderr(std::mem::take(bytes))),
+            Stage::Open(_) | Stage::Moved => None,
         }
     }
 }
@@ -301,8 +311,13 @@ impl Sink {
 /// the target during the run is itself replaced and its referent is never
 /// written; a second check before the write would add no safety and could
 /// only discard received bodies.
+///
+/// If the result cannot reach the target, it is still in memory: it is kept
+/// in a file only after that file is verified to hold all of it, and
+/// otherwise handed to `main` for stderr.
 struct PendingOutput {
     target: PathBuf,
+    directory: PathBuf,
     temporary: PathBuf,
     stage: Stage,
 }
@@ -311,62 +326,148 @@ enum Stage {
     Open(File),
     /// Renamed over the target.
     Moved,
-    /// Writing started but the result is not at the target; the temporary
-    /// file is never removed, because it may hold received bodies.
-    Kept,
+    /// Not at the target, but this file was verified to hold the whole
+    /// result. Files created by a failed write are never removed, because
+    /// they may hold received bodies.
+    Kept(PathBuf),
+    /// No file could be verified to hold the result; these are its bytes.
+    Unsaved(Vec<u8>),
+}
+/// Where a result that could not replace the `--output` target went.
+#[derive(Debug, PartialEq, Eq)]
+enum Fallback {
+    /// A file verified to exist with the whole result.
+    File(PathBuf),
+    /// No file could hold it; `main` writes these bytes to stderr.
+    Stderr(Vec<u8>),
+}
+/// Create `.voltfill-<pid>-<n>.tmp` (exclusive, mode 0600) in `directory`.
+fn create_temporary(directory: &Path) -> io::Result<(PathBuf, File)> {
+    let mut last = io::Error::from(io::ErrorKind::AlreadyExists);
+    for n in 0..100 {
+        let path = directory.join(format!(".voltfill-{}-{n}.tmp", std::process::id()));
+        let mut open = OpenOptions::new();
+        open.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            open.mode(0o600);
+        }
+        match open.open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => last = error,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last)
+}
+/// Write all of `bytes` and flush them to the device.
+fn write_synced(file: &mut File, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(fault) = seam::next_write_fault() {
+        file.write_all(&bytes[..bytes.len() / 2])?;
+        return match fault {
+            seam::WriteFault::Fail => Err(io::Error::other("injected write failure")),
+            seam::WriteFault::Short => file.sync_all(),
+        };
+    }
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+/// Whether `path` still names `file` (same device and inode on unix), the
+/// file is still linked, and it holds exactly `len` bytes.
+fn holds(path: &Path, file: &File, len: usize) -> bool {
+    let (Ok(named), Ok(open)) = (fs::symlink_metadata(path), file.metadata()) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if open.nlink() == 0 || (named.dev(), named.ino()) != (open.dev(), open.ino()) {
+            return false;
+        }
+    }
+    named.is_file() && named.len() == len as u64 && open.len() == len as u64
+}
+/// The working directory, the last place a result file is tried.
+fn current_directory() -> PathBuf {
+    #[cfg(test)]
+    if let Some(directory) = seam::current_directory() {
+        return directory;
+    }
+    PathBuf::from(".")
 }
 impl PendingOutput {
     fn create(target: &Path) -> Result<Self, (u8, &'static str)> {
-        let parent = target
+        let directory = target
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
-        for n in 0..100 {
-            let temporary = parent.join(format!(".voltfill-{}-{n}.tmp", std::process::id()));
-            let mut open = OpenOptions::new();
-            open.write(true).create_new(true);
-            #[cfg(unix)]
+        match create_temporary(directory) {
+            Ok((temporary, file)) => Ok(Self {
+                target: target.to_owned(),
+                directory: directory.to_owned(),
+                temporary,
+                stage: Stage::Open(file),
+            }),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
             {
-                use std::os::unix::fs::OpenOptionsExt;
-                open.mode(0o600);
+                Err((5, "output_directory_not_found"))
             }
-            match open.open(&temporary) {
-                Ok(file) => {
-                    return Ok(Self {
-                        target: target.to_owned(),
-                        temporary,
-                        stage: Stage::Open(file),
-                    });
-                }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-                    ) =>
-                {
-                    return Err((5, "output_directory_not_found"));
-                }
-                Err(_) => return Err((5, "output_not_writable")),
-            }
+            Err(_) => Err((5, "output_not_writable")),
         }
-        Err((5, "output_not_writable"))
     }
+    /// Write the result and rename it over the target. On failure the stage
+    /// records a verified file holding the result, or the result itself.
     fn commit(&mut self, bytes: &[u8]) -> Result<(), (u8, &'static str)> {
-        let mut file = match std::mem::replace(&mut self.stage, Stage::Kept) {
+        let mut file = match std::mem::replace(&mut self.stage, Stage::Moved) {
             Stage::Open(file) => file,
             other => {
                 self.stage = other;
                 return Err((5, "output_write_failed"));
             }
         };
-        file.write_all(bytes)
-            .and_then(|()| file.sync_all())
-            .map_err(|_| (5, "output_write_failed"))?;
-        drop(file);
-        fs::rename(&self.temporary, &self.target).map_err(|_| (5, "output_rename_failed"))?;
-        self.stage = Stage::Moved;
-        Ok(())
+        // The file stays open across the rename, so its identity can be
+        // checked against the name both before and after a failed rename.
+        let reason = if write_synced(&mut file, bytes).is_err() {
+            "output_write_failed"
+        } else if !holds(&self.temporary, &file, bytes.len()) {
+            // Renaming a name that no longer holds the result could move
+            // another file onto the target.
+            "output_rename_failed"
+        } else if fs::rename(&self.temporary, &self.target).is_ok() {
+            return Ok(());
+        } else if holds(&self.temporary, &file, bytes.len()) {
+            self.stage = Stage::Kept(self.temporary.clone());
+            return Err((5, "output_rename_failed"));
+        } else {
+            "output_rename_failed"
+        };
+        self.stage = self.rescue(bytes);
+        Err((5, reason))
+    }
+    /// Write the whole result to a new file in the target's directory, then
+    /// in the working directory; keep the first one verified to hold it.
+    fn rescue(&self, bytes: &[u8]) -> Stage {
+        let current = current_directory();
+        let directories = if current == self.directory {
+            vec![current]
+        } else {
+            vec![self.directory.clone(), current]
+        };
+        for directory in directories {
+            let Ok((path, mut file)) = create_temporary(&directory) else {
+                continue;
+            };
+            if write_synced(&mut file, bytes).is_ok() && holds(&path, &file, bytes.len()) {
+                return Stage::Kept(path);
+            }
+        }
+        Stage::Unsaved(bytes.to_vec())
     }
 }
 impl Drop for PendingOutput {
@@ -374,6 +475,37 @@ impl Drop for PendingOutput {
         if matches!(self.stage, Stage::Open(_)) {
             let _ = fs::remove_file(&self.temporary);
         }
+    }
+}
+/// Test-only faults for the output writer.
+#[cfg(test)]
+mod seam {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::path::PathBuf;
+
+    /// Both write half of the bytes; `Fail` then errors like a full disk and
+    /// `Short` reports success, so only verification can catch it.
+    #[derive(Clone, Copy)]
+    pub(super) enum WriteFault {
+        Fail,
+        Short,
+    }
+    thread_local! {
+        static WRITE_FAULTS: RefCell<VecDeque<WriteFault>> = const { RefCell::new(VecDeque::new()) };
+        static CURRENT_DIRECTORY: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    }
+    /// Apply `faults` to the next file writes on this thread, in order, and
+    /// use `directory` in place of the working directory.
+    pub(super) fn set(faults: &[WriteFault], directory: Option<PathBuf>) {
+        WRITE_FAULTS.with(|f| *f.borrow_mut() = faults.iter().copied().collect());
+        CURRENT_DIRECTORY.with(|d| *d.borrow_mut() = directory);
+    }
+    pub(super) fn next_write_fault() -> Option<WriteFault> {
+        WRITE_FAULTS.with(|f| f.borrow_mut().pop_front())
+    }
+    pub(super) fn current_directory() -> Option<PathBuf> {
+        CURRENT_DIRECTORY.with(|d| d.borrow().clone())
     }
 }
 fn output(sink: &mut Sink, value: &impl serde::Serialize) -> Result<(), (u8, &'static str)> {
@@ -388,21 +520,50 @@ fn output(sink: &mut Sink, value: &impl serde::Serialize) -> Result<(), (u8, &'s
             .map_err(|_| (5, "output_write_failed")),
     }
 }
-/// A failed run. `kept_output` names the temporary file that holds the result
-/// when it could not be moved to the `--output` target.
+/// A failed run. `fallback` says where the result went when it could not be
+/// moved to the `--output` target.
 #[derive(Debug, PartialEq, Eq)]
 struct Failure {
     code: u8,
     reason: &'static str,
-    kept_output: Option<PathBuf>,
+    fallback: Option<Fallback>,
 }
 impl From<(u8, &'static str)> for Failure {
     fn from((code, reason): (u8, &'static str)) -> Self {
         Self {
             code,
             reason,
-            kept_output: None,
+            fallback: None,
         }
+    }
+}
+/// Report a failed run: a JSON error on stderr, or an error log event when
+/// logging is on. A kept file is named in `output_kept`. A result no file
+/// could hold is written to stderr as one JSON object, `{"error":REASON,
+/// "result":RESULT}`, with the result's bytes unchanged; with logging on, the
+/// log event then says whether that write succeeded (`result_on_stderr`).
+fn report_failure(failure: &Failure, logging: bool, stderr: &mut impl Write) {
+    let mut report = json!({});
+    match &failure.fallback {
+        Some(Fallback::File(path)) => {
+            report["output_kept"] = json!(path.to_string_lossy());
+        }
+        Some(Fallback::Stderr(bytes)) => {
+            let written = write!(stderr, "{{\"error\":{},\"result\":", json!(failure.reason))
+                .and_then(|()| stderr.write_all(bytes))
+                .and_then(|()| stderr.write_all(b"}\n"))
+                .and_then(|()| stderr.flush());
+            report["result_on_stderr"] = json!(written.is_ok());
+        }
+        None => {}
+    }
+    if logging {
+        report["event"] = json!(failure.reason);
+        log::error!(target: "vf_cli", "{report}");
+    } else if !matches!(failure.fallback, Some(Fallback::Stderr(_))) {
+        report["error"] = json!(failure.reason);
+        // A closed stderr leaves only the exit code.
+        let _ = writeln!(stderr, "{report}");
     }
 }
 #[derive(serde::Serialize)]
@@ -585,7 +746,7 @@ fn run_with<E: Evaluator, T: assist::Transport, C: assist::Clock>(
     .map_err(|(code, reason)| Failure {
         code,
         reason,
-        kept_output: sink.kept(),
+        fallback: sink.fallback(),
     })
 }
 fn run_command<E: Evaluator, T: assist::Transport, C: assist::Clock>(
@@ -820,24 +981,11 @@ pub(crate) fn main() {
     let code = match run(arguments) {
         Ok(code) => code,
         Err(failure) => {
-            // A kept temporary file holds the result and its received bodies.
-            let kept = failure
-                .kept_output
-                .as_deref()
-                .map(|path| path.to_string_lossy().into_owned());
-            if log::max_level() != log::LevelFilter::Off {
-                let mut event = json!({"event":failure.reason});
-                if let Some(kept) = kept {
-                    event["output_kept"] = json!(kept);
-                }
-                log::error!(target: "vf_cli", "{event}");
-            } else {
-                let mut error = json!({"error":failure.reason});
-                if let Some(kept) = kept {
-                    error["output_kept"] = json!(kept);
-                }
-                eprintln!("{error}");
-            }
+            report_failure(
+                &failure,
+                log::max_level() != log::LevelFilter::Off,
+                &mut io::stderr().lock(),
+            );
             failure.code
         }
     };
@@ -1349,6 +1497,13 @@ mod tests {
                 "invalid_output_path",
             ),
             (dir.join(".."), Vec::new(), "invalid_output_path"),
+            // No file system accepts a 300-byte name; the rename would fail
+            // only after sending.
+            (
+                dir.join("a".repeat(300)),
+                Vec::new(),
+                "output_not_accessible",
+            ),
         ];
         if cfg!(unix) {
             cases.push((link.clone(), Vec::new(), "symlink_output_refused"));
@@ -1358,6 +1513,35 @@ mod tests {
                 "output_not_regular_file",
             ));
         }
+        #[cfg(unix)]
+        {
+            let looped = dir.join("loop");
+            std::os::unix::fs::symlink(&looped, &looped).expect("the loop can be created");
+            cases.push((
+                looped.join("result.json"),
+                Vec::new(),
+                "output_not_accessible",
+            ));
+        }
+        #[cfg(unix)]
+        let unsearchable = {
+            use std::os::unix::fs::PermissionsExt;
+            let unsearchable = dir.join("unsearchable");
+            fs::create_dir(&unsearchable).expect("the directory must be creatable");
+            fs::set_permissions(&unsearchable, fs::Permissions::from_mode(0o000))
+                .expect("the directory mode must be settable");
+            // A privileged user can still search it; skip that case then.
+            if fs::symlink_metadata(unsearchable.join("probe"))
+                .is_err_and(|e| e.kind() == io::ErrorKind::PermissionDenied)
+            {
+                cases.push((
+                    unsearchable.join("result.json"),
+                    Vec::new(),
+                    "output_not_accessible",
+                ));
+            }
+            unsearchable
+        };
         #[cfg(unix)]
         let read_only = {
             use std::os::unix::fs::PermissionsExt;
@@ -1414,7 +1598,7 @@ mod tests {
                 Err(Failure {
                     code: 5,
                     reason,
-                    kept_output: None
+                    fallback: None
                 }),
                 "{target:?}"
             );
@@ -1433,6 +1617,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert!(temporaries(&read_only).is_empty());
             fs::set_permissions(&read_only, fs::Permissions::from_mode(0o755)).ok();
+            fs::set_permissions(&unsearchable, fs::Permissions::from_mode(0o755)).ok();
         }
         fs::remove_dir_all(&dir).ok();
     }
@@ -1487,7 +1672,9 @@ mod tests {
         assert_eq!(sends.load(Ordering::SeqCst), 2);
         let failure = result.expect_err("the rename over a directory fails");
         assert_eq!((failure.code, failure.reason), (5, "output_rename_failed"));
-        let kept = failure.kept_output.expect("the temporary file is reported");
+        let Some(Fallback::File(kept)) = failure.fallback else {
+            panic!("the temporary file is reported");
+        };
         assert_eq!(kept.parent(), output.parent());
         assert_eq!(temporaries(&dir), std::slice::from_ref(&kept));
         let written: Value =
@@ -1502,6 +1689,193 @@ mod tests {
                 .all(|r| r["http_status"] == 503 && r["body"] == "private_unavailable_canary")
         );
         assert_eq!(written["assist"]["amount"]["outcome"], "request_failed");
+    }
+
+    /// Both scripted 503 bodies are in the result.
+    fn assert_every_body(result: &[u8]) {
+        let result: Value = serde_json::from_slice(result).expect("the result is complete JSON");
+        let responses = result["jev_responses"].as_array().expect("responses");
+        assert_eq!(responses.len(), 2);
+        assert!(
+            responses
+                .iter()
+                .all(|r| r["http_status"] == 503 && r["body"] == "private_unavailable_canary")
+        );
+        assert_eq!(result["assist"]["amount"]["outcome"], "request_failed");
+    }
+
+    /// The kept file reported by `failure`, checked to hold the whole result.
+    fn kept_file(failure: &Failure) -> (PathBuf, Vec<u8>) {
+        let Some(Fallback::File(kept)) = &failure.fallback else {
+            panic!("a kept file is reported: {:?}", failure.fallback.is_some());
+        };
+        let bytes = fs::read(kept).expect("the reported file exists");
+        assert_every_body(&bytes);
+        (kept.clone(), bytes)
+    }
+
+    /// Runs `fill --remote` with `faults` on the next file writes and
+    /// `current` in place of the working directory, resetting both after.
+    fn fill_remote_seamed(
+        faults: &[seam::WriteFault],
+        current: Option<PathBuf>,
+        pdf: &Path,
+        form: &Path,
+        output: &Path,
+        before_first: impl FnOnce(),
+    ) -> Failure {
+        seam::set(faults, current);
+        let sends = Arc::new(AtomicU32::new(0));
+        let result = fill_remote_with(pdf, form, output, &sends, before_first);
+        seam::set(&[], None);
+        assert_eq!(sends.load(Ordering::SeqCst), 2);
+        let failure = result.expect_err("the result cannot replace the target");
+        assert_eq!(failure.code, 5);
+        assert!(!output.exists());
+        failure
+    }
+
+    #[test]
+    fn a_temporary_output_deleted_mid_run_is_rewritten_to_a_verified_file() {
+        let (dir, pdf, form) = fill_inputs("fill-remote-temporary-deleted");
+        let output = dir.join("result.json");
+        let failure = fill_remote_seamed(&[], None, &pdf, &form, &output, || {
+            for temporary in temporaries(&dir) {
+                fs::remove_file(temporary).expect("the temporary file can be deleted");
+            }
+        });
+        assert_eq!(failure.reason, "output_rename_failed");
+        let (kept, _) = kept_file(&failure);
+        assert_eq!(kept.parent(), Some(dir.as_path()));
+        assert_eq!(temporaries(&dir), [kept]);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_removed_output_directory_falls_back_to_the_working_directory_then_stderr() {
+        let (dir, pdf, form) = fill_inputs("fill-remote-directory-removed");
+        let current = dir.join("current");
+        fs::create_dir(&current).expect("the stand-in working directory is creatable");
+        for working in [current.clone(), dir.join("current-missing")] {
+            let out = dir.join("out");
+            fs::create_dir(&out).expect("the output directory is creatable");
+            let output = out.join("result.json");
+            let failure =
+                fill_remote_seamed(&[], Some(working.clone()), &pdf, &form, &output, || {
+                    fs::remove_dir_all(&out).expect("the output directory can be removed");
+                });
+            assert_eq!(failure.reason, "output_rename_failed", "{working:?}");
+            if working == current {
+                let (kept, _) = kept_file(&failure);
+                assert_eq!(kept.parent(), Some(current.as_path()));
+                fs::remove_file(kept).expect("the kept file can be removed");
+            } else {
+                let Some(Fallback::Stderr(bytes)) = &failure.fallback else {
+                    panic!("no file can hold the result, so it goes to stderr");
+                };
+                assert_every_body(bytes);
+            }
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_failed_write_is_rewritten_to_a_verified_file_or_handed_to_stderr() {
+        use seam::WriteFault::{Fail, Short};
+        let (dir, pdf, form) = fill_inputs("fill-remote-write-failed");
+        let current = dir.join("current");
+        fs::create_dir(&current).expect("the stand-in working directory is creatable");
+        let output = dir.join("result.json");
+        // A short write that reports success is caught only by verification.
+        for (faults, kept_in) in [
+            (&[Fail][..], Some(&dir)),
+            (&[Fail, Short], Some(&current)),
+            (&[Fail, Fail, Fail], None),
+            (&[Fail, Short, Short], None),
+        ] {
+            let failure =
+                fill_remote_seamed(faults, Some(current.clone()), &pdf, &form, &output, || {});
+            assert_eq!(failure.reason, "output_write_failed");
+            match kept_in {
+                Some(directory) => {
+                    let (kept, bytes) = kept_file(&failure);
+                    assert_eq!(kept.parent(), Some(directory.as_path()));
+                    assert_eq!(
+                        fs::metadata(&kept).expect("the kept file exists").len(),
+                        bytes.len() as u64
+                    );
+                }
+                None => {
+                    let Some(Fallback::Stderr(bytes)) = &failure.fallback else {
+                        panic!("no file holds the result, so it goes to stderr");
+                    };
+                    assert_every_body(bytes);
+                }
+            }
+            // Incomplete files are left in place but never reported.
+            for temporary in temporaries(&dir).into_iter().chain(temporaries(&current)) {
+                fs::remove_file(temporary).expect("the temporary file can be removed");
+            }
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_failure_names_a_kept_file_or_writes_the_unsaved_result_to_stderr() {
+        let failure = |fallback| Failure {
+            code: 5,
+            reason: "output_rename_failed",
+            fallback: Some(fallback),
+        };
+        let mut stderr = Vec::new();
+        report_failure(
+            &failure(Fallback::File(PathBuf::from("out/.voltfill-1-0.tmp"))),
+            false,
+            &mut stderr,
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&stderr).expect("one JSON error"),
+            json!({"error":"output_rename_failed","output_kept":"out/.voltfill-1-0.tmp"})
+        );
+        // The result's bytes are written unchanged inside one JSON object,
+        // whether or not the error is also logged.
+        let result = b"{\n  \"z\": 1,\n  \"jev_responses\": [{\"body\": \"private_canary\"}]\n}\n";
+        for logging in [false, true] {
+            let mut stderr = Vec::new();
+            report_failure(
+                &failure(Fallback::Stderr(result.to_vec())),
+                logging,
+                &mut stderr,
+            );
+            assert!(
+                stderr
+                    .windows(result.len())
+                    .any(|window| window == result.as_slice())
+            );
+            let report: Value = serde_json::from_slice(&stderr).expect("one JSON object");
+            assert_eq!(report["error"], "output_rename_failed");
+            assert_eq!(
+                report["result"],
+                serde_json::from_slice::<Value>(result).expect("the result is JSON")
+            );
+            assert_eq!(report.as_object().expect("an object").len(), 2);
+        }
+        // A closed stderr does not panic.
+        struct Closed;
+        impl Write for Closed {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::ErrorKind::BrokenPipe.into())
+            }
+        }
+        report_failure(
+            &failure(Fallback::Stderr(result.to_vec())),
+            false,
+            &mut Closed,
+        );
+        report_failure(&failure(Fallback::File(PathBuf::new())), false, &mut Closed);
     }
 
     #[cfg(unix)]

@@ -59,7 +59,7 @@ voltfill fill input.pdf examples/forms/invoice.json --remote -o result.json
 - 結果には `model`・`assist`（項目ごとの質問ID・`outcome`・選ばれたキー）・`usage`・`jev_responses` が加わります。`jev_responses` は再試行・エラー・不完全な本文を含む全試行の受信本文です。
 - `outcome` は、回答を得た場合が `selected`・`none_selected`・`not_unique_maximum` です。失敗には `answer_invalid`・`request_failed`・`budget_exhausted`（上限に達したか予算が停止していて、そのバッチかその再試行を送らなかった）・`usage_exceeded_budget`・`deadline_exceeded`・`request_too_large`・`cancelled` があります。`usage_exceeded_budget` は、受信して解析できた回答の使用量が予約か費用上限を超えた場合です。その回答は使わず（本文は残します）、以降のバッチも送りません。`cancelled` はライブラリの呼び出し側が中止させた場合で、CLIからは発生しません。
 - `--model`・`--max-attempts`・`--execution-config FILE` が使えます。バッチは1件ずつ送ります。送信回数（`max_requests`）・費用・本文量・期限の上限は全バッチと再試行の合計に適用します。試行回数（`--max-attempts`）はバッチごとで、各試行も送信回数に数えます。トークンの上限は1試行ごと（`input_tokens_per_attempt`）と1秒あたり（`input_tokens_per_second`）です。
-- 送った項目がすべて失敗で終わった場合も、全受信本文を含む結果を書き出してから終了コード4（`fill_assist_all_failed`）を返します。書き出せない出力先は送信前に止めます（[出力先](#output)）。項目が `ambiguous`・`not_found` のまま残っても終了コードは0です（送った項目がすべて `not_unique_maximum` の場合も含みます。`--remote` なしの `fill` と同じく、各項目の `status` で確認します）。
+- 送った項目がすべて失敗で終わった場合も、全受信本文を含む結果を書き出してから終了コード4（`fill_assist_all_failed`）を返します。書き出せないと事前に分かる出力先は送信前に止めます（[出力先](#output)）。項目が `ambiguous`・`not_found` のまま残っても終了コードは0です（送った項目がすべて `not_unique_maximum` の場合も含みます。`--remote` なしの `fill` と同じく、各項目の `status` で確認します）。
 - 模擬応答でのみ試験しており、実APIでの精度は未測定です。confidence・確率は校正済みの正答確率ではありません。
 
 接続先とキーを設定し（[実APIの利用](#environment)）、PDFと抽出定義を渡します。
@@ -99,8 +99,17 @@ voltfill run input.pdf examples/legacy/text-form.json --remote -o result.json
 | `output_is_directory`・`output_not_regular_file` | 既存のディレクトリ、通常ファイル以外 |
 | `input_overwrite_refused` | 入力・設定ファイル・ネイティブライブラリ・`VOLTFILL_JEV_API_KEY_FILE` と同じファイル（キーファイルはパスだけを比べ、中身は読みません） |
 | `output_directory_not_found`・`output_not_writable` | ディレクトリがない、書き込めない |
+| `output_not_accessible` | 状態を確かめられない（名前が長すぎる、シンボリックリンクが循環している、ディレクトリを検索する権限がないなど） |
 
-結果は一時ファイルに書いてから出力先へ名前を変えて置き換えます。置き換えはリンクをたどらないため、実行中に出力先へ置かれたシンボリックリンクはそれ自体が置き換わり、リンク先は変わりません。結果を書き始める前に止まった場合（送信前のエラーなど）、一時ファイルは削除します。書き込み開始後に失敗した場合（`output_write_failed`・`output_rename_failed`）は一時ファイルを削除せず、エラーの `output_kept` にそのパスを示します。受信本文を含む結果はそこに残ります（`output_write_failed` では内容が途中までの場合があります）。標準出力には切り替えません。
+結果は一時ファイルに書いてから出力先へ名前を変えて置き換えます。置き換えはリンクをたどらないため、実行中に出力先へ置かれたシンボリックリンクはそれ自体が置き換わり、リンク先は変わりません。結果を書き始める前に止まった場合（送信前のエラーなど）、一時ファイルは削除します。
+
+事前の確認ですべての失敗が分かるわけではありません。変更不可フラグ（`chflags uchg` など）の付いた出力先や、スティッキービット付きディレクトリにあるほかのユーザーの出力先は、送信後の置き換えで `output_rename_failed` になります。結果を書き込めない場合（`output_write_failed`。ディスク不足など）と置き換えられない場合（`output_rename_failed`）は、どちらも終了コード5で、受信本文を含む結果を次の順に残します。
+
+1. 置き換えに失敗し、一時ファイルが結果全体を持ったまま残っていれば、それを残します。
+2. そうでなければ（書き込みの失敗、実行中に一時ファイルや出力先のディレクトリが消えた場合など）、出力先のディレクトリ、次に作業ディレクトリに新しい一時ファイルを作り、結果全体を書き直します。
+3. どのファイルにも書けなければ、標準エラーに `{"error":"<エラー>","result":<結果>}` という1つのJSONで書きます。結果のバイト列は変えません。`-o` 指定時のログは標準出力なので、標準エラーには混ざりません。
+
+1・2では、存在して結果全体の長さを持つと確かめたファイルだけを、エラーのJSON（ログが有効ならエラーのログ）の `output_kept` に示します。3では `output_kept` を付けず、ログが有効ならエラーのログに `result_on_stderr`（標準エラーへの書き込みが成功したか）を付けます。標準出力には切り替えません。書き込みに失敗した一時ファイル（空または途中まで）は受信本文を含みうるため削除せず、`output_kept` にも示さずに残します。シグナル（`SIGTERM`・Ctrl-C など）で強制終了した場合も、権限0600の `.voltfill-<PID>-<番号>.tmp`（空、書き込み中なら途中まで）が残ることがあります。
 
 ## 設定
 
