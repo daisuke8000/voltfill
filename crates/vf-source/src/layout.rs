@@ -28,10 +28,11 @@
 //!   each value cannot be told apart from the start of the next label. Such a
 //!   fragment, a `label：value` fragment and a bare `label：` fragment are
 //!   never read as the value of another label.
-//! - A value fragment followed on its line by a plain fragment closer than
-//!   [`MAX_SPLIT_GAP_EM`] em is marked [`Pair::split`]: the value may be cut
-//!   short (`住所：` `〒100-0001` `東京都千代田区…`) or followed by another
-//!   value without a delimiter.
+//! - A value fragment followed on its line by a plain fragment, at any
+//!   distance, is marked [`Pair::split`]: the value may be cut short
+//!   (`住所：` `〒100-0001` `東京都千代田区…`) or followed by another value
+//!   without a delimiter. Only a `label：` or `label：value` fragment right
+//!   after the value starts something else (the next pair).
 //! - A value runs over at most [`MAX_VALUE_LINES`] lines; a longer run is
 //!   dropped rather than cut off. Continuation stops at a line that is itself
 //!   a `label：value` pair or ends with a delimiter. Continuation lines of a
@@ -96,11 +97,6 @@ pub const DEFAULT_MAX_PAIRS: usize = 50_000;
 /// sets the em, so a large right fragment (a 30 pt title next to a 10 pt
 /// `氏名：`) does not widen the reach of a small label.
 pub const MAX_DELIMITER_GAP_EM: f64 = 4.0;
-/// A value fragment followed on its line by a plain fragment closer than
-/// this many em (the larger height of the two) may continue in it: a value
-/// split over runs (`〒100-0001` `東京都千代田区…`, `山田` `太郎`) or followed
-/// by a second value without a delimiter. Such a pair is [`Pair::split`].
-pub const MAX_SPLIT_GAP_EM: f64 = 3.0;
 /// Default work units for [`analyze`] (see [`analyze_within`]).
 pub const DEFAULT_MAX_WORK: u64 = 200_000_000;
 
@@ -213,9 +209,9 @@ pub struct Pair {
     pub placement: Placement,
     pub binding: Binding,
     /// A plain fragment (not a `label：` or `label：value` fragment) follows
-    /// the fragment of one of the value's lines on its line, closer than
-    /// [`MAX_SPLIT_GAP_EM`] em: the value may be cut short (split over runs)
-    /// or followed by another value without a delimiter.
+    /// the fragment of one of the value's lines on its line, at any
+    /// distance: the value may be cut short (split over runs) or followed by
+    /// another value without a delimiter.
     pub split: bool,
 }
 
@@ -617,14 +613,13 @@ impl Page<'_> {
     }
 
     /// Whether the fragment at `position` of `line` is followed on the line
-    /// by a plain fragment closer than [`MAX_SPLIT_GAP_EM`] em.
+    /// by a plain fragment, at any distance. A gap says nothing safe: a
+    /// value split over runs can be 3 em or more apart while the delimiter
+    /// still binds its first run.
     fn trailed(&self, line: &Line, position: usize) -> bool {
-        let bbox = self.fragments[line.fragments[position]].bbox;
-        line.fragments.get(position + 1).is_some_and(|&next| {
-            let after = self.fragments[next].bbox;
-            self.kind(next) == Kind::Plain
-                && after.left - bbox.right < MAX_SPLIT_GAP_EM * bbox.height().max(after.height())
-        })
+        line.fragments
+            .get(position + 1)
+            .is_some_and(|&next| self.kind(next) == Kind::Plain)
     }
 
     /// The position in `line` of the plain fragment that continues a value
@@ -1378,9 +1373,19 @@ mod tests {
         assert_eq!(split("氏名"), ("山田".into(), true));
         assert_eq!(split("担当"), ("山田".into(), true));
         // A following `label：value` fragment is the next pair, not the rest
-        // of the value; a fragment MAX_SPLIT_GAP_EM or more away is apart.
+        // of the value.
         assert_eq!(split("電話"), ("03-1234-5678".into(), false));
-        assert_eq!(split("件名"), ("制作費".into(), false));
+        // Changed: a plain fragment at any distance (here 3 em). Before:
+        // only closer than 3 em, so `氏名：` `山田` and `太郎` 3.1 em away
+        // was one value `山田`.
+        assert_eq!(split("件名"), ("制作費".into(), true));
+        let far = [
+            frag("a", "氏名：", [60.0, 100.0, 90.0, 110.0]),
+            frag("b", "山田", [100.0, 100.0, 120.0, 110.0]),
+            frag("c", "太郎", [151.0, 100.0, 171.0, 110.0]),
+        ];
+        let layout = analyze(&far);
+        assert!(find(&layout, &far, "氏名")[0].split);
         // Continuation lines count too.
         let lines = [
             frag("a", "備考：", [60.0, 100.0, 90.0, 110.0]),

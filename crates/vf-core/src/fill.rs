@@ -24,8 +24,8 @@
 //! - (c) One value: the value is a single line ([`Hold::MultiLine`]
 //!   otherwise; a multi-line value ends before a line that reads as one of
 //!   the form's labels), no plain fragment follows the value's fragment on
-//!   its line within [`layout::MAX_SPLIT_GAP_EM`] em ([`Hold::SplitValue`]:
-//!   the value may be split over runs). A text value holds no second value
+//!   its line, at any distance ([`Hold::SplitValue`]: the value may be split
+//!   over runs). A text value holds no second value
 //!   ([`Hold::SeveralValues`]: two phone numbers; two dates or amounts not
 //!   joined by a range mark; a phone number, date or amount right after a
 //!   word that follows other text, as in `山田 太郎 生年月日 1990年1月1日`; a
@@ -248,8 +248,8 @@ pub enum Hold {
     GeometricOnly,
     /// The value spans more than one line.
     MultiLine,
-    /// A plain fragment follows the value's fragment on its line, closer
-    /// than [`layout::MAX_SPLIT_GAP_EM`] em: the value may be cut short (a
+    /// A plain fragment follows the value's fragment on its line, at any
+    /// distance: the value may be cut short (a
     /// value split over runs, `〒100-0001` `東京都千代田区…`) or followed by
     /// another value without a delimiter.
     SplitValue,
