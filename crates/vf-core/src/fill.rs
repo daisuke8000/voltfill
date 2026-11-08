@@ -376,6 +376,12 @@ pub struct FillEvidence {
     /// Display coordinates in PDF points (top-left origin).
     pub bbox: Rect,
     pub precision: Precision,
+    /// The AcroForm field (fully qualified name) whose `/V` this entry is.
+    /// Such an entry has no fragment: `fragment_id` is empty, `start..end`
+    /// covers `text`, and `bbox` is the widget rectangle
+    /// ([`Precision::Widget`]). See [`crate::acroform`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acroform_field: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -402,7 +408,7 @@ pub struct FillCandidate {
 /// the JSON key `candidates`: a scalar field has only value candidates and
 /// a table field only table candidates, never both (checked in debug
 /// builds); the key is written once, from whichever is not empty, and left
-/// out when both are.
+/// out when both are. `acroform` follows and is left out when empty.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FieldFill {
     pub status: FillStatus,
@@ -420,6 +426,9 @@ pub struct FieldFill {
     /// Table fields only: the tables read but not filled, in document
     /// order, serialized as `candidates`.
     pub table_candidates: Vec<TableCandidate>,
+    /// Scalar fields only: AcroForm fields whose name matched the field,
+    /// with every rule they failed ([`crate::acroform`]).
+    pub acroform: Vec<crate::acroform::AcroFormMatch>,
 }
 
 impl FieldFill {
@@ -437,7 +446,7 @@ impl Serialize for FieldFill {
             self.candidates_exclusive(),
             "a field has value or table candidates, never both"
         );
-        let mut out = serializer.serialize_struct("FieldFill", 7)?;
+        let mut out = serializer.serialize_struct("FieldFill", 8)?;
         out.serialize_field("status", &self.status)?;
         match &self.method {
             Some(method) => out.serialize_field("method", method)?,
@@ -462,6 +471,11 @@ impl Serialize for FieldFill {
             out.serialize_field("candidates", &self.candidates)?;
         } else {
             out.skip_field("candidates")?;
+        }
+        if self.acroform.is_empty() {
+            out.skip_field("acroform")?;
+        } else {
+            out.serialize_field("acroform", &self.acroform)?;
         }
         out.end()
     }
@@ -496,6 +510,10 @@ pub struct FillResult {
     pub evaluation_only: bool,
     pub document_id: String,
     pub fields: BTreeMap<String, FieldFill>,
+    /// Whether the document's AcroForm was read, when it has one or reading
+    /// failed ([`crate::acroform`]); absent for text-layer fill.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acroform: Option<crate::acroform::AcroFormSummary>,
 }
 
 /// Match the document's layout pairs against every form field with the
@@ -513,6 +531,7 @@ pub fn fill(document_id: &str, fragments: &[SourceFragment], form: &Form) -> Fil
                 .iter()
                 .map(|field| (field.id.clone(), empty(FillStatus::LimitExceeded)))
                 .collect(),
+            acroform: None,
         }
     })
 }
@@ -544,6 +563,7 @@ pub fn fill_with_limits(
                 .iter()
                 .map(|field| (field.id.clone(), empty(FillStatus::NoText)))
                 .collect(),
+            acroform: None,
         });
     }
     // Whitespace-only splits start with a form label or hint (table column
@@ -636,10 +656,11 @@ pub fn fill_with_limits(
         evaluation_only: true,
         document_id: document_id.into(),
         fields,
+        acroform: None,
     })
 }
 
-fn empty(status: FillStatus) -> FieldFill {
+pub(crate) fn empty(status: FillStatus) -> FieldFill {
     FieldFill {
         status,
         method: None,
@@ -649,6 +670,7 @@ fn empty(status: FillStatus) -> FieldFill {
         rows: None,
         candidates: Vec::new(),
         table_candidates: Vec::new(),
+        acroform: Vec::new(),
     }
 }
 
@@ -885,6 +907,7 @@ impl Context<'_> {
                 text,
                 bbox: span.bbox,
                 precision: span.precision,
+                acroform_field: None,
             });
         }
         let raw = evidence
@@ -2188,6 +2211,35 @@ fn is_phone(run: &str) -> bool {
     bracketed.is_some_and(|groups| {
         groups_ok(&groups) && groups[0].starts_with('0') && (10..=11).contains(&digits)
     })
+}
+
+/// The offline label and type rules, shared with [`crate::acroform`].
+pub(crate) mod rules {
+    use super::{FieldType, Value, normalize_label};
+
+    /// A label's key for condition (a): two labels match exactly (score 1,
+    /// no [`super::Hold`]) when [`super::label_score`] finds equal bases or
+    /// stems and equal qualifiers. Equal bases have equal stems, so that is
+    /// equal keys. `None` when the label has no text.
+    pub(crate) fn label_key(label: &str) -> Option<(String, Vec<String>)> {
+        let label = normalize_label(label);
+        (!label.base.is_empty()).then_some((label.stem, label.qualifiers))
+    }
+
+    /// Whether a label states a scale unit (`売上高（千円）`).
+    pub(crate) fn states_scale(label: &str) -> bool {
+        super::states_scale(&normalize_label(label))
+    }
+
+    /// Whether one text is a unit note (`（単位：千円）`).
+    pub(crate) fn unit_note(text: &str) -> bool {
+        super::unit_note(text)
+    }
+
+    /// The whole-text normalization of condition (d); `None` for text.
+    pub(crate) fn normalize_value(field_type: FieldType, raw: &str) -> Option<Value> {
+        super::normalize_value(field_type, raw)
+    }
 }
 
 #[cfg(test)]
