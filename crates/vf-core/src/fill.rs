@@ -30,8 +30,9 @@
 //!   joined by a range mark; a phone number, date or amount right after a
 //!   word that follows other text, as in `山田 太郎 生年月日 1990年1月1日`; a
 //!   later word that is one of the form's labels, as in `山田 太郎 所属
-//!   経理部`; or a word with its own value after a phone number, date or
-//!   amount, as in `03-1234-5678 担当 山田`).
+//!   経理部` or `山田 太郎/所属 経理部`; or a word with its own value after a
+//!   phone number, date or amount, as in `03-1234-5678 担当 山田`,
+//!   `03-1234-5678 内線123` or `03-1234-5678 担当山田`).
 //! - (d) Type: date, amount and number values match the type's grammar as a
 //!   whole (otherwise the field is `invalid`). Amounts and numbers are not
 //!   normalized when the label states a scale unit (`売上高（千円）`) or
@@ -1498,13 +1499,18 @@ const RANGE_MARKS: [&str; 6] = ["〜", "~", "-", "\u{2212}", "\u{2013}", "\u{201
 ///   follows other text: a second label with its value, as in `山田 太郎
 ///   生年月日 1990年1月1日`. A word at the very start (`TEL 03-1234-5678`)
 ///   is not a second label;
-/// - a word after whitespace that reads as one of the form's labels or
-///   hints (`labels`, as [`Label::stem`]): a second field without a
-///   delimiter, as in `山田 太郎 所属 経理部` when the form has `所属`;
-/// - a phone number, date or amount followed by whitespace, a word,
-///   whitespace and more text: a second label with its value, as in
-///   `03-1234-5678 担当 山田` or `03-1234-5678 内線 123` (an extension
-///   cannot be told apart from another label's value).
+/// - a word after the first one (words split at whitespace, `/`, `・`,
+///   `、` and `,`) that reads as one of the form's labels or hints
+///   (`labels`, as [`Label::stem`]): a second field without a delimiter, as
+///   in `山田 太郎 所属 経理部` or `山田 太郎/所属 経理部` when the form has
+///   `所属`;
+/// - a phone number, date or amount followed by whitespace and a word that
+///   is followed by whitespace and more text, directly by a digit, or by
+///   nothing when it has more than [`MAX_TAIL_WORD_CHARS`] characters
+///   ([`labelled_after`]): a second label with its value, as in
+///   `03-1234-5678 担当 山田`, `03-1234-5678 担当山田`, `03-1234-5678 内線
+///   123` or `03-1234-5678 内線123` (an extension cannot be told apart from
+///   another label's value).
 ///
 /// The scan is linear in the text; phone number scans are charged to
 /// `budget` as they run (see [`phone_at`]), so a deadline stops it.
@@ -1514,7 +1520,8 @@ fn several_values(
     budget: &mut Budget,
 ) -> Result<bool, BudgetError> {
     let second_field = text
-        .split_whitespace()
+        .split(|c: char| c.is_whitespace() || WORD_SEPARATORS.contains(&c))
+        .filter(|word| !word.is_empty())
         .skip(1)
         .any(|word| labels.contains(&normalize_label(word).stem));
     if second_field {
@@ -1545,9 +1552,21 @@ fn several_values(
             .any(|&(kind, start, end)| after_label(text, start) || labelled_after(text, kind, end)))
 }
 
+/// Characters that separate words besides whitespace (after NFKC), for the
+/// second-field check of [`several_values`].
+const WORD_SEPARATORS: [char; 4] = ['/', '・', '、', ','];
+
+/// Longest word (letters only) that may end a value after a phone number,
+/// date or amount (`代表`, `税込`); a longer one may be a label and its
+/// value without a space (`担当山田`).
+const MAX_TAIL_WORD_CHARS: usize = 2;
+
 /// Whether the text after a phone number, date or amount ending at byte
-/// `end` (and an amount's `円`) is whitespace, a word (letters only),
-/// whitespace and more text: a second label with its own value.
+/// `end` (and an amount's `円`) is whitespace and a word (letters only)
+/// followed by whitespace and more text (`担当 山田`), directly by a digit
+/// (`内線123`), or by nothing when the word has more than
+/// [`MAX_TAIL_WORD_CHARS`] characters (`担当山田`): a second label with its
+/// own value.
 fn labelled_after(text: &str, kind: Shape, end: usize) -> bool {
     let mut rest = &text[end..];
     if kind == Shape::Amount {
@@ -1560,10 +1579,13 @@ fn labelled_after(text: &str, kind: Shape, end: usize) -> bool {
         return false;
     };
     let after = word.trim_start_matches(char::is_alphabetic);
-    after.len() < word.len()
-        && after
+    let letters = word[..word.len() - after.len()].chars().count();
+    letters > 0
+        && (after
             .strip_prefix(char::is_whitespace)
             .is_some_and(|value| !value.trim_start().is_empty())
+            || after.starts_with(|c: char| c.is_ascii_digit())
+            || (after.trim().is_empty() && letters > MAX_TAIL_WORD_CHARS))
 }
 
 /// Whether the text before byte `start` ends with a word that follows other
@@ -2851,6 +2873,19 @@ mod tests {
             ("03-1234-5678 内線 123", true),
             ("2026年11月8日 午前 10時", true),
             ("1,000円 送料 500", true),
+            // Before: false. A word followed directly by digits, a longer
+            // word (a label and its value without a space), or a form label
+            // after `/`, `・`, `、` or `,`.
+            ("03-1234-5678 内線123", true),
+            ("03-1234-5678 担当山田", true),
+            ("2026年11月8日 午前10時", true),
+            ("1,000円 送料500", true),
+            ("山田 太郎/所属 経理部", true),
+            // Not split inside a word: `所属経理部` is no form label.
+            ("山田太郎・所属経理部", false),
+            ("山田 太郎、所属 経理部", true),
+            ("山田 太郎,所属", true),
+            ("山田/所属", true),
             // One value: no form label after the first word, nothing after
             // the word, or no word.
             ("山田 太郎", false),
@@ -2862,6 +2897,8 @@ mod tests {
             ("¥12,100 (税込)", false),
             ("1,000円 税込", false),
             ("お支払いは11月30日まで 有効", false),
+            ("2026年11月8日 必着", false),
+            ("所属/経理部", false),
         ] {
             assert_eq!(check(text), several, "{text}");
         }
@@ -2893,6 +2930,30 @@ mod tests {
         assert_eq!(held(&result, "tel"), Some(Hold::SeveralValues));
         assert_eq!(result.fields["department"].status, FillStatus::NotFound);
         assert_eq!(result.fields["person"].raw.as_deref(), Some("佐藤 花子"));
+        // Before: filled with the whole text (no space before the second
+        // value, or a `/` before the second label).
+        for text in [
+            "電話：03-1234-5678 内線123",
+            "電話：03-1234-5678 担当山田",
+            "氏名：山田 太郎/所属 経理部",
+        ] {
+            let fragments = [frag("a", text, [60.0, 100.0, 220.0, 110.0])];
+            let result = fill(
+                "doc",
+                &fragments,
+                &form(json!({"fields":[
+                    {"id":"tel","label":"電話"},
+                    {"id":"name","label":"氏名"},
+                    {"id":"department","label":"所属"}
+                ]})),
+            );
+            let id = if text.starts_with("電話") {
+                "tel"
+            } else {
+                "name"
+            };
+            assert_eq!(held(&result, id), Some(Hold::SeveralValues), "{text}");
+        }
     }
 
     #[test]
