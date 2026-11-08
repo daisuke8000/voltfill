@@ -772,3 +772,97 @@ fn acroform_matching_spends_the_fill_budget() {
     );
     assert_eq!(result.err(), Some(FillError::DeadlineExceeded));
 }
+
+#[test]
+fn password_fields_are_never_committed() {
+    let stored = field(
+        "暗証番号",
+        "Tx",
+        dictionary! { "V" => utf16("1234"), "Ff" => 1 << 13 },
+    );
+    let empty = field("暗証番号", "Tx", dictionary! { "Ff" => 1 << 13 });
+    for (dict, reason, issues) in [
+        (
+            stored,
+            AcroFormHold::FieldIssues,
+            vec![FieldIssue::PasswordValueWithheld],
+        ),
+        (empty, AcroFormHold::ValueAbsent, Vec::new()),
+    ] {
+        let bytes = build(&[], vec![dict], dictionary! {});
+        let fill = one(&bytes, &label("pin", "暗証番号", "text"));
+        assert_not_filled(&fill);
+        assert_eq!(reasons(&fill), [reason]);
+        assert_eq!(fill.acroform[0].issues, issues);
+        assert_eq!(fill.acroform[0].raw, None);
+    }
+}
+
+fn named(tu: &str, name: &str, value: &str) -> Dictionary {
+    let mut dict = text_field(name, value);
+    dict.set("TU", utf16(tu));
+    dict
+}
+
+#[test]
+fn several_fields_keep_a_text_layer_value_only_when_all_agree() {
+    let runs = [run(72.0, 200.0, "氏名：山田太郎")];
+    let form = label("name", "氏名", "text");
+    let differ = build(
+        &runs,
+        vec![
+            named("氏名", "a", "佐藤花子"),
+            named("氏名", "b", "山田太郎"),
+        ],
+        dictionary! {},
+    );
+    let fill = one(&differ, &form);
+    assert_not_filled(&fill);
+    assert_eq!(fill.status, FillStatus::Ambiguous);
+    assert!(fill.candidates.is_empty() && fill.evidence.is_empty());
+
+    let agree = build(
+        &runs,
+        vec![
+            named("氏名", "a", "山田太郎"),
+            named("氏名", "b", "山田 太郎"),
+        ],
+        dictionary! {},
+    );
+    let fill = one(&agree, &form);
+    assert_eq!(fill.status, FillStatus::Filled);
+    assert_eq!(fill.method, Some("label_match"));
+    assert_eq!(fill.raw.as_deref(), Some("山田太郎"));
+    assert_eq!(fill.acroform.len(), 2);
+}
+
+#[test]
+fn offered_acroform_candidates_come_before_text_layer_candidates() {
+    let bytes = build(
+        &[
+            run(72.0, 200.0, "氏名：山田太郎"),
+            run(72.0, 300.0, "氏名：佐藤花子"),
+        ],
+        vec![
+            named("氏名", "a", "鈴木一郎"),
+            named("氏名", "b", "田中次郎"),
+        ],
+        dictionary! {},
+    );
+    let fill = one(&bytes, &label("name", "氏名", "text"));
+    assert_eq!(fill.status, FillStatus::Ambiguous);
+    let found: Vec<(&str, Placement)> = fill
+        .candidates
+        .iter()
+        .map(|c| (c.raw.as_str(), c.placement))
+        .collect();
+    assert_eq!(
+        found[..2],
+        [
+            ("鈴木一郎", Placement::Widget),
+            ("田中次郎", Placement::Widget)
+        ]
+    );
+    assert_eq!(found.len(), 4);
+    assert!(found[2..].iter().all(|(_, p)| *p != Placement::Widget));
+}
