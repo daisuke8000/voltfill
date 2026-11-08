@@ -349,6 +349,9 @@ pub fn analyze_within(
     })
 }
 
+/// A value's spans and, per line, whether it is [`Page::trailed`].
+type Value = (Vec<Span>, Vec<bool>);
+
 struct Pairs {
     list: Vec<Pair>,
     max: usize,
@@ -589,7 +592,7 @@ impl Page<'_> {
         first: Span,
         column: Column,
         budget: &mut Budget,
-    ) -> Result<Option<(Vec<Span>, Vec<bool>)>, BudgetError> {
+    ) -> Result<Option<Value>, BudgetError> {
         let page = self.lines[line].page;
         let mut last = first.bbox;
         let mut split = vec![self.trailed(&self.lines[line], position)];
