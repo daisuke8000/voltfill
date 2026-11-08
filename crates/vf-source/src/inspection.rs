@@ -1,4 +1,37 @@
 //! PDF inspection and bounded source diagnostics.
+//!
+//! # Vertical and rotated text
+//!
+//! Layout reads only horizontal text, so text that a renderer does not draw
+//! left to right never becomes `Usable`:
+//!
+//! - A run whose rendered baseline (pdf-inspector's `TextItem::rotation` in
+//!   the Display frame, where any re-basing of the page frame is already
+//!   undone) is more than [`ROTATION_TOLERANCE_DEGREES`] from 0° is
+//!   `Unknown` (`rotated_text_present`). A run turned by a right angle is
+//!   marked on its own: pdf-inspector never merges a run that is not upright
+//!   in its frame into an upright one. An oblique run can be merged into a
+//!   level neighbour that then reports the neighbour's angle, so one oblique
+//!   run leaves the whole page `Unknown` (`oblique_text_present`).
+//! - A page pdf-inspector re-based because most of its text runs vertically
+//!   is `Unknown` as a whole (`page_text_rotated`): its runs were merged and
+//!   spaced in the turned frame, which does not match the rendered page.
+//!   The one exception is a turn equal to the page's `/Rotate`
+//!   (`PageRotation::Ccw`, runs reading bottom to top, on a `/Rotate 90`
+//!   page; `PageRotation::Cw` on a `/Rotate 270` page): both are then the
+//!   same quarter turn of the sheet, so the frame pdf-inspector merged runs
+//!   in is the rendered page up to a shift, as on an upright page.
+//! - pdf-inspector ignores a composite font's writing mode and lays vertical
+//!   glyphs out horizontally, so a page whose resources hold a vertical-mode
+//!   font is `Unknown` as a whole (`vertical_writing_mode_unsupported`).
+//!   Fragments cannot be matched to fonts: `TextItem::font_tag` keeps only
+//!   the first run's tag after merging, a tag names different fonts in a
+//!   page's and a Form XObject's resources, and misplaced vertical glyphs
+//!   can be merged into neighbouring runs. A scan stopped by its bounds also
+//!   leaves the page `Unknown` (`writing_mode_scan_incomplete`) and never
+//!   fails the inspection.
+//!
+//! Vertical layout itself is not supported yet.
 use crate::metadata;
 use crate::source::{PageDiagnostic, Quality, SourceFragment};
 
@@ -13,12 +46,27 @@ pub struct InspectionTimings {
 }
 
 use crate::geometry::{PageGeometry, Rect, Rotation};
+use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 use pdf_inspector::types::ItemType;
-use pdf_inspector::{PdfOptions, PositionFrame, ProcessMode, TextItem};
+use pdf_inspector::{PageRotation, PdfOptions, PositionFrame, ProcessMode, TextItem};
 use serde::Serialize;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
 use thiserror::Error;
+
+/// A rendered baseline within this many degrees of 0° counts as horizontal;
+/// within this many degrees of another right angle it counts as turned.
+const ROTATION_TOLERANCE_DEGREES: f64 = 1.0;
+/// Form XObject nesting followed below a page's own resources by the
+/// writing-mode font scan.
+const MAX_FORM_DEPTH: usize = 8;
+/// Resource dictionaries, font entries and XObject entries the writing-mode
+/// scan visits per page.
+const MAX_FONT_SCAN_NODES_PER_PAGE: usize = 4096;
+/// `/UseCMap` links followed from one embedded CMap.
+const MAX_USECMAP_CHAIN: usize = 4;
+/// Embedded CMap program bytes decoded per document.
+const MAX_CMAP_BYTES_PER_DOCUMENT: usize = 8 * 1024 * 1024;
 
 /// Application inspection ceilings; these do not sandbox allocations inside the PDF parser.
 /// A zero recovery-page limit disables fallback page inspection.
@@ -69,6 +117,16 @@ pub struct DocumentSnapshot {
 /// API call for all supported pages. Recovery is bounded by max_recovery_pages.
 /// Limits bound application work and input; they do not sandbox the parser or
 /// bound all allocations inside upstream. No OCR or renderer is invoked.
+///
+/// Vertical and rotated text never becomes `Usable`: a run whose rendered
+/// baseline is more than 1° from horizontal is `Unknown`
+/// (`rotated_text_present`); an oblique run (`oblique_text_present`), a page
+/// re-based for mostly vertical text unless the turn equals its `/Rotate`
+/// (`page_text_rotated`), a page whose resources hold a vertical writing
+/// mode font (`vertical_writing_mode_unsupported`) and a page whose font
+/// scan hit its bounds (`writing_mode_scan_incomplete`) are `Unknown` as a
+/// whole. The font scan reuses the metadata load and is bounded per page and
+/// per document. Vertical layout itself is not supported yet.
 pub fn inspect(bytes: &[u8], limits: PdfLimits) -> Result<DocumentSnapshot, PdfError> {
     use sha2::{Digest, Sha256};
 
@@ -89,6 +147,8 @@ pub fn inspect(bytes: &[u8], limits: PdfLimits) -> Result<DocumentSnapshot, PdfE
     })?;
     let mut geometries = BTreeMap::new();
     let mut pages = Vec::with_capacity(tree.len());
+    let mut font_scan = FontScan::new(&doc);
+    let mut writing_modes = BTreeMap::new();
     for (index, object) in tree.iter().enumerate() {
         let page = index as u32 + 1;
         let geometry = metadata::page_metadata(&doc, *object).ok().and_then(|m| {
@@ -120,6 +180,8 @@ pub fn inspect(bytes: &[u8], limits: PdfLimits) -> Result<DocumentSnapshot, PdfE
         ];
         if let Some(geometry) = geometry {
             geometries.insert(page, geometry);
+            // Pages without geometry yield no fragments, so they need no scan.
+            writing_modes.insert(page, font_scan.page(*object));
         } else {
             reasons.push("unsupported_metadata".into());
         }
@@ -153,14 +215,18 @@ pub fn inspect(bytes: &[u8], limits: PdfLimits) -> Result<DocumentSnapshot, PdfE
     let position_start = Instant::now();
     let filter: HashSet<u32> = geometries.keys().copied().collect();
     let mut items_by_page: BTreeMap<u32, Vec<TextItem>> = BTreeMap::new();
+    // Pages pdf-inspector re-based for mostly vertical text. This is the call
+    // `extract_text_with_positions_mem_in_frame` wraps, so items are the same.
+    let mut turns: HashMap<u32, PageRotation> = HashMap::new();
     if !filter.is_empty() {
         timings.parser_load_calls += 1;
-        match pdf_inspector::extract_text_with_positions_mem_in_frame(
+        match pdf_inspector::extract_text_with_positions_and_rotations_mem_in_frame(
             bytes,
             Some(&filter),
             PositionFrame::Display,
         ) {
-            Ok(items) => {
+            Ok((items, page_turns)) => {
+                turns.extend(page_turns);
                 // Out-of-filter pages imply a disagreement, not invented metadata.
                 if items.iter().any(|i| !filter.contains(&i.page)) {
                     geometries.clear();
@@ -187,13 +253,16 @@ pub fn inspect(bytes: &[u8], limits: PdfLimits) -> Result<DocumentSnapshot, PdfE
                     }
                     timings.parser_load_calls += 1;
                     let one = HashSet::from([page.page]);
-                    match pdf_inspector::extract_text_with_positions_mem_in_frame(
+                    match pdf_inspector::extract_text_with_positions_and_rotations_mem_in_frame(
                         bytes,
                         Some(&one),
                         PositionFrame::Display,
                     ) {
-                        Ok(items) if items.iter().all(|i| i.page == page.page) => {
+                        Ok((items, page_turns)) if items.iter().all(|i| i.page == page.page) => {
                             items_by_page.insert(page.page, items);
+                            if let Some(&turn) = page_turns.get(&page.page) {
+                                turns.insert(page.page, turn);
+                            }
                         }
                         _ => page.reason_codes.push("positions_failed".into()),
                     }
@@ -236,7 +305,28 @@ pub fn inspect(bytes: &[u8], limits: PdfLimits) -> Result<DocumentSnapshot, PdfE
             }
             Ok(_) => Quality::Usable,
         };
+        // Conditions that leave every fragment of the page at most Unknown.
+        let mut page_unknown = Vec::new();
+        match writing_modes.get(&page.page) {
+            Some(WritingMode::Vertical) => page_unknown.push("vertical_writing_mode_unsupported"),
+            Some(WritingMode::Unverified) => page_unknown.push("writing_mode_scan_incomplete"),
+            Some(WritingMode::Horizontal) | None => {}
+        }
+        if turns
+            .get(&page.page)
+            .is_some_and(|&turn| !turn_matches_display(turn, geometry.rotation))
+        {
+            page_unknown.push("page_text_rotated");
+        }
+        let base_quality = if base_quality == Quality::Usable && !page_unknown.is_empty() {
+            Quality::Unknown
+        } else {
+            base_quality
+        };
+        page.reason_codes
+            .extend(page_unknown.into_iter().map(String::from));
         page.quality = base_quality;
+        let mut oblique = false;
         let first_fragment = fragments.len();
         let mut page_hash = document_hash.clone();
         page_hash.update(page.page.to_be_bytes());
@@ -277,6 +367,20 @@ pub fn inspect(bytes: &[u8], limits: PdfLimits) -> Result<DocumentSnapshot, PdfE
             } else if quality == Quality::Unknown && page.quality == Quality::Usable {
                 page.quality = Quality::Unknown;
             }
+            // A turned run is left out on its own; an oblique one taints the
+            // page below because it may hide inside a level neighbour.
+            let quality = match baseline(item.rotation) {
+                Baseline::Level => quality,
+                turn => {
+                    page.reason_codes.push("rotated_text_present".into());
+                    oblique |= turn == Baseline::Oblique;
+                    if quality == Quality::Usable {
+                        Quality::Unknown
+                    } else {
+                        quality
+                    }
+                }
+            };
             let mut hash = page_hash.clone();
             hash.update((item_index as u64).to_be_bytes());
             fragments.push(SourceFragment {
@@ -287,6 +391,12 @@ pub fn inspect(bytes: &[u8], limits: PdfLimits) -> Result<DocumentSnapshot, PdfE
                 bbox,
                 quality,
             });
+        }
+        if oblique {
+            page.reason_codes.push("oblique_text_present".into());
+            if page.quality == Quality::Usable {
+                page.quality = Quality::Unknown;
+            }
         }
         if page.quality != Quality::Usable {
             for fragment in &mut fragments[first_fragment..] {
@@ -302,6 +412,10 @@ pub fn inspect(bytes: &[u8], limits: PdfLimits) -> Result<DocumentSnapshot, PdfE
             page.quality = Quality::Unknown;
             page.reason_codes.push("image_or_no_text".into());
         } else if !page.text_available {
+            // Reachable with a Usable page only when every run is turned.
+            if page.quality == Quality::Usable {
+                page.quality = Quality::Unknown;
+            }
             page.reason_codes.push("no_usable_source_runs".into());
         }
         page.reason_codes.sort();
@@ -343,4 +457,331 @@ fn white_paint(item: &TextItem) -> bool {
         Some(2 | 6) => item.fill_color == white && item.stroke_color == white,
         _ => false,
     }
+}
+
+/// How a run's rendered baseline lies relative to the page's x axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Baseline {
+    /// Within the tolerance of 0°: ordinary left-to-right text.
+    Level,
+    /// Within the tolerance of 90°, 180° or 270°.
+    Turned,
+    /// Any other angle, including a non-finite one.
+    Oblique,
+}
+
+/// Classify a Display-frame `TextItem::rotation` (degrees, counter-clockwise).
+fn baseline(rotation: f32) -> Baseline {
+    if !rotation.is_finite() {
+        return Baseline::Oblique;
+    }
+    let degrees = f64::from(rotation).rem_euclid(360.0);
+    let off_right_angle = (degrees - (degrees / 90.0).round() * 90.0).abs();
+    if degrees <= ROTATION_TOLERANCE_DEGREES || degrees >= 360.0 - ROTATION_TOLERANCE_DEGREES {
+        Baseline::Level
+    } else if off_right_angle <= ROTATION_TOLERANCE_DEGREES {
+        Baseline::Turned
+    } else {
+        Baseline::Oblique
+    }
+}
+
+/// Whether pdf-inspector's turned frame is the rendered page up to a shift.
+/// `Ccw` maps `(x, y)` to `(y, -x)` and `/Rotate 90` turns the sheet the same
+/// way clockwise; `Cw` and `/Rotate 270` likewise.
+fn turn_matches_display(turn: PageRotation, rotation: Rotation) -> bool {
+    matches!(
+        (turn, rotation),
+        (PageRotation::Upright, _)
+            | (PageRotation::Ccw, Rotation::Deg90)
+            | (PageRotation::Cw, Rotation::Deg270)
+    )
+}
+
+/// Writing mode of the fonts a page's resources can select.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WritingMode {
+    Horizontal,
+    /// A composite font with vertical writing mode is present.
+    Vertical,
+    /// The scan stopped at a bound or an unreadable structure.
+    Unverified,
+}
+
+/// The scan could not classify every font.
+#[derive(Debug, Clone, Copy)]
+struct Unfinished;
+
+/// `Ok(true)` once a vertical writing mode font is found.
+type Found = Result<bool, Unfinished>;
+
+/// Bounded scan for vertical writing mode fonts. Only page resources and Form
+/// XObjects are followed: pdf-inspector reads no other text. A font in the
+/// resources counts as used. Results are memoized per font and CMap object.
+struct FontScan<'a> {
+    doc: &'a Document,
+    fonts: HashMap<ObjectId, Found>,
+    cmaps: HashMap<ObjectId, Found>,
+    cmap_bytes: usize,
+}
+
+/// Per-page bounds: visited nodes and objects (for cycles).
+#[derive(Default)]
+struct PageScan {
+    nodes: usize,
+    visited: HashSet<ObjectId>,
+}
+
+impl PageScan {
+    fn visit(&mut self) -> Result<(), Unfinished> {
+        self.nodes += 1;
+        if self.nodes > MAX_FONT_SCAN_NODES_PER_PAGE {
+            Err(Unfinished)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// False when `id` was already seen on this page.
+    fn first_visit(&mut self, id: Option<ObjectId>) -> bool {
+        id.is_none_or(|id| self.visited.insert(id))
+    }
+}
+
+impl<'a> FontScan<'a> {
+    fn new(doc: &'a Document) -> Self {
+        Self {
+            doc,
+            fonts: HashMap::new(),
+            cmaps: HashMap::new(),
+            cmap_bytes: 0,
+        }
+    }
+
+    fn page(&mut self, page: ObjectId) -> WritingMode {
+        let mut scan = PageScan::default();
+        let found = page_resources(self.doc, page).and_then(|resources| match resources {
+            Some(resources) => self.resources(resources, 0, &mut scan),
+            None => Ok(false),
+        });
+        match found {
+            Ok(false) => WritingMode::Horizontal,
+            Ok(true) => WritingMode::Vertical,
+            Err(Unfinished) => WritingMode::Unverified,
+        }
+    }
+
+    fn resources(&mut self, resources: &'a Object, depth: usize, scan: &mut PageScan) -> Found {
+        let Some((resources, id)) = resolve(self.doc, resources)? else {
+            return Ok(false);
+        };
+        if !scan.first_visit(id) {
+            return Ok(false);
+        }
+        scan.visit()?;
+        let Object::Dictionary(resources) = resources else {
+            return Ok(false);
+        };
+        if let Some(Object::Dictionary(fonts)) = entry(self.doc, resources, b"Font")? {
+            for (_, font) in fonts.iter() {
+                scan.visit()?;
+                if self.font(font)? {
+                    return Ok(true);
+                }
+            }
+        }
+        if let Some(Object::Dictionary(xobjects)) = entry(self.doc, resources, b"XObject")? {
+            for (_, xobject) in xobjects.iter() {
+                scan.visit()?;
+                let Some((Object::Stream(form), id)) = resolve(self.doc, xobject)? else {
+                    continue;
+                };
+                if !scan.first_visit(id)
+                    || !matches!(entry(self.doc, &form.dict, b"Subtype")?, Some(Object::Name(n)) if n == b"Form")
+                {
+                    continue;
+                }
+                // A form without its own resources uses ones already scanned.
+                let Ok(inner) = form.dict.get(b"Resources") else {
+                    continue;
+                };
+                if depth >= MAX_FORM_DEPTH {
+                    return Err(Unfinished);
+                }
+                if self.resources(inner, depth + 1, scan)? {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    fn font(&mut self, font: &'a Object) -> Found {
+        let Some((font, id)) = resolve(self.doc, font)? else {
+            return Ok(false);
+        };
+        if let Some(known) = id.and_then(|id| self.fonts.get(&id)) {
+            return *known;
+        }
+        let found = self.classify_font(font);
+        if let Some(id) = id {
+            self.fonts.insert(id, found);
+        }
+        found
+    }
+
+    /// Only composite fonts have a writing mode: an `/Encoding` CMap named
+    /// `V` or `…-V` (`Identity-V`, `UniJIS-UCS2-V`, `90ms-RKSJ-V`, …), or an
+    /// embedded CMap declaring `/WMode 1`.
+    fn classify_font(&mut self, font: &'a Object) -> Found {
+        let Object::Dictionary(font) = font else {
+            return Ok(false);
+        };
+        let composite = matches!(entry(self.doc, font, b"Subtype")?, Some(Object::Name(n)) if n == b"Type0")
+            || font.has(b"DescendantFonts");
+        if !composite {
+            return Ok(false);
+        }
+        // Not a standard key, but the one pdf-inspector itself reads.
+        if is_one(entry(self.doc, font, b"WMode")?) {
+            return Ok(true);
+        }
+        match font.get(b"Encoding") {
+            Ok(encoding) => self.cmap(encoding, 0),
+            Err(_) => Ok(false),
+        }
+    }
+
+    fn cmap(&mut self, encoding: &'a Object, chain: usize) -> Found {
+        let Some((encoding, id)) = resolve(self.doc, encoding)? else {
+            return Ok(false);
+        };
+        let cmap = match encoding {
+            Object::Name(name) => return Ok(vertical_cmap_name(name)),
+            Object::Stream(cmap) => cmap,
+            _ => return Ok(false),
+        };
+        if let Some(known) = id.and_then(|id| self.cmaps.get(&id)) {
+            return *known;
+        }
+        if chain >= MAX_USECMAP_CHAIN {
+            return Err(Unfinished);
+        }
+        let found = self.cmap_stream(cmap, chain);
+        if let Some(id) = id {
+            self.cmaps.insert(id, found);
+        }
+        found
+    }
+
+    fn cmap_stream(&mut self, cmap: &'a Stream, chain: usize) -> Found {
+        if is_one(entry(self.doc, &cmap.dict, b"WMode")?) {
+            return Ok(true);
+        }
+        if let Ok(parent) = cmap.dict.get(b"UseCMap")
+            && self.cmap(parent, chain + 1)?
+        {
+            return Ok(true);
+        }
+        // The program may declare /WMode although its dictionary omits it.
+        let remaining = MAX_CMAP_BYTES_PER_DOCUMENT.saturating_sub(self.cmap_bytes);
+        let program = cmap
+            .decompressed_content_with_limit(remaining.min(metadata::MAX_STREAM_BYTES))
+            .map_err(|_| Unfinished)?;
+        self.cmap_bytes = self
+            .cmap_bytes
+            .saturating_add(program.len().max(cmap.content.len()));
+        Ok(declares_vertical_wmode(&program))
+    }
+}
+
+/// The page's inheritable `/Resources`. The Parent chain was validated by
+/// `metadata::page_metadata` for every page that has geometry.
+fn page_resources(doc: &Document, page: ObjectId) -> Result<Option<&Object>, Unfinished> {
+    let mut id = page;
+    for _ in 0..metadata::MAX_DEPTH {
+        let Some(Object::Dictionary(node)) = doc.objects.get(&id) else {
+            return Ok(None);
+        };
+        if let Ok(resources) = node.get(b"Resources") {
+            return Ok(Some(resources));
+        }
+        let Ok(Object::Reference(parent)) = node.get(b"Parent") else {
+            return Ok(None);
+        };
+        id = *parent;
+    }
+    Err(Unfinished)
+}
+
+/// Follow references to a direct object and the last reference's id.
+/// `Ok(None)` for a dangling reference, which the extractor cannot read either.
+fn resolve<'a>(
+    doc: &'a Document,
+    mut object: &'a Object,
+) -> Result<Option<(&'a Object, Option<ObjectId>)>, Unfinished> {
+    let mut id = None;
+    for _ in 0..=metadata::MAX_DEPTH {
+        let Object::Reference(next) = object else {
+            return Ok(Some((object, id)));
+        };
+        id = Some(*next);
+        match doc.objects.get(next) {
+            Some(target) => object = target,
+            None => return Ok(None),
+        }
+    }
+    Err(Unfinished)
+}
+
+fn entry<'a>(
+    doc: &'a Document,
+    dict: &'a Dictionary,
+    key: &[u8],
+) -> Result<Option<&'a Object>, Unfinished> {
+    match dict.get(key) {
+        Ok(value) => Ok(resolve(doc, value)?.map(|(value, _)| value)),
+        Err(_) => Ok(None),
+    }
+}
+
+fn is_one(value: Option<&Object>) -> bool {
+    match value {
+        Some(Object::Integer(n)) => *n == 1,
+        Some(Object::Real(n)) => *n == 1.0,
+        _ => false,
+    }
+}
+
+/// Predefined vertical CMaps are `V` (Adobe-Japan1 JIS) or end in `-V`.
+fn vertical_cmap_name(name: &[u8]) -> bool {
+    name == b"V" || name.ends_with(b"-V")
+}
+
+/// Whether a CMap program contains `/WMode 1`.
+fn declares_vertical_wmode(program: &[u8]) -> bool {
+    const KEY: &[u8] = b"/WMode";
+    let white = |b: u8| matches!(b, b'\0' | b'\t' | b'\n' | b'\x0c' | b'\r' | b' ');
+    let delimiter = |b: u8| white(b) || b"()<>[]{}/%".contains(&b);
+    let mut start = 0;
+    while let Some(offset) = program[start..]
+        .windows(KEY.len())
+        .position(|window| window == KEY)
+    {
+        let after = start + offset + KEY.len();
+        let tail = &program[after..];
+        let gap = tail.iter().take_while(|&&b| white(b)).count();
+        if gap > 0 {
+            let value = &tail[gap..];
+            let end = value
+                .iter()
+                .position(|&b| delimiter(b))
+                .unwrap_or(value.len());
+            if &value[..end] == b"1" {
+                return true;
+            }
+        }
+        start = after;
+    }
+    false
 }
