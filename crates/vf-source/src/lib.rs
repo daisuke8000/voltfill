@@ -6,6 +6,7 @@ pub mod budget;
 pub mod geometry;
 pub mod layout;
 pub mod metadata;
+pub mod select;
 mod source;
 pub use source::{PageDiagnostic, Quality, SourceFragment};
 
