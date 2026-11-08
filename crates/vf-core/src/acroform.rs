@@ -15,14 +15,19 @@
 //!   alternate name `/TU`, equals the form label or one of its hints after the
 //!   label normalization of offline fill (condition (a) of [`crate::fill`];
 //!   partial labels and one-sided qualifiers never match). Exactly one
-//!   AcroForm field may match ([`AcroFormHold::SeveralFields`]).
+//!   AcroForm field may match ([`AcroFormHold::SeveralFields`]), and that
+//!   field may match no other form field: a field whose name matches one form
+//!   field and whose `/TU` another fills neither
+//!   ([`AcroFormHold::FieldMatchesSeveralItems`]).
 //! - Document: no XFA ([`AcroFormHold::XfaPresent`]): in a hybrid form an
 //!   XFA-aware viewer may show other data.
 //! - Form type: table fields are never matched; an AcroForm field holds one
 //!   value, so AcroForm fill applies to scalar fields only.
 //! - Kind: a text field fills text, date, amount and number fields; a choice
-//!   field fills text fields only, with its export value (the display text of
-//!   its `/Opt` pair is reported in [`AcroFormMatch::display`]). Checkboxes and
+//!   field fills text fields only, with its export value, and only when that
+//!   equals the display text of its `/Opt` pair after NFKC with whitespace
+//!   removed ([`AcroFormHold::ExportDiffersFromDisplay`]; the display text is
+//!   reported in [`AcroFormMatch::display`]). Checkboxes and
 //!   radio buttons fill nothing: the form contract has no boolean or choice
 //!   type ([`AcroFormHold::KindUnsupported`]).
 //! - Field: no [`FieldIssue`] other than one on `/DV`
@@ -32,19 +37,26 @@
 //!   be Shift_JIS or another encoding misread.
 //! - Value: `/V` is present ([`AcroFormHold::ValueAbsent`]), not empty or
 //!   whitespace ([`AcroFormHold::ValueEmpty`]), one choice
-//!   ([`AcroFormHold::SeveralValues`]) and one line
-//!   ([`AcroFormHold::MultiLine`]).
+//!   ([`AcroFormHold::SeveralValues`]), one line ([`AcroFormHold::MultiLine`]:
+//!   no LF, CR, VT, FF, NEL, U+2028 or U+2029) and no longer than the field's
+//!   `/MaxLen` in characters ([`AcroFormHold::ExceedsMaxLen`]).
 //! - Widgets: the field has a widget ([`AcroFormHold::NoWidget`]), one that is
 //!   not hidden ([`AcroFormHold::HiddenWidgets`]), and every widget that is not
 //!   hidden has a page and a Display rectangle
 //!   ([`AcroFormHold::WidgetWithoutRect`]).
-//! - Appearance: usable text-layer text that a visible widget's rectangle may
-//!   touch ([`vf_source::select::overlapping_within`]) reads as the value
-//!   after NFKC with whitespace removed (for a choice, as the export value or
-//!   the display text). Otherwise the page may show a stale appearance or
-//!   other text, such as a label printed inside the box
-//!   ([`AcroFormHold::AppearanceMismatch`]); a selection that fails for its
-//!   own limits cannot be checked ([`AcroFormHold::AppearanceUnverified`]).
+//! - Appearance: usable upright text-layer text that a visible widget's
+//!   rectangle may touch ([`vf_source::select::overlapping_within`]) reads as
+//!   the value after NFKC with whitespace removed (for a choice, as the export
+//!   value or the display text). Otherwise the page prints other text in the
+//!   box, such as a flattened older value or a label
+//!   ([`AcroFormHold::AppearanceMismatch`]). Text in the box that select does
+//!   not read (any quality other than usable, or turned text) and a selection
+//!   that fails for its own limits cannot be compared
+//!   ([`AcroFormHold::AppearanceUnverified`]). Only page content is checked:
+//!   the widget's own appearance stream (`/AP`) never enters the text layer,
+//!   so a stale appearance (for example under `NeedAppearances`) is not
+//!   detected, and a box without text-layer text, the usual unflattened
+//!   field, is not checked at all.
 //! - Type: for an amount or number field, neither the matched names nor any
 //!   usable fragment states a scale unit (`売上高（千円）`, `（単位：千円）`;
 //!   [`AcroFormHold::ScaledUnit`]). A unit note split over several fragments
@@ -101,13 +113,13 @@ use serde_json::Value;
 use std::collections::HashMap;
 use unicode_normalization::UnicodeNormalization;
 use vf_source::acroform::{
-    AcroForm, AcroFormError, AcroFormLimit, FieldIssue, FieldKind, FieldValue,
-    FormField as PdfField, XfaPresence,
+    AcroForm, AcroFormError, AcroFormLimit, FieldIssue, FieldKind, FieldValue, XfaPresence,
 };
 use vf_source::budget::Budget;
+use vf_source::geometry::Rect;
 use vf_source::layout::{Placement, Precision};
 use vf_source::select::{self, SelectError};
-use vf_source::{Quality, SourceFragment};
+use vf_source::{Orientation, Quality, SourceFragment};
 
 /// [`FieldFill::method`] for a value taken from an AcroForm field.
 pub const METHOD: &str = "acroform";
@@ -146,6 +158,10 @@ pub enum AcroFormHold {
     XfaPresent,
     /// More than one AcroForm field matched the form field.
     SeveralFields,
+    /// The AcroForm field could fill two or more form fields (its name
+    /// matches one and its `/TU` another, or several form fields share a
+    /// label), so it fills none of them.
+    FieldMatchesSeveralItems,
     /// A checkbox or radio button, or a choice for a typed field.
     KindUnsupported,
     /// The field has a [`FieldIssue`] other than one on `/DV`.
@@ -156,17 +172,25 @@ pub enum AcroFormHold {
     ValueEmpty,
     /// More than one choice is selected.
     SeveralValues,
+    /// The selected choice's export value differs from its `/Opt` display
+    /// text ([`AcroFormMatch::display`]), so the value is a code, not the
+    /// text a reader sees.
+    ExportDiffersFromDisplay,
     /// `/V` spans more than one line.
     MultiLine,
+    /// `/V` has more characters than the field's `/MaxLen`.
+    ExceedsMaxLen,
     /// The field has no widget.
     NoWidget,
     /// Every widget is hidden.
     HiddenWidgets,
     /// A visible widget has no page or Display rectangle.
     WidgetWithoutRect,
-    /// Text-layer text inside a visible widget differs from `/V`.
+    /// Usable upright text-layer text inside a visible widget differs from
+    /// `/V`.
     AppearanceMismatch,
-    /// The text layer inside a widget could not be checked.
+    /// Text-layer text inside a widget could not be compared: it is not
+    /// usable, it is turned, or the selection failed for its own limits.
     AppearanceUnverified,
     /// An amount or number may be stated in a scale unit.
     ScaledUnit,
@@ -221,6 +245,8 @@ struct Found {
 /// One matched AcroForm field: its report and, when it fails no rule other
 /// than those listed in `failed`, its value.
 struct Evaluated {
+    /// Index of the AcroForm field in [`AcroForm::fields`].
+    index: usize,
     report: AcroFormMatch,
     found: Option<Found>,
 }
@@ -261,6 +287,7 @@ pub fn fill_with_acroform(
         budget.check_deadline()?;
         outcomes.push(matcher.evaluate(field, &mut budget)?);
     }
+    hold_fields_matching_several_items(&mut outcomes);
     let mut result = fill::fill_with_limits(
         document_id,
         fragments,
@@ -280,6 +307,33 @@ pub fn fill_with_acroform(
     }
     result.acroform = summary;
     Ok(result)
+}
+
+/// Hold every match of an AcroForm field that could fill (or be offered for)
+/// two or more form fields ([`AcroFormHold::FieldMatchesSeveralItems`]).
+fn hold_fields_matching_several_items(outcomes: &mut [Vec<Evaluated>]) {
+    let open = |e: &Evaluated| {
+        e.report
+            .reasons
+            .iter()
+            .all(|reason| *reason == AcroFormHold::SeveralFields)
+    };
+    let mut items: HashMap<usize, usize> = HashMap::new();
+    for evaluated in outcomes.iter() {
+        for e in evaluated.iter().filter(|e| open(e)) {
+            *items.entry(e.index).or_default() += 1;
+        }
+    }
+    for evaluated in outcomes.iter_mut() {
+        for e in evaluated.iter_mut() {
+            if open(e) && items.get(&e.index).is_some_and(|&n| n > 1) {
+                e.report
+                    .reasons
+                    .push(AcroFormHold::FieldMatchesSeveralItems);
+                e.report.reasons.sort_unstable();
+            }
+        }
+    }
 }
 
 fn unavailable(error: AcroFormError) -> AcroFormSummary {
@@ -377,7 +431,7 @@ impl<'a> Matcher<'a> {
         let several = matched.len() > 1;
         let mut evaluated = Vec::with_capacity(matched.len());
         for (i, by) in matched {
-            let mut one = self.rules(field, &self.pdf.fields[i], by, budget)?;
+            let mut one = self.rules(field, i, by, budget)?;
             if several {
                 one.report.reasons.push(AcroFormHold::SeveralFields);
             }
@@ -390,10 +444,11 @@ impl<'a> Matcher<'a> {
     fn rules(
         &self,
         field: &FormField,
-        pdf: &PdfField,
+        index: usize,
         by: MatchedBy,
         budget: &mut Budget,
     ) -> Result<Evaluated, FillError> {
+        let pdf = &self.pdf.fields[index];
         let mut reasons = Vec::new();
         if self.pdf.xfa != XfaPresence::Absent {
             reasons.push(AcroFormHold::XfaPresent);
@@ -428,7 +483,19 @@ impl<'a> Matcher<'a> {
                     reasons.push(AcroFormHold::ValueAbsent);
                     (None, None)
                 }
-                [one] => (Some(one.value.clone()), one.display.clone()),
+                [one] => {
+                    budget.spend(
+                        2 * (one.value.len() + one.display.as_ref().map_or(0, String::len)) as u64,
+                    )?;
+                    if one
+                        .display
+                        .as_deref()
+                        .is_some_and(|display| compact(display) != compact(&one.value))
+                    {
+                        reasons.push(AcroFormHold::ExportDiffersFromDisplay);
+                    }
+                    (Some(one.value.clone()), one.display.clone())
+                }
                 _ => {
                     reasons.push(AcroFormHold::SeveralValues);
                     (None, None)
@@ -439,8 +506,14 @@ impl<'a> Matcher<'a> {
             budget.spend(2 * raw.len() as u64 + 1)?;
             if raw.trim().is_empty() {
                 reasons.push(AcroFormHold::ValueEmpty);
-            } else if raw.contains(['\n', '\r']) {
+            } else if raw.contains(LINE_BREAKS) {
                 reasons.push(AcroFormHold::MultiLine);
+            }
+            if pdf
+                .max_len
+                .is_some_and(|max| raw.chars().count() > max as usize)
+            {
+                reasons.push(AcroFormHold::ExceedsMaxLen);
             }
         }
         let visible: Vec<_> = pdf.widgets.iter().filter(|w| !w.hidden).collect();
@@ -458,6 +531,17 @@ impl<'a> Matcher<'a> {
         if let Some(raw) = raw.as_deref().filter(|raw| !raw.trim().is_empty()) {
             let shown = [Some(raw), display.as_deref()];
             for &(page, rect) in &boxes {
+                // select reads usable upright text only; anything else in
+                // the box cannot be compared, so the value is not verified.
+                budget.spend(self.fragments.len() as u64)?;
+                if self.fragments.iter().any(|f| {
+                    f.page == page
+                        && (f.quality != Quality::Usable || f.orientation != Orientation::Deg0)
+                        && intersects(rect, f.bbox)
+                        && !f.raw_text.trim().is_empty()
+                }) {
+                    push_once(&mut reasons, AcroFormHold::AppearanceUnverified);
+                }
                 match select::overlapping_within(self.fragments, page, rect, budget) {
                     Ok(spans) => {
                         let mut text = String::new();
@@ -491,11 +575,12 @@ impl<'a> Matcher<'a> {
             }
         }
         let typed = matches!(field.field_type, FieldType::Amount | FieldType::Number);
-        let label = match by {
-            MatchedBy::Name => pdf.name.rsplit('.').next().unwrap_or(&pdf.name),
-            MatchedBy::AlternateName => pdf.alternate_name.as_deref().unwrap_or_default(),
-        }
-        .to_owned();
+        // The fully qualified name tells `販売者.氏名` from `購入者.氏名`.
+        let label = match &pdf.alternate_name {
+            Some(tu) => format!("{} / {tu}", pdf.name),
+            None => pdf.name.clone(),
+        };
+        budget.spend(label.len() as u64 + 1)?;
         if typed && raw.is_some() {
             let names = std::iter::once(pdf.name.rsplit('.').next().unwrap_or(&pdf.name))
                 .chain(pdf.alternate_name.as_deref());
@@ -571,6 +656,7 @@ impl<'a> Matcher<'a> {
         };
         budget.spend(pdf.name.len() as u64 + raw.as_ref().map_or(0, String::len) as u64)?;
         Ok(Evaluated {
+            index,
             report: AcroFormMatch {
                 field: pdf.name.clone(),
                 kind: pdf.kind,
@@ -603,6 +689,16 @@ impl<'a> Matcher<'a> {
         self.scaled_document.set(Some(scaled));
         Ok(scaled)
     }
+}
+
+/// Characters that end a line: a value holding one spans several lines.
+const LINE_BREAKS: [char; 7] = [
+    '\n', '\r', '\u{000B}', '\u{000C}', '\u{0085}', '\u{2028}', '\u{2029}',
+];
+
+/// Positive-area intersection of two Display rectangles.
+fn intersects(a: Rect, b: Rect) -> bool {
+    a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
 }
 
 fn push_once(reasons: &mut Vec<AcroFormHold>, reason: AcroFormHold) {

@@ -856,6 +856,27 @@ fn limits_fail_the_whole_extraction() {
 }
 
 #[test]
+fn a_document_without_an_acroform_is_never_an_acroform_error() {
+    let bytes = TestPdf::new(2).finish(None);
+    let absent = AcroForm {
+        present: false,
+        xfa: XfaPresence::Absent,
+        fields: Vec::new(),
+        skipped: Vec::new(),
+    };
+    let mut doc = vf_source::metadata::load(&bytes).unwrap();
+    // Neither the page limit nor encryption applies without a form.
+    let one_page = AcroFormLimits {
+        max_pages: 1,
+        ..AcroFormLimits::default()
+    };
+    assert_eq!(fields_in(&doc, one_page), Ok(absent.clone()));
+    doc.trailer
+        .set("Encrypt", dictionary! { "Filter" => "Standard" });
+    assert_eq!(fields_in(&doc, AcroFormLimits::default()), Ok(absent));
+}
+
+#[test]
 fn preloaded_document_matches_and_encryption_is_rejected() {
     let mut pdf = TestPdf::new(1);
     let id = pdf.widget(

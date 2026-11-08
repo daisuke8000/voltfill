@@ -4,7 +4,11 @@
 #[path = "eval/pdf.rs"]
 mod pdf;
 
-use lopdf::{Dictionary, Document, Object, StringFormat, dictionary};
+use lopdf::content::{Content, Operation};
+use lopdf::{
+    Dictionary, Document, EncryptionState, EncryptionVersion, Object, Permissions, StringFormat,
+    dictionary,
+};
 use pdf::{PAGE_HEIGHT, Run};
 use serde_json::{Value, json};
 use vf_core::acroform::{
@@ -16,7 +20,7 @@ use vf_source::acroform::{
 };
 use vf_source::geometry::Rect;
 use vf_source::layout::{Placement, Precision};
-use vf_source::{PdfLimits, inspect_with_acroform};
+use vf_source::{Orientation, PdfLimits, Quality, inspect_with_acroform};
 
 /// A widget box in Display coordinates: left, top, right, bottom.
 const BOX: [f64; 4] = [300.0, 85.0, 450.0, 105.0];
@@ -78,8 +82,16 @@ fn text_field(name: &str, value: &str) -> Dictionary {
 /// Add top-level `fields` (listed in page 1's /Annots unless `/NoAnnot`) and
 /// an /AcroForm with `form` entries to a PDF of `runs`.
 fn build(runs: &[Run], fields: Vec<Dictionary>, form: Dictionary) -> Vec<u8> {
-    let bytes = pdf::build(runs);
-    let mut doc = Document::load_mem(&bytes).expect("load the synthetic PDF");
+    let doc = Document::load_mem(&pdf::build(runs)).expect("load the synthetic PDF");
+    let mut out = Vec::new();
+    with_form(doc, fields, form)
+        .save_to(&mut out)
+        .expect("save the synthetic PDF");
+    out
+}
+
+/// [`build`] on a loaded document, returned unsaved.
+fn with_form(mut doc: Document, fields: Vec<Dictionary>, form: Dictionary) -> Document {
     let page = *doc.get_pages().get(&1).expect("page 1");
     let mut annots = Vec::new();
     let mut ids = Vec::new();
@@ -109,9 +121,7 @@ fn build(runs: &[Run], fields: Vec<Dictionary>, form: Dictionary) -> Vec<u8> {
         .and_then(Object::as_dict_mut)
         .expect("catalog")
         .set("AcroForm", acroform);
-    let mut out = Vec::new();
-    doc.save_to(&mut out).expect("save the synthetic PDF");
-    out
+    doc
 }
 
 fn form(fields: Value) -> Form {
@@ -366,12 +376,15 @@ fn several_matching_fields_are_offered_as_candidates_but_never_committed() {
     );
     let raws: Vec<&str> = fill.candidates.iter().map(|c| c.raw.as_str()).collect();
     assert_eq!(raws, ["山田太郎", "佐藤花子"]);
+    // Candidates carry the fully qualified name and /TU, so assist can tell
+    // the fields apart.
+    let labels: Vec<&str> = fill.candidates.iter().map(|c| c.label.as_str()).collect();
+    assert_eq!(labels, ["a / 氏名", "b / 氏名"]);
     assert!(
         fill.candidates
             .iter()
             .all(|c| c.placement == Placement::Widget
                 && c.holds.is_empty()
-                && c.label == "氏名"
                 && c.evidence[0].precision == Precision::Widget)
     );
 
@@ -520,20 +533,41 @@ fn typed_values_must_match_the_grammar_and_carry_no_scale() {
 
 #[test]
 fn choices_fill_text_fields_with_the_export_value() {
-    let opt = vec![Object::Array(vec![utf16("tokyo"), utf16("東京都")])];
-    let choice = || {
+    let opt = vec![
+        Object::Array(vec![utf16("13"), utf16("東京都")]),
+        Object::Array(vec![utf16("大阪府"), utf16("大阪府")]),
+        utf16("北海道"),
+    ];
+    let choice = |value: &str| {
         field(
             "都道府県",
             "Ch",
-            dictionary! { "V" => utf16("tokyo"), "Opt" => opt.clone() },
+            dictionary! { "V" => utf16(value), "Opt" => opt.clone() },
         )
     };
-    let bytes = build(&[], vec![choice()], dictionary! {});
+    // An export code that differs from the display text is never committed.
+    let bytes = build(&[], vec![choice("13")], dictionary! {});
     let fill = one(&bytes, &label("pref", "都道府県", "text"));
-    assert_eq!(fill.status, FillStatus::Filled);
-    assert_eq!(fill.raw.as_deref(), Some("tokyo"));
-    assert_eq!(fill.acroform[0].kind, FieldKind::Choice);
+    assert_not_filled(&fill);
+    assert_eq!(reasons(&fill), [AcroFormHold::ExportDiffersFromDisplay]);
+    assert_eq!(fill.acroform[0].raw.as_deref(), Some("13"));
     assert_eq!(fill.acroform[0].display.as_deref(), Some("東京都"));
+    let json = serde_json::to_value(&fill).expect("serialize");
+    assert_eq!(json["acroform"][0]["display"], json!("東京都"));
+    assert_eq!(
+        json["acroform"][0]["reasons"],
+        json!(["export_differs_from_display"])
+    );
+
+    // An export value equal to its display text, or a plain option, commits.
+    for value in ["大阪府", "北海道"] {
+        let bytes = build(&[], vec![choice(value)], dictionary! {});
+        let fill = one(&bytes, &label("pref", "都道府県", "text"));
+        assert_eq!(fill.status, FillStatus::Filled, "{value}");
+        assert_eq!(fill.raw.as_deref(), Some(value));
+        assert_eq!(fill.acroform[0].kind, FieldKind::Choice);
+    }
+    let bytes = build(&[], vec![choice("大阪府")], dictionary! {});
 
     // A choice never fills a typed field, and two selections are held.
     let fill = one(&bytes, &label("pref", "都道府県", "number"));
@@ -865,4 +899,286 @@ fn offered_acroform_candidates_come_before_text_layer_candidates() {
     );
     assert_eq!(found.len(), 4);
     assert!(found[2..].iter().all(|(_, p)| *p != Placement::Widget));
+}
+
+/// `doc` encrypted (RC4, 128-bit) with an empty user password, which `lopdf`
+/// decrypts while loading.
+fn encrypted(mut doc: Document) -> Vec<u8> {
+    let id = Object::String(b"0123456789abcdef".to_vec(), StringFormat::Literal);
+    doc.trailer.set("ID", vec![id.clone(), id]);
+    let state = EncryptionState::try_from(EncryptionVersion::V2 {
+        document: &doc,
+        owner_password: "owner",
+        user_password: "",
+        key_length: 128,
+        permissions: Permissions::all(),
+    })
+    .expect("encryption state");
+    doc.encrypt(&state).expect("encrypt");
+    let mut out = Vec::new();
+    doc.save_to(&mut out).expect("save");
+    out
+}
+
+#[test]
+fn encrypted_documents_without_an_acroform_serialize_exactly_as_text_layer_fill() {
+    let runs = [run(72.0, 200.0, "請求番号：INV-002")];
+    let doc = Document::load_mem(&pdf::build(&runs)).expect("load");
+    let bytes = encrypted(doc);
+    assert!(Document::load_mem(&bytes).expect("load").was_encrypted());
+    let form = label("number", "請求番号", "text");
+    let (snapshot, acroform) =
+        inspect_with_acroform(&bytes, PdfLimits::default()).expect("inspect");
+    assert!(!acroform.as_ref().expect("no AcroForm error").present);
+    let text_only = fill::fill_with_limits(
+        &snapshot.document_id,
+        &snapshot.fragments,
+        &form,
+        &FillLimits::default(),
+    )
+    .expect("fill");
+    let with = fill_with_acroform(
+        &snapshot.document_id,
+        &snapshot.fragments,
+        &acroform,
+        &form,
+        &FillLimits::default(),
+    )
+    .expect("fill");
+    let json = serde_json::to_vec(&with).expect("serialize");
+    assert_eq!(json, serde_json::to_vec(&text_only).expect("serialize"));
+    assert!(
+        serde_json::to_value(&with)
+            .expect("json")
+            .get("acroform")
+            .is_none()
+    );
+
+    // With an AcroForm, the same encryption makes it unavailable.
+    let doc = Document::load_mem(&pdf::build(&runs)).expect("load");
+    let doc = with_form(doc, vec![text_field("請求番号", "INV-001")], dictionary! {});
+    let result = run_fill(&encrypted(doc), &form);
+    assert_eq!(
+        result.acroform,
+        Some(AcroFormSummary::Unavailable {
+            reason: Unavailable::Encrypted,
+            limit: None
+        })
+    );
+    assert!(result.fields["number"].acroform.is_empty());
+}
+
+#[test]
+fn a_field_whose_name_and_alternate_name_match_two_items_fills_neither() {
+    let mut dict = text_field("発行日", "2026/11/08");
+    dict.set("TU", utf16("支払期限"));
+    let bytes = build(&[], vec![dict], dictionary! {});
+    let both = form(json!([
+        { "id": "issued", "label": "発行日", "type": "date" },
+        { "id": "due", "label": "支払期限", "type": "date" },
+    ]));
+    let result = run_fill(&bytes, &both);
+    for (id, by) in [
+        ("issued", MatchedBy::Name),
+        ("due", MatchedBy::AlternateName),
+    ] {
+        let fill = &result.fields[id];
+        assert_not_filled(fill);
+        assert_eq!(fill.acroform[0].matched_by, by, "{id}");
+        assert_eq!(
+            reasons(fill),
+            [AcroFormHold::FieldMatchesSeveralItems],
+            "{id}"
+        );
+        assert!(fill.candidates.is_empty(), "{id}");
+    }
+    let json = serde_json::to_value(&result).expect("serialize");
+    assert_eq!(
+        json["fields"]["due"]["acroform"][0]["reasons"],
+        json!(["field_matches_several_items"])
+    );
+
+    // Matched by one form field only, the same field commits.
+    let fill = one(&bytes, &label("issued", "発行日", "date"));
+    assert_eq!(fill.status, FillStatus::Filled);
+    assert_eq!(fill.value, Some(json!("2026-11-08")));
+}
+
+#[test]
+fn text_inside_the_widget_that_cannot_be_compared_is_unverified() {
+    let bytes = build(
+        &[run(305.0, 100.0, "INV-001")],
+        vec![text_field("請求番号", "INV-001")],
+        dictionary! {},
+    );
+    let form = label("number", "請求番号", "text");
+    let (snapshot, acroform) =
+        inspect_with_acroform(&bytes, PdfLimits::default()).expect("inspect");
+    let fill_with = |fragments: &[vf_source::SourceFragment]| {
+        fill_with_acroform(
+            &snapshot.document_id,
+            fragments,
+            &acroform,
+            &form,
+            &FillLimits::default(),
+        )
+        .expect("fill")
+        .fields
+        .remove("number")
+        .expect("field")
+    };
+    assert_eq!(fill_with(&snapshot.fragments).status, FillStatus::Filled);
+    // The same text in another quality or turned is not compared.
+    for change in [
+        |f: &mut vf_source::SourceFragment| f.quality = Quality::Suspect,
+        |f: &mut vf_source::SourceFragment| f.quality = Quality::Unknown,
+        |f: &mut vf_source::SourceFragment| f.orientation = Orientation::Deg90,
+    ] {
+        let mut fragments = snapshot.fragments.clone();
+        fragments.iter_mut().for_each(change);
+        let fill = fill_with(&fragments);
+        assert_not_filled(&fill);
+        assert_eq!(reasons(&fill), [AcroFormHold::AppearanceUnverified]);
+    }
+}
+
+/// Page 1 of `runs` turned by `/Rotate 90`. With `upright`, each run is drawn
+/// turned on the sheet so that it reads upright once displayed, at the
+/// Display position the run gives; otherwise runs keep their sheet position
+/// and read top to bottom.
+fn rotated_page(runs: &[Run], upright: bool) -> Document {
+    let mut doc = Document::load_mem(&pdf::build(runs)).expect("load");
+    let page = *doc.get_pages().get(&1).expect("page 1");
+    if upright {
+        let content = Content::decode(&doc.get_page_content(page)).expect("content");
+        let operations: Vec<_> = content
+            .operations
+            .into_iter()
+            .map(|op| {
+                if op.operator != "Td" {
+                    return op;
+                }
+                let [x, y] = [0, 1].map(|i| op.operands[i].as_float().expect("Td operand"));
+                // Display (dx, dy) of a /Rotate 90 page is sheet (dy, dx).
+                let matrix = [0.0, 1.0, -1.0, 0.0, PAGE_HEIGHT as f32 - y, x];
+                Operation::new("Tm", matrix.iter().map(|v| Object::Real(*v)).collect())
+            })
+            .collect();
+        let bytes = Content { operations }.encode().expect("encode");
+        doc.change_page_content(page, bytes).expect("content");
+    }
+    doc.get_object_mut(page)
+        .and_then(Object::as_dict_mut)
+        .expect("page")
+        .set("Rotate", 90);
+    doc
+}
+
+/// [`text_field`] whose widget shows at `BOX` on a `/Rotate 90` page.
+fn rotated_text_field(name: &str, value: &str) -> Dictionary {
+    let [left, top, right, bottom] = BOX;
+    let mut dict = text_field(name, value);
+    dict.set(
+        "Rect",
+        [top, left, bottom, right]
+            .iter()
+            .map(|v| Object::Real(*v as f32))
+            .collect::<Vec<_>>(),
+    );
+    dict
+}
+
+fn save(mut doc: Document) -> Vec<u8> {
+    let mut out = Vec::new();
+    doc.save_to(&mut out).expect("save");
+    out
+}
+
+#[test]
+fn the_appearance_check_works_in_display_coordinates_on_a_rotated_page() {
+    let form = label("number", "請求番号", "text");
+    let widget = || vec![rotated_text_field("請求番号", "INV-001")];
+    let fragment = |bytes: &[u8]| {
+        let (snapshot, acroform) =
+            inspect_with_acroform(bytes, PdfLimits::default()).expect("inspect");
+        let rect = acroform.expect("read").fields[0].widgets[0].rect;
+        let [left, top, right, bottom] = BOX;
+        assert_eq!(
+            rect,
+            Some(Rect::try_new(left, top, right, bottom).expect("box"))
+        );
+        assert_eq!(snapshot.fragments.len(), 1, "{:?}", snapshot.fragments);
+        snapshot.fragments[0].clone()
+    };
+
+    // Text upright on the sheet reads top to bottom on the page: usable,
+    // inside the widget, but turned, so it is not compared.
+    let doc = rotated_page(&[run(88.0, PAGE_HEIGHT - 310.0, "INV-000")], false);
+    let bytes = save(with_form(doc, widget(), dictionary! {}));
+    let turned = fragment(&bytes);
+    assert_eq!(turned.quality, Quality::Usable);
+    assert_ne!(turned.orientation, Orientation::Deg0);
+    let fill = one(&bytes, &form);
+    assert_not_filled(&fill);
+    assert_eq!(reasons(&fill), [AcroFormHold::AppearanceUnverified]);
+
+    // Text upright on the page inside the widget is compared.
+    let doc = rotated_page(&[run(305.0, 100.0, "INV-000")], true);
+    let bytes = save(with_form(doc, widget(), dictionary! {}));
+    let upright = fragment(&bytes);
+    assert_eq!(
+        (upright.quality, upright.orientation),
+        (Quality::Usable, Orientation::Deg0)
+    );
+    let fill = one(&bytes, &form);
+    assert_not_filled(&fill);
+    assert_eq!(reasons(&fill), [AcroFormHold::AppearanceMismatch]);
+
+    let doc = rotated_page(&[run(305.0, 100.0, "INV-001")], true);
+    let bytes = save(with_form(doc, widget(), dictionary! {}));
+    let fill = one(&bytes, &form);
+    assert_eq!(fill.status, FillStatus::Filled);
+    assert_eq!(fill.raw.as_deref(), Some("INV-001"));
+    let [left, top, right, bottom] = BOX;
+    assert_eq!(
+        fill.evidence[0].bbox,
+        Rect::try_new(left, top, right, bottom).expect("box")
+    );
+}
+
+#[test]
+fn every_line_break_makes_a_value_multi_line() {
+    for c in [
+        '\n', '\r', '\u{000B}', '\u{000C}', '\u{0085}', '\u{2028}', '\u{2029}',
+    ] {
+        let bytes = build(
+            &[],
+            vec![text_field("氏名", &format!("山田{c}太郎"))],
+            dictionary! {},
+        );
+        let fill = one(&bytes, &label("name", "氏名", "text"));
+        assert_not_filled(&fill);
+        assert_eq!(reasons(&fill), [AcroFormHold::MultiLine], "{c:?}");
+    }
+}
+
+#[test]
+fn a_value_longer_than_max_len_is_held() {
+    let with_max = |max: i64| {
+        field(
+            "番号",
+            "Tx",
+            dictionary! { "V" => utf16("１２３４５"), "MaxLen" => max },
+        )
+    };
+    let bytes = build(&[], vec![with_max(4)], dictionary! {});
+    let fill = one(&bytes, &label("number", "番号", "text"));
+    assert_not_filled(&fill);
+    assert_eq!(reasons(&fill), [AcroFormHold::ExceedsMaxLen]);
+
+    // MaxLen counts characters, not bytes.
+    let bytes = build(&[], vec![with_max(5)], dictionary! {});
+    let fill = one(&bytes, &label("number", "番号", "text"));
+    assert_eq!(fill.status, FillStatus::Filled);
+    assert_eq!(fill.raw.as_deref(), Some("１２３４５"));
 }
