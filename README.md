@@ -117,6 +117,9 @@ cargo test --workspace --locked
 | cargo-deny | ライセンス・重複／ワイルドカード依存・取得元（[deny.toml](deny.toml)） | 許可外ライセンス、ワイルドカード依存、crates.io以外の取得元 |
 | Gitleaks | Git履歴 | 秘密情報の検出 |
 | actionlint・zizmor | ワークフロー | 構文・セキュリティの問題 |
+| gh actions-lock | [actions.lock](.github/workflows/actions.lock) | 間接的に使われるものも含め、全アクションがロックしたコミットに解決できない |
+
+ワークフローの `uses:` はタグで書き、実行するコミットは `actions.lock` で固定します。`uses:` を変えたら `gh actions-lock`（拡張 `github/gh-actions-lock`）で更新します。Dependabotの更新PRはロックも一緒に更新します。
 
 `pdf-inspector` の `ttf-parser 0.25.1` に[RUSTSEC-2026-0192](https://rustsec.org/advisories/RUSTSEC-2026-0192.html)の保守警告があります。脆弱性の発見を示すものではないため、各検査で抑止せず警告として表示します。正式修正は原文・座標・Evidenceの回帰検証後に採用します。
 
