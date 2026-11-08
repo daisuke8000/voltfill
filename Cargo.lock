@@ -1183,20 +1183,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
-name = "jev-client"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "httpdate",
- "log",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
-]
-
-[[package]]
 name = "jiff"
 version = "0.2.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1491,28 +1477,6 @@ dependencies = [
  "ttf-parser",
  "unicode-bidi",
  "unicode-normalization",
-]
-
-[[package]]
-name = "pdf-probe"
-version = "0.1.0"
-dependencies = [
- "lopdf 0.46.0",
- "pdf-inspector",
- "serde",
- "sha2",
- "thiserror",
-]
-
-[[package]]
-name = "pdf-render"
-version = "0.1.0"
-dependencies = [
- "firecrawl-pdfium",
- "hayro",
- "pdf-probe",
- "png",
- "thiserror",
 ]
 
 [[package]]
@@ -2480,7 +2444,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
-name = "voltfill-cli"
+name = "vf-cli"
 version = "0.1.0"
 dependencies = [
  "log",
@@ -2488,28 +2452,53 @@ dependencies = [
  "serde-saphyr",
  "serde_json",
  "toml",
- "voltfill-core",
- "voltfill-server",
+ "vf-core",
+ "vf-server",
 ]
 
 [[package]]
-name = "voltfill-core"
+name = "vf-client"
 version = "0.1.0"
 dependencies = [
- "jev-client",
+ "bytes",
+ "httpdate",
+ "log",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "vf-core"
+version = "0.1.0"
+dependencies = [
  "log",
  "lopdf 0.46.0",
- "pdf-probe",
- "pdf-render",
  "serde",
  "serde_json",
  "sha2",
  "thiserror",
  "unicode-normalization",
+ "vf-client",
+ "vf-render",
+ "vf-source",
 ]
 
 [[package]]
-name = "voltfill-server"
+name = "vf-render"
+version = "0.1.0"
+dependencies = [
+ "firecrawl-pdfium",
+ "hayro",
+ "png",
+ "thiserror",
+ "vf-source",
+]
+
+[[package]]
+name = "vf-server"
 version = "0.1.0"
 dependencies = [
  "axum",
@@ -2518,7 +2507,18 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower",
- "voltfill-core",
+ "vf-core",
+]
+
+[[package]]
+name = "vf-source"
+version = "0.1.0"
+dependencies = [
+ "lopdf 0.46.0",
+ "pdf-inspector",
+ "serde",
+ "sha2",
+ "thiserror",
 ]
 
 [[package]]

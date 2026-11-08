@@ -1,0 +1,28 @@
+[package]
+name = "vf-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+# Kept until `voltfill serve` becomes the only entry point.
+name = "voltfill-server"
+path = "src/main.rs"
+
+[dependencies]
+vf-core.workspace = true
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+tower.workspace = true
+
+[features]
+default = []
+pdfium = ["vf-core/pdfium"]
+hayro = ["vf-core/hayro"]

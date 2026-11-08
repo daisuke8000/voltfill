@@ -16,10 +16,10 @@ These rules protect users, credentials and response data. Do not relax them with
 
 ## Crate boundaries
 
-- `pdf-probe` owns PDF inspection, source diagnostics and geometry. `pdf-render` owns optional page rendering and may depend on `pdf-probe`. Neither requires an extraction schema or Evidence.
-- `jev-client` owns the Jev protocol, transport, bounded execution and received-body recording. It must not depend on PDF crates or `voltfill-core`.
-- `voltfill-core` owns Evidence, extraction fields/results, aggregate timings/usage and logging. Foundation crates must never depend on core.
-- `voltfill-cli` and `voltfill-server` are thin front ends over core.
+- `vf-source` owns PDF inspection, source diagnostics and geometry. `vf-render` owns optional page rendering and may depend on `vf-source`. Neither requires an extraction schema or Evidence.
+- `vf-client` owns the Jev protocol, transport, bounded execution and received-body recording. It must not depend on PDF crates or `vf-core`.
+- `vf-core` owns Evidence, extraction fields/results, aggregate timings/usage and logging. Foundation crates must never depend on `vf-core`.
+- `vf-cli` (the `voltfill` binary) and `vf-server` are thin front ends over `vf-core`.
 
 ## Conventions
 
