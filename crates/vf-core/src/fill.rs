@@ -658,7 +658,7 @@ impl Context<'_> {
         // Join, label normalization, NFKC, the form-label check of each
         // word and the value-shape scan.
         budget.spend(5 * raw.len() as u64)?;
-        if self.labels.contains(&normalize_label(&raw).stem) {
+        if delimiter_only(&raw) || self.labels.contains(&normalize_label(&raw).stem) {
             return Ok(rejected(false));
         }
         let several = several_values(&raw.nfkc().collect::<String>(), self.labels, budget)?;
@@ -807,6 +807,17 @@ impl Context<'_> {
         budget.spend(2 * value.raw.len() as u64 + value.evidence.len() as u64)?;
         Ok((value.raw.clone(), value.evidence.clone()))
     }
+}
+
+/// Label/value delimiters; a value made of nothing else is a separator
+/// that layout found on its own (for example a `：` drawn as its own run).
+const DELIMITERS: [char; 2] = ['：', ':'];
+
+/// Whether `raw` holds delimiters and whitespace only, so it is never
+/// offered or filled as a value.
+fn delimiter_only(raw: &str) -> bool {
+    raw.chars()
+        .all(|c| DELIMITERS.contains(&c) || c.is_whitespace())
 }
 
 fn slice(texts: &HashMap<&str, &SourceFragment>, span: &layout::Span) -> Option<String> {
@@ -1878,7 +1889,7 @@ fn is_phone(run: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
-    use vf_source::Quality;
+    use vf_source::{Orientation, Quality};
 
     fn frag(id: &str, text: &str, [l, t, r, b]: [f64; 4]) -> SourceFragment {
         SourceFragment {
@@ -1893,6 +1904,7 @@ mod tests {
                 bottom: b,
             },
             quality: Quality::Usable,
+            orientation: Orientation::Deg0,
         }
     }
 
@@ -2313,6 +2325,134 @@ mod tests {
         assert!(amount.value.is_none() && amount.evidence.is_empty());
         let values: Vec<_> = amount.candidates.iter().map(|c| c.value.clone()).collect();
         assert!(values.contains(&Some(json!(11000))) && values.contains(&Some(json!(12100))));
+    }
+
+    #[test]
+    fn a_lone_delimiter_is_never_a_value() {
+        // A delimiter drawn as its own run next to its label.
+        let fragments = [
+            frag("a", "請求番号", [60.0, 119.0, 104.0, 130.0]),
+            frag("b", "：", [130.0, 119.0, 141.0, 130.0]),
+            frag("c", "INV-001", [170.0, 119.0, 210.0, 130.0]),
+            frag("d", "Ref", [60.0, 159.0, 80.0, 170.0]),
+            frag("e", " : ", [100.0, 159.0, 110.0, 170.0]),
+        ];
+        let result = fill(
+            "doc",
+            &fragments,
+            &form(json!({"fields":[
+                {"id":"no","label":"請求番号"},
+                {"id":"ref","label":"Ref"}
+            ]})),
+        );
+        for id in ["no", "ref"] {
+            let field = &result.fields[id];
+            assert_eq!(field.status, FillStatus::NotFound, "{id}: {field:?}");
+            assert!(field.candidates.is_empty(), "{id}: {field:?}");
+        }
+        assert!(delimiter_only("：") && delimiter_only(" : :"));
+        assert!(!delimiter_only("：0") && !delimiter_only("9:00"));
+    }
+
+    /// `fragments` (laid out upright) turned to `orientation` on the
+    /// Display page: each box turned about the origin the way the text
+    /// turns, then shifted onto positive coordinates.
+    fn turned(fragments: &[SourceFragment], orientation: Orientation) -> Vec<SourceFragment> {
+        const SHIFT: f64 = 1000.0;
+        fragments
+            .iter()
+            .map(|f| {
+                let Rect {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                } = f.bbox;
+                let [l, t, r, b] = match orientation {
+                    // Bottom to top: the reading start is at the bottom.
+                    Orientation::Deg90 => [top, SHIFT - right, bottom, SHIFT - left],
+                    Orientation::Deg180 => {
+                        [SHIFT - right, SHIFT - bottom, SHIFT - left, SHIFT - top]
+                    }
+                    // Top to bottom: the reading start is at the top.
+                    Orientation::Deg270 => [SHIFT - bottom, left, SHIFT - top, right],
+                    Orientation::Deg0 => [left, top, right, bottom],
+                };
+                SourceFragment {
+                    orientation,
+                    ..frag(&f.id, &f.raw_text, [l, t, r, b])
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn turned_text_follows_the_strict_rules_of_upright_text() {
+        let upright = [
+            // Delimiter-bound within MAX_DELIMITER_GAP_EM (10 pt gap, 11 pt em).
+            frag("a", "請求番号：", [60.0, 100.0, 115.0, 111.0]),
+            frag("b", "INV-001", [125.0, 100.0, 163.5, 111.0]),
+            // 45 pt from its label: beyond 4 em, bound by position only.
+            frag("c", "氏名：", [60.0, 130.0, 93.0, 141.0]),
+            frag("d", "株式会社サンプル", [138.0, 130.0, 226.0, 141.0]),
+            // A plain fragment follows the value on its line: split.
+            frag("e", "住所：", [60.0, 160.0, 93.0, 171.0]),
+            frag("f", "〒100-0001", [100.0, 160.0, 150.0, 171.0]),
+            frag("g", "東京都千代田区", [300.0, 160.0, 377.0, 171.0]),
+        ];
+        let target = form(json!({"fields":[
+            {"id":"number","label":"請求番号"},
+            {"id":"name","label":"氏名"},
+            {"id":"address","label":"住所"}
+        ]}));
+        for orientation in [
+            Orientation::Deg0,
+            Orientation::Deg90,
+            Orientation::Deg180,
+            Orientation::Deg270,
+        ] {
+            let fragments = turned(&upright, orientation);
+            let result = fill("doc", &fragments, &target);
+            let number = &result.fields["number"];
+            assert_eq!(number.status, FillStatus::Filled, "{orientation:?}");
+            assert_eq!(number.raw.as_deref(), Some("INV-001"), "{orientation:?}");
+            assert_eq!(
+                number.evidence[0].bbox, fragments[1].bbox,
+                "{orientation:?}"
+            );
+            assert_eq!(
+                held(&result, "name"),
+                Some(Hold::GeometricOnly),
+                "{orientation:?}"
+            );
+            assert_eq!(result.fields["name"].candidates[0].raw, "株式会社サンプル");
+            assert_eq!(
+                held(&result, "address"),
+                Some(Hold::SplitValue),
+                "{orientation:?}"
+            );
+            assert_eq!(result.fields["address"].candidates[0].raw, "〒100-0001");
+        }
+        // Upright and turned copies of one label never pair with each other.
+        let mut mixed = upright.to_vec();
+        mixed.extend(
+            turned(&upright, Orientation::Deg90)
+                .into_iter()
+                .map(|f| SourceFragment {
+                    id: format!("t{}", f.id),
+                    ..f
+                }),
+        );
+        let result = fill("doc", &mixed, &target);
+        assert_eq!(result.fields["number"].status, FillStatus::Filled);
+        for candidate in &result.fields["address"].candidates {
+            let ids: Vec<&str> = candidate
+                .evidence
+                .iter()
+                .map(|e| e.fragment_id.as_str())
+                .collect();
+            assert!(ids == ["f"] || ids == ["tf"], "{candidate:?}");
+        }
     }
 
     #[test]

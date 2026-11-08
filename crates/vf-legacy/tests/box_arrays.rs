@@ -11,6 +11,7 @@ fn fragment(id: &str, item_index: usize, text: &str, bbox: Rect) -> SourceFragme
         raw_text: text.into(),
         bbox,
         quality: Quality::Usable,
+        orientation: vf_source::Orientation::Deg0,
     }
 }
 

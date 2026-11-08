@@ -13,6 +13,7 @@ fn fragment(id: &str, page: u32, text: &str, x: f64) -> SourceFragment {
         bbox: Rect::new(x, 0., x + 10., 10.)
             .expect("test rectangle must have positive finite extent"),
         quality: Quality::Usable,
+        orientation: vf_source::Orientation::Deg0,
     }
 }
 
@@ -340,4 +341,14 @@ fn string_arrays_validate_every_element_without_truncating_or_joining() {
     assert!(validate::validate(&json!([]), OutputType::StringArray, &[]).is_ok());
     assert!(validate::value_type(&json!(["text"]), OutputType::String).is_err());
     assert!(validate::value_type(&json!("text"), OutputType::String).is_ok());
+}
+
+#[test]
+fn turned_runs_are_not_candidates() {
+    let mut turned = fragment("b", 1, "turned", 20.);
+    turned.orientation = vf_source::Orientation::Deg90;
+    let raw = [fragment("a", 1, "upright", 0.), turned];
+    let index = CandidateIndex::try_new(&raw).expect("source fixture must index");
+    let ids: Vec<&str> = index.candidates().iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, ["c_a"]);
 }

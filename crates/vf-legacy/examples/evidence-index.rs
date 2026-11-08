@@ -18,6 +18,7 @@ fn main() {
                 bbox: Rect::new(0., 0., 10., 10.)
                     .expect("benchmark rectangle must have positive finite extent"),
                 quality: Quality::Usable,
+                orientation: vf_source::Orientation::Deg0,
             })
             .collect();
         for repetition in 0..3 {

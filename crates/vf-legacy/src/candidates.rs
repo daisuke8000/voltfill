@@ -25,7 +25,7 @@ impl<'source> CandidateIndex<'source> {
         Self::try_new(fragments)
     }
 
-    /// Index usable source runs after validating IDs and geometry.
+    /// Index usable upright source runs after validating IDs and geometry.
     pub fn try_new(fragments: &'source [SourceFragment]) -> Result<Self, CandidateError> {
         let mut by_id = BTreeMap::new();
         let mut candidates = Vec::new();
@@ -35,7 +35,11 @@ impl<'source> CandidateIndex<'source> {
             if by_id.insert(f.id.as_str(), f).is_some() {
                 return Err(CandidateError::Provenance);
             }
-            if f.quality != Quality::Usable || f.raw_text.trim().is_empty() {
+            // Turned runs never entered legacy candidates; keep it so.
+            if f.quality != Quality::Usable
+                || !f.orientation.is_upright()
+                || f.raw_text.trim().is_empty()
+            {
                 continue;
             }
             f.bbox.validate().map_err(|_| CandidateError::Provenance)?;
