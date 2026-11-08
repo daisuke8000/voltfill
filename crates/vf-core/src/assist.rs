@@ -15,7 +15,10 @@
 //! an offered candidate is not sent and stays `ambiguous`. A question
 //! carries the form field's label, type and hints and, per offered
 //! candidate, its page, source label text and source value text. No page
-//! images and no other document text are sent.
+//! images and no other document text are sent. AcroForm values that
+//! [`crate::acroform`] offers (placement `widget`, label = the field's fully
+//! qualified name, followed by ` / ` and its `/TU` when it has one) are
+//! offered on the same terms.
 //!
 //! A field becomes `filled` with method `jev_choice` only when the chosen
 //! key is one of its offered candidate ids and is the unique maximum of returned

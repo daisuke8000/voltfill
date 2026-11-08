@@ -233,7 +233,10 @@ fn text_values_decode_pdf_doc_encoding_and_utf8_and_reject_inexact_bytes() {
     let form = extract(&pdf.finish(Some(form(&fields))));
 
     assert_eq!(field(&form, "pdfdoc").value, text("Total • ‰ café"));
+    // High PDFDocEncoding bytes may be another encoding (Shift_JIS) misread.
+    assert_eq!(field(&form, "pdfdoc").issues, [FieldIssue::PdfDocHighBytes]);
     assert_eq!(field(&form, "utf8").value, text("値"));
+    assert!(field(&form, "utf8").issues.is_empty());
     for (name, issue) in [
         ("undefined_byte", ValueIssue::Undecodable),
         ("odd_utf16", ValueIssue::Undecodable),
@@ -850,6 +853,27 @@ fn limits_fail_the_whole_extraction() {
     // The same inputs succeed within the default limits.
     assert_eq!(extract(&chain).fields[0].name, "a.b.c");
     assert_eq!(extract(&shared_value).fields.len(), 50);
+}
+
+#[test]
+fn a_document_without_an_acroform_is_never_an_acroform_error() {
+    let bytes = TestPdf::new(2).finish(None);
+    let absent = AcroForm {
+        present: false,
+        xfa: XfaPresence::Absent,
+        fields: Vec::new(),
+        skipped: Vec::new(),
+    };
+    let mut doc = vf_source::metadata::load(&bytes).unwrap();
+    // Neither the page limit nor encryption applies without a form.
+    let one_page = AcroFormLimits {
+        max_pages: 1,
+        ..AcroFormLimits::default()
+    };
+    assert_eq!(fields_in(&doc, one_page), Ok(absent.clone()));
+    doc.trailer
+        .set("Encrypt", dictionary! { "Filter" => "Standard" });
+    assert_eq!(fields_in(&doc, AcroFormLimits::default()), Ok(absent));
 }
 
 #[test]

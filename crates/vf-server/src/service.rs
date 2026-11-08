@@ -659,8 +659,8 @@ async fn fill_form(State(state): State<AppState>, request: Request) -> Response 
     log::info!(target:"vf_server","{}",json!({"event":"fill_started","pdf_bytes":pdf.len(),"fields":form.fields.len()}));
     run_fill_job(permit, move || {
         let started = Instant::now();
-        let snapshot = match vf_source::inspect(&pdf, pdf_limits) {
-            Ok(snapshot) => snapshot,
+        let (snapshot, acroform) = match vf_source::inspect_with_acroform(&pdf, pdf_limits) {
+            Ok(inspected) => inspected,
             Err(vf_source::PdfError::LimitExceeded) => {
                 return error(StatusCode::PAYLOAD_TOO_LARGE, "input_too_large");
             }
@@ -671,7 +671,13 @@ async fn fill_form(State(state): State<AppState>, request: Request) -> Response 
             deadline: Some(started + deadline),
             ..fill::FillLimits::default()
         };
-        match fill::fill_with_limits(&snapshot.document_id, &snapshot.fragments, &form, &limits) {
+        match vf_core::acroform::fill_with_acroform(
+            &snapshot.document_id,
+            &snapshot.fragments,
+            &acroform,
+            &form,
+            &limits,
+        ) {
             Ok(result) => {
                 let filled = result
                     .fields
