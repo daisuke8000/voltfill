@@ -1,7 +1,8 @@
 //! Source spans selected by a Display-space box, for answers that name a
 //! region instead of text (for example a model box mapped back with
-//! [`ImageTransform::normalized_box_to_display`]). Planned as the source side
-//! of an image fallback for form fill; nothing in fill uses it yet.
+//! [`ImageTransform::normalized_box_to_display`]). It is the source side of
+//! form fill's image fallback (`vf_core::images`, method `jev_box`), which
+//! adds the form-level checks listed under [Fill values](#fill-values).
 //!
 //! # Results
 //!

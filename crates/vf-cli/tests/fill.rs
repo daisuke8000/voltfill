@@ -108,6 +108,9 @@ fn offline_fill_reads_no_credentials_and_keeps_its_shape() {
             ("VOLTFILL_JEV_ENDPOINT", "http://127.0.0.1:9/"),
             ("VOLTFILL_MODEL", "not-a-model"),
             ("VOLTFILL_EXECUTION_CONFIG", &missing),
+            ("VOLTFILL_RENDERER", "not-a-renderer"),
+            ("VOLTFILL_PIXELS_PER_POINT", "not-a-scale"),
+            ("VOLTFILL_PDFIUM_LIB_PATH", &missing),
         ],
     );
     assert_eq!(hostile.status.code(), Some(0), "{:?}", hostile.stderr);
@@ -172,6 +175,217 @@ fn remote_fill_checks_its_settings_before_sending() {
         assert!(out.stdout.is_empty());
         assert_eq!(error(&out), reason, "{args:?}");
         assert!(!String::from_utf8_lossy(&out.stderr).contains("synthetic_secret_canary"));
+    }
+}
+
+#[test]
+fn image_fill_checks_its_renderer_before_credentials_or_sends() {
+    let temp = Temp::new();
+    let (pdf, form) = inputs(&temp);
+    let hayro = if cfg!(feature = "hayro") {
+        // Rendering is configured; the run stops at the missing key.
+        "api_key_required"
+    } else {
+        "hayro_feature_disabled"
+    };
+    let pdfium = if cfg!(feature = "pdfium") {
+        "rendering_required"
+    } else {
+        "pdfium_feature_disabled"
+    };
+    let scale = if cfg!(feature = "hayro") {
+        "invalid_render_scale"
+    } else {
+        "hayro_feature_disabled"
+    };
+    type Env<'a> = &'a [(&'a str, &'a str)];
+    let cases: Vec<(Vec<&str>, Env, &str)> = vec![
+        // Image options need --remote, and rendering options need --images.
+        (vec!["--images"], &[], "invalid_arguments"),
+        (
+            vec!["--remote", "--renderer", "hayro"],
+            &[],
+            "invalid_arguments",
+        ),
+        (
+            vec!["--remote", "--pixels-per-point", "1.5"],
+            &[],
+            "invalid_arguments",
+        ),
+        (
+            vec!["--remote", "--pdfium-lib", "/nonexistent/libpdfium"],
+            &[],
+            "invalid_arguments",
+        ),
+        // No renderer is chosen automatically.
+        (vec!["--remote", "--images"], &[], "rendering_required"),
+        (
+            vec!["--remote", "--images", "--renderer", "skia"],
+            &[],
+            "invalid_renderer",
+        ),
+        (
+            vec![
+                "--remote",
+                "--images",
+                "--renderer",
+                "hayro",
+                "--pdfium-lib",
+                "/nonexistent/libpdfium",
+            ],
+            &[],
+            "renderer_library_conflict",
+        ),
+        (
+            vec![
+                "--remote",
+                "--images",
+                "--renderer",
+                "hayro",
+                "--model",
+                "jev-latest",
+            ],
+            &[],
+            "model_does_not_support_images",
+        ),
+        (
+            vec!["--remote", "--images", "--renderer", "hayro"],
+            &[],
+            hayro,
+        ),
+        (
+            vec!["--remote", "--images"],
+            &[("VOLTFILL_RENDERER", "hayro")],
+            hayro,
+        ),
+        (
+            vec![
+                "--remote",
+                "--images",
+                "--renderer",
+                "hayro",
+                "--pixels-per-point",
+                "0",
+            ],
+            &[],
+            scale,
+        ),
+        (
+            vec!["--remote", "--images", "--renderer", "pdfium"],
+            &[],
+            pdfium,
+        ),
+    ];
+    for (args, env, reason) in cases {
+        let mut full = vec!["fill", pdf.as_str(), form.as_str()];
+        full.extend(args.iter().copied());
+        let out = cli(&full, &temp, env);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(out.stdout.is_empty());
+        assert_eq!(error(&out), reason, "{args:?}");
+    }
+    // `--images` is a fill option only.
+    let schema = temp.file("schema.json", br#"{"schema_version":1,"fields":[]}"#);
+    let out = cli(&["run", &pdf, &schema, "--images"], &temp, &[]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(error(&out), "invalid_arguments");
+}
+
+/// `pages` copies of one Helvetica page with the given MediaBox.
+#[cfg(feature = "hayro")]
+fn pages_pdf(pages: usize, media: &str) -> Vec<u8> {
+    let content = "BT /F1 12 Tf 72 700 Td (Order AB12) Tj ET\n";
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        String::new(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
+            .to_owned(),
+        format!(
+            "<< /Length {} >>\nstream\n{content}endstream",
+            content.len()
+        ),
+    ];
+    let mut kids = Vec::new();
+    for _ in 0..pages {
+        objects.push(format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox {media} /Resources << /Font << /F1 3 0 R >> >> /Contents 4 0 R >>"
+        ));
+        kids.push(format!("{} 0 R", objects.len()));
+    }
+    objects[1] = format!(
+        "<< /Type /Pages /Kids [{}] /Count {pages} >>",
+        kids.join(" ")
+    );
+    let mut pdf = String::from("%PDF-1.4\n");
+    let mut offsets = Vec::new();
+    for (i, object) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf += &format!("{} 0 obj\n{object}\nendobj\n", i + 1);
+    }
+    let xref = pdf.len();
+    pdf += &format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1);
+    for offset in offsets {
+        pdf += &format!("{offset:010} 00000 n \n");
+    }
+    pdf += &format!(
+        "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+        objects.len() + 1
+    );
+    pdf.into_bytes()
+}
+
+/// Page count and page image size are known once the renderer has read the
+/// page tree, so both refusals come before credentials (none are set here:
+/// reading them would end in `api_key_required`) and exit 2.
+#[cfg(feature = "hayro")]
+#[test]
+fn image_fill_refuses_page_count_and_image_size_before_credentials() {
+    let temp = Temp::new();
+    let form = temp.file(
+        "form.json",
+        br#"{"fields":[{"id":"ref","label":"Reference"}]}"#,
+    );
+    for (pdf, scale, reason) in [
+        // 11 Letter pages; the image step takes at most 10.
+        (
+            pages_pdf(11, "[0 0 612 792]"),
+            "1.5",
+            "image_page_limit_exceeded",
+        ),
+        // One A3 page at 1.5 pixels per point is 1263 x 1787 pixels.
+        (
+            pages_pdf(1, "[0 0 842 1191]"),
+            "1.5",
+            "image_size_out_of_range",
+        ),
+        // One Letter page at 2 pixels per point is 1224 x 1584 pixels.
+        (
+            pages_pdf(1, "[0 0 612 792]"),
+            "2",
+            "image_size_out_of_range",
+        ),
+        // A Letter page at 1.5 is accepted; the run stops at the missing key.
+        (pages_pdf(1, "[0 0 612 792]"), "1.5", "api_key_required"),
+    ] {
+        let pdf = temp.file("input.pdf", &pdf);
+        let out = cli(
+            &[
+                "fill",
+                &pdf,
+                &form,
+                "--remote",
+                "--images",
+                "--renderer",
+                "hayro",
+                "--pixels-per-point",
+                scale,
+            ],
+            &temp,
+            &[],
+        );
+        assert_eq!(out.status.code(), Some(2), "{reason}");
+        assert!(out.stdout.is_empty());
+        assert_eq!(error(&out), reason);
     }
 }
 

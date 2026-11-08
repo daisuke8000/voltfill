@@ -25,5 +25,5 @@ log.workspace = true
 
 [features]
 default = []
-pdfium = ["vf-legacy/pdfium", "vf-server/pdfium"]
-hayro = ["vf-legacy/hayro", "vf-server/hayro"]
+pdfium = ["vf-legacy/pdfium", "vf-server/pdfium", "vf-core/pdfium"]
+hayro = ["vf-legacy/hayro", "vf-server/hayro", "vf-core/hayro"]

@@ -2485,6 +2485,7 @@ dependencies = [
  "thiserror",
  "unicode-normalization",
  "vf-client",
+ "vf-render",
  "vf-source",
 ]
 

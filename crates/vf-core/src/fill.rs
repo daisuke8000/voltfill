@@ -401,10 +401,28 @@ pub struct FillCandidate {
     pub evidence: Vec<FillEvidence>,
 }
 
+/// [`LocatedBox::source`]: geometry reported by the model.
+pub const MODEL_GEOMETRY: &str = "model";
+
+/// Where a model's box answer placed a field's value on a rendered page
+/// (image fallback). Model geometry, never measured from the PDF and never
+/// a value: it carries no text.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LocatedBox {
+    /// Always [`MODEL_GEOMETRY`].
+    pub source: &'static str,
+    pub page: u32,
+    /// The answered box in Display coordinates (PDF points, top-left
+    /// origin), before any expansion.
+    pub bbox: Rect,
+    /// The answered box as fractions of the sent page image.
+    pub normalized: Rect,
+}
+
 /// The result for one form field.
 ///
 /// Serialized with the fields below in order, leaving out `method`, `raw`,
-/// `value` and `rows` when `None`. `candidates` and `table_candidates` share
+/// `value`, `rows` and `located` when `None`. `candidates` and `table_candidates` share
 /// the JSON key `candidates`: a scalar field has only value candidates and
 /// a table field only table candidates, never both (checked in debug
 /// builds); the key is written once, from whichever is not empty, and left
@@ -429,6 +447,9 @@ pub struct FieldFill {
     /// Scalar fields only: AcroForm fields whose name matched the field,
     /// with every rule they failed ([`crate::acroform`]).
     pub acroform: Vec<crate::acroform::AcroFormMatch>,
+    /// Model geometry from the image fallback: the box a `jev_box` value was
+    /// selected from, or, on a page without a text layer, the only result.
+    pub located: Option<LocatedBox>,
 }
 
 impl FieldFill {
@@ -446,7 +467,7 @@ impl Serialize for FieldFill {
             self.candidates_exclusive(),
             "a field has value or table candidates, never both"
         );
-        let mut out = serializer.serialize_struct("FieldFill", 8)?;
+        let mut out = serializer.serialize_struct("FieldFill", 9)?;
         out.serialize_field("status", &self.status)?;
         match &self.method {
             Some(method) => out.serialize_field("method", method)?,
@@ -476,6 +497,10 @@ impl Serialize for FieldFill {
             out.skip_field("acroform")?;
         } else {
             out.serialize_field("acroform", &self.acroform)?;
+        }
+        match &self.located {
+            Some(located) => out.serialize_field("located", located)?,
+            None => out.skip_field("located")?,
         }
         out.end()
     }
@@ -566,65 +591,19 @@ pub fn fill_with_limits(
             acroform: None,
         });
     }
-    // Whitespace-only splits start with a form label or hint (table column
-    // labels and hints included), and their values hold none, compared
-    // exactly as `label_score` does (base or stem, then qualifiers).
-    let mut exact = BTreeSet::new();
-    for name in form.fields.iter().flat_map(|f| {
-        std::iter::once(&f.label)
-            .chain(&f.hints)
-            .chain(f.columns.iter().flat_map(FormColumn::names))
-    }) {
-        budget.spend_bytes(name)?;
-        let label = normalize_label(name);
-        if !label.base.is_empty() {
-            exact.insert((label.stem, label.qualifiers));
-        }
-    }
-    let mut is_label = |text: &str| {
-        let label = normalize_label(text);
-        !label.base.is_empty() && exact.contains(&(label.stem, label.qualifiers))
-    };
-    let layout = layout::analyze_with_labels(
-        fragments,
-        limits.max_pairs,
-        Some(&mut is_label),
-        &mut budget,
-    )?;
+    let layout = analyze(form, fragments, limits.max_pairs, &mut budget)?;
     let pairs = layout.pairs;
     budget.spend(fragments.len() as u64)?;
     let texts: HashMap<&str, &SourceFragment> =
         fragments.iter().map(|f| (f.id.as_str(), f)).collect();
-    // A unit note on any page may scale every amount and number of the
-    // document: a note on an earlier page (or after a table) still applies.
-    let mut scaled_document = false;
-    for fragment in fragments {
-        budget.spend(note_cost(&fragment.raw_text))?;
-        if unit_note(&fragment.raw_text) {
-            scaled_document = true;
-            break;
-        }
-    }
-    if !scaled_document {
-        scaled_document = split_unit_note(&layout.lines, fragments, &mut budget)?;
-    }
-    // A value that reads as one of the form's own labels is a neighbouring label, not a value.
-    let mut labels = BTreeSet::new();
-    for name in form.fields.iter().flat_map(|f| {
-        std::iter::once(&f.label)
-            .chain(&f.hints)
-            .chain(f.columns.iter().flat_map(FormColumn::names))
-    }) {
-        budget.spend_bytes(name)?;
-        labels.insert(normalize_label(name).stem);
-    }
+    let rules = Rules::new(form, fragments, &layout.lines, &mut budget)?;
     let index = PairLabels::new(&pairs, &texts, &mut budget)?;
     let context = Context {
         pairs: &pairs,
         index: &index,
         texts: &texts,
-        labels: &labels,
-        scaled_document,
+        labels: &rules.labels,
+        scaled_document: rules.scaled_document,
     };
     let mut cache = Cache {
         slots: (0..pairs.len()).map(|_| None).collect(),
@@ -634,7 +613,7 @@ pub fn fill_with_limits(
             fragments,
             &layout.lines,
             &texts,
-            scaled_document,
+            rules.scaled_document,
             &mut budget,
         )?)
     } else {
@@ -660,6 +639,42 @@ pub fn fill_with_limits(
     })
 }
 
+/// Layout analysis as offline fill runs it: with [`Binding::Whitespace`]
+/// hypotheses for the form's labels and hints. The image step analyses the
+/// document the same way, so both see the same pairs.
+pub(crate) fn analyze(
+    form: &Form,
+    fragments: &[SourceFragment],
+    max_pairs: usize,
+    budget: &mut Budget,
+) -> Result<layout::Layout, FillError> {
+    // Whitespace-only splits start with a form label or hint (table column
+    // labels and hints included), and their values hold none, compared
+    // exactly as `label_score` does (base or stem, then qualifiers).
+    let mut exact = BTreeSet::new();
+    for name in form.fields.iter().flat_map(|f| {
+        std::iter::once(&f.label)
+            .chain(&f.hints)
+            .chain(f.columns.iter().flat_map(FormColumn::names))
+    }) {
+        budget.spend_bytes(name)?;
+        let label = normalize_label(name);
+        if !label.base.is_empty() {
+            exact.insert((label.stem, label.qualifiers));
+        }
+    }
+    let mut is_label = |text: &str| {
+        let label = normalize_label(text);
+        !label.base.is_empty() && exact.contains(&(label.stem, label.qualifiers))
+    };
+    Ok(layout::analyze_with_labels(
+        fragments,
+        max_pairs,
+        Some(&mut is_label),
+        budget,
+    )?)
+}
+
 pub(crate) fn empty(status: FillStatus) -> FieldFill {
     FieldFill {
         status,
@@ -671,6 +686,147 @@ pub(crate) fn empty(status: FillStatus) -> FieldFill {
         candidates: Vec::new(),
         table_candidates: Vec::new(),
         acroform: Vec::new(),
+        located: None,
+    }
+}
+
+/// Offline fill's document-wide rules, shared with the image fallback
+/// ([`crate::images`]) so that both apply the same label and value grammar.
+pub(crate) struct Rules {
+    /// The form's labels, hints and table column names ([`Label::stem`]). A value
+    /// that reads as one of them is a neighbouring label, not a value.
+    pub(crate) labels: BTreeSet<String>,
+    /// Some page of the document has a unit note ([`unit_note`]).
+    pub(crate) scaled_document: bool,
+}
+
+/// Why [`Rules::value`] refused a text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ValueRefusal {
+    /// A text value holds more than one value ([`Hold::SeveralValues`]).
+    SeveralValues,
+    /// An amount or number in a scaled document: offline fill does not
+    /// normalize it either.
+    Scaled,
+    /// The text is not one value of the field's type.
+    Type,
+}
+
+impl Rules {
+    pub(crate) fn new(
+        form: &Form,
+        fragments: &[SourceFragment],
+        lines: &[layout::Line],
+        budget: &mut Budget,
+    ) -> Result<Self, BudgetError> {
+        // A unit note on any page may scale every amount and number of the
+        // document: a note on an earlier page (or after a table) still applies.
+        let mut scaled_document = false;
+        for fragment in fragments {
+            budget.spend(note_cost(&fragment.raw_text))?;
+            if unit_note(&fragment.raw_text) {
+                scaled_document = true;
+                break;
+            }
+        }
+        if !scaled_document {
+            scaled_document = split_unit_note(lines, fragments, budget)?;
+        }
+        // A value that reads as one of the form's own labels (or table
+        // column names) is a neighbouring label, not a value.
+        let mut labels = BTreeSet::new();
+        for name in form.fields.iter().flat_map(|f| {
+            std::iter::once(&f.label)
+                .chain(&f.hints)
+                .chain(f.columns.iter().flat_map(FormColumn::names))
+        }) {
+            budget.spend_bytes(name)?;
+            labels.insert(normalize_label(name).stem);
+        }
+        Ok(Self {
+            labels,
+            scaled_document,
+        })
+    }
+
+    /// Whether `text` reads as one of the form's labels, hints or table
+    /// column names: a value line that does is a neighbouring label, not a
+    /// value: offline fill rejects a pair whose first value line does and
+    /// ends a multi-line value before a later one that does.
+    pub(crate) fn is_label(&self, text: &str) -> bool {
+        self.labels.contains(&normalize_label(text).stem)
+    }
+
+    /// The value of `raw` for a field of `field_type`, by offline fill's
+    /// value conditions (c) and (d): a text value holds one value, and a
+    /// date, amount or number matches its type's grammar as a whole and an
+    /// amount or number is not scaled by a unit note of the document. The
+    /// caller checks the labels over the value with [`label_states_scale`].
+    pub(crate) fn value(
+        &self,
+        field_type: FieldType,
+        raw: &str,
+        budget: &mut Budget,
+    ) -> Result<Result<Value, ValueRefusal>, BudgetError> {
+        // NFKC, label normalization and the value-shape scan, as offline.
+        budget.spend(5 * raw.len() as u64)?;
+        if field_type == FieldType::Text {
+            let nfkc: String = raw.nfkc().collect();
+            return Ok(if several_values(&nfkc, &self.labels, budget)? {
+                Err(ValueRefusal::SeveralValues)
+            } else {
+                Ok(Value::String(raw.to_owned()))
+            });
+        }
+        if field_type != FieldType::Date && self.scaled_document {
+            return Ok(Err(ValueRefusal::Scaled));
+        }
+        Ok(normalize_value(field_type, raw).ok_or(ValueRefusal::Type))
+    }
+}
+
+/// Whether a document label states a scale unit (`売上高（千円）`), so that
+/// offline fill leaves the amounts and numbers it labels unnormalized.
+pub(crate) fn label_states_scale(text: &str) -> bool {
+    states_scale(&normalize_label(text))
+}
+
+/// A form field's label and hints, normalized as offline fill compares
+/// them with document labels.
+pub(crate) struct Names(Vec<Label>);
+
+impl Names {
+    pub(crate) fn new(field: &FormField) -> Self {
+        Self(
+            std::iter::once(&field.label)
+                .chain(&field.hints)
+                .map(|name| normalize_label(name))
+                .filter(|label| !label.base.is_empty())
+                .collect(),
+        )
+    }
+
+    fn best(&self, text: &str) -> Match {
+        let label = normalize_label(text);
+        self.0
+            .iter()
+            .map(|name| label_score(name, &label))
+            .fold(Match::NONE, Match::better)
+    }
+
+    /// Commit condition (a): `text` is the label or one of the hints after
+    /// normalization, with no [`Hold::PartialLabel`] or
+    /// [`Hold::OneSidedQualifier`].
+    pub(crate) fn equal(&self, text: &str) -> bool {
+        let best = self.best(text);
+        best.score >= 1.0 && !best.held()
+    }
+
+    /// Whether offline fill would take `text` as a label candidate of this
+    /// field (an equal label, or a partial or one-sided one scoring at least
+    /// [`MIN_PARTIAL`]).
+    pub(crate) fn matches(&self, text: &str) -> bool {
+        self.best(text).score >= MIN_PARTIAL
     }
 }
 

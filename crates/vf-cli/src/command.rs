@@ -16,7 +16,7 @@ use vf_legacy::jev::transport::{ExecutionConfig, Secret};
 use vf_legacy::model::{JevResponse, Strategy};
 use vf_legacy::{pdf, schema};
 
-const HELP: &str = "VOLTFILL — PDF extraction\n\nvoltfill run --config voltfill.yaml (or voltfill.toml / voltfill.json)\nvoltfill serve --config voltfill.yaml\nvoltfill serve --help\nvoltfill run INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --mock ANSWERS.json\nvoltfill inspect INPUT.pdf\nvoltfill fill INPUT.pdf FORM.json (offline: match form labels to PDF text and AcroForm field values)\nvoltfill fill INPUT.pdf FORM.json --remote (Jev chooses among ambiguous fields' source candidates)\n--deadline-ms N bounds fill's layout and matching from the start of fill (default: 30000,\n1 to 600000); PDF inspection is bounded by its own limits and is not interrupted.\nPast a fill limit, fill exits 4 (layout_limit_exceeded, fill_budget_exceeded or\nfill_deadline_exceeded) before writing a result or sending a request.\nvoltfill validate SCHEMA.json\n\n--strategy text|vision|hybrid (default: text)\n--model ID (default: jev-1.14.0); images require a pinned version >= 1.14.0.\n--renderer pdfium|hayro selects an enabled renderer; no automatic fallback.\n--pdfium-lib PATH or VOLTFILL_PDFIUM_LIB_PATH selects PDFium when --renderer is omitted\n--pixels-per-point NUMBER sets render scale (default: 1.5).\n--config FILE (or -c FILE, default VOLTFILL_CONFIG) loads YAML/TOML launch settings or legacy JSON execution limits.\nPrecedence: CLI > selected file > environment > defaults.\n--resource-config FILE (or VOLTFILL_RESOURCE_CONFIG) lowers PDF/render ceilings.\nVOLTFILL_EXECUTION_CONFIG selects execution JSON when no execution section/file is supplied.\nVOLTFILL_MODEL, VOLTFILL_STRATEGY, VOLTFILL_RENDERER, VOLTFILL_PIXELS_PER_POINT\nand VOLTFILL_LOG_LEVEL provide startup defaults.\n--max-concurrency N (default: 2, at least 1); rate limits may reduce concurrency.\n--max-attempts 1|2|3 includes the first attempt (default: 3).\n--log-level off|error|warn|info|debug (default: off) enables JSON Lines logs.\nLogs use stderr with JSON on stdout; with --output FILE (or -o FILE),\nlogs use stdout and results go to the file. Debug logs cover VOLTFILL only.\n--dry-run inspects the input without sending requests.\n--evaluation-profile synthetic enables confidence filtering for local synthetic examples.\nBy default, resolved values are returned without a confidence cutoff.\n\nRemote mode requires VOLTFILL_JEV_ENDPOINT (trusted HTTPS, no URL fallback) and\nVOLTFILL_JEV_API_KEY or VOLTFILL_JEV_API_KEY_FILE (one explicit credential file). Vision/Hybrid select image input;\nno additional image permission flag is required. Reports retain original\nresponse bodies regardless of log level and remain evaluation-only.\nLong-form --pdf, --schema, --allow-remote and --execution-config are also supported.\n\nfill --remote sends only fields left ambiguous, as choices among their own source\ncandidates (label and value text, no images); values still come from the PDF.\nIt accepts --model, --max-attempts and --execution-config FILE (not --config);\nbatches are sent one at a time. --deadline-ms bounds only the offline step;\nrequests are bounded by the execution config (total_deadline_ms). If every sent field fails, the full result is\nstill written and the exit code is 4 (fill_assist_all_failed). Fields left ambiguous or not_found (also\nwhen every sent field ends in not_unique_maximum) exit 0: check each status.\nWithout --remote, fill reads no credentials.\n\n--output FILE is checked and its temporary file created in FILE's directory after\nconfiguration files are read and before inputs, credentials or requests. If the\nresult cannot replace FILE (exit code 5), a file verified to hold all of it, in\nFILE's directory or else the working directory, is named in output_kept; if none\ncan hold it, stderr gets {\"error\":REASON,\"result\":RESULT}.\n";
+const HELP: &str = "VOLTFILL — PDF extraction\n\nvoltfill run --config voltfill.yaml (or voltfill.toml / voltfill.json)\nvoltfill serve --config voltfill.yaml\nvoltfill serve --help\nvoltfill run INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --mock ANSWERS.json\nvoltfill inspect INPUT.pdf\nvoltfill fill INPUT.pdf FORM.json (offline: match form labels to PDF text and AcroForm field values)\nvoltfill fill INPUT.pdf FORM.json --remote (Jev chooses among ambiguous fields' source candidates)\nvoltfill fill INPUT.pdf FORM.json --remote --images --renderer hayro|pdfium (then asks where values are on page images)\n--deadline-ms N bounds fill's layout and matching from the start of fill (default: 30000,\n1 to 600000); PDF inspection is bounded by its own limits and is not interrupted.\nPast a fill limit, fill exits 4 (layout_limit_exceeded, fill_budget_exceeded or\nfill_deadline_exceeded) before writing a result or sending a request.\nvoltfill validate SCHEMA.json\n\n--strategy text|vision|hybrid (default: text)\n--model ID (default: jev-1.14.0); images require a pinned version >= 1.14.0.\n--renderer pdfium|hayro selects an enabled renderer; no automatic fallback.\n--pdfium-lib PATH or VOLTFILL_PDFIUM_LIB_PATH selects PDFium when --renderer is omitted\n--pixels-per-point NUMBER sets render scale (default: 1.5).\n--config FILE (or -c FILE, default VOLTFILL_CONFIG) loads YAML/TOML launch settings or legacy JSON execution limits.\nPrecedence: CLI > selected file > environment > defaults.\n--resource-config FILE (or VOLTFILL_RESOURCE_CONFIG) lowers PDF/render ceilings.\nVOLTFILL_EXECUTION_CONFIG selects execution JSON when no execution section/file is supplied.\nVOLTFILL_MODEL, VOLTFILL_STRATEGY, VOLTFILL_RENDERER, VOLTFILL_PIXELS_PER_POINT\nand VOLTFILL_LOG_LEVEL provide startup defaults.\n--max-concurrency N (default: 2, at least 1); rate limits may reduce concurrency.\n--max-attempts 1|2|3 includes the first attempt (default: 3).\n--log-level off|error|warn|info|debug (default: off) enables JSON Lines logs.\nLogs use stderr with JSON on stdout; with --output FILE (or -o FILE),\nlogs use stdout and results go to the file. Debug logs cover VOLTFILL only.\n--dry-run inspects the input without sending requests.\n--evaluation-profile synthetic enables confidence filtering for local synthetic examples.\nBy default, resolved values are returned without a confidence cutoff.\n\nRemote mode requires VOLTFILL_JEV_ENDPOINT (trusted HTTPS, no URL fallback) and\nVOLTFILL_JEV_API_KEY or VOLTFILL_JEV_API_KEY_FILE (one explicit credential file). Vision/Hybrid select image input;\nno additional image permission flag is required. Reports retain original\nresponse bodies regardless of log level and remain evaluation-only.\nLong-form --pdf, --schema, --allow-remote and --execution-config are also supported.\n\nfill --remote sends only fields left ambiguous, as choices among their own source\ncandidates (label and value text, no images); values still come from the PDF.\nIt accepts --model, --max-attempts and --execution-config FILE (not --config);\nbatches are sent one at a time. --deadline-ms bounds only offline work (also\nwith --images, below); requests are bounded by the execution config (total_deadline_ms). If every sent field fails, the full result is\nstill written and the exit code is 4 (fill_assist_all_failed). Fields left ambiguous or not_found (also\nwhen every sent field ends in not_unique_maximum) exit 0: check each status.\nWithout --remote, fill reads no credentials.\n\nfill --remote --images then sends page images, with the labels, types and hints of\nthe fields still ambiguous, not_found or no_text, and asks where each value is.\nValues still come from the PDF text layer; a page without one only gets a\nlocated box. It needs --renderer (or --pdfium-lib / VOLTFILL_PDFIUM_LIB_PATH,\nas for extract) and accepts --pixels-per-point; documents of up to 10 pages.\nA document with more pages, or a page image outside 280-1568 pixels per side,\nexits 2 (image_page_limit_exceeded, image_size_out_of_range) before credentials\nare read. --deadline-ms also bounds the image step's layout analysis and box\nselections, counted from the start of fill, so request time counts against it:\npast it, fields still to be judged end deadline_exceeded and are not filled\n(raise --deadline-ms for --images). Like the offline step's layout limits, the\nimage step's are checked after credentials are read (exit 4 before any send).\nExit code 4 applies when every choice and image record failed.\n\n--output FILE is checked and its temporary file created in FILE's directory after\nconfiguration files are read and before inputs, credentials or requests. If the\nresult cannot replace FILE (exit code 5), a file verified to hold all of it, in\nFILE's directory or else the working directory, is named in output_kept; if none\ncan hold it, stderr gets {\"error\":REASON,\"result\":RESULT}.\n";
 
 struct Args {
     command: String,
@@ -71,7 +71,14 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, (u8, &'sta
             _ => &arg,
         }
         .to_owned();
-        if ["--allow-remote", "--allow-preview-images", "--dry-run"].contains(&arg.as_str()) {
+        if [
+            "--allow-remote",
+            "--allow-preview-images",
+            "--dry-run",
+            "--images",
+        ]
+        .contains(&arg.as_str())
+        {
             if !flags.insert(arg) {
                 return Err(input_error());
             }
@@ -122,11 +129,33 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, (u8, &'sta
     // Only `fill` accepts `--remote` among these commands; its remote options
     // are rejected without it so offline fill stays unchanged.
     let remote_fill = command == "fill" && flags.contains("--allow-remote");
+    // Rendering options belong to `fill --remote --images` only.
+    let image_fill = remote_fill && flags.contains("--images");
+    if flags.contains("--images") && !image_fill {
+        return Err(input_error());
+    }
     let allowed: Option<(&[&str], &[&str])> = match command.as_str() {
         "validate" => Some((&["--schema", "--log-level"], &[])),
         "inspect" => Some((
             &["--pdf", "--output", "--log-level", "--resource-config"],
             &[],
+        )),
+        "fill" if image_fill => Some((
+            &[
+                "--pdf",
+                "--form",
+                "--output",
+                "--log-level",
+                "--resource-config",
+                "--model",
+                "--max-attempts",
+                "--execution-config",
+                "--deadline-ms",
+                "--renderer",
+                "--pdfium-lib",
+                "--pixels-per-point",
+            ],
+            &["--allow-remote", "--images"],
         )),
         "fill" if remote_fill => Some((
             &[
@@ -171,6 +200,16 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, (u8, &'sta
             &[
                 ("--model", "VOLTFILL_MODEL"),
                 ("--execution-config", "VOLTFILL_EXECUTION_CONFIG"),
+            ],
+        )
+        .map_err(|e| (2, e))?;
+    }
+    if image_fill {
+        settings::defaults(
+            &mut values,
+            &[
+                ("--renderer", "VOLTFILL_RENDERER"),
+                ("--pixels-per-point", "VOLTFILL_PIXELS_PER_POINT"),
             ],
         )
         .map_err(|e| (2, e))?;
@@ -666,11 +705,10 @@ fn execute<E: Evaluator>(
     log::info!(target: "vf_cli", "{}", json!({"event":"extraction_completed","fields":form.fields.len(),"exit_code":code}));
     Ok(code)
 }
-fn configure_rendering(
-    options: &mut ExtractOptions,
-    args: &Args,
-) -> Result<(), (u8, &'static str)> {
-    let _ = &options;
+/// The renderer chosen by `--renderer`, or PDFium when only a library path
+/// is given (`--pdfium-lib` / `VOLTFILL_PDFIUM_LIB_PATH`); `None` when no
+/// renderer is selected. No automatic fallback or library search.
+fn select_renderer(args: &Args) -> Result<Option<&'static str>, (u8, &'static str)> {
     let renderer = args.values.get("--renderer").map(String::as_str);
     if renderer.is_some_and(|value| !["pdfium", "hayro"].contains(&value)) {
         return Err((2, "invalid_renderer"));
@@ -678,13 +716,16 @@ fn configure_rendering(
     if renderer == Some("hayro") && args.values.contains_key("--pdfium-lib") {
         return Err((2, "renderer_library_conflict"));
     }
-    let renderer = renderer.or(args.library_path.as_ref().map(|_| "pdfium"));
-    let Some(renderer) = renderer else {
-        return if args.values.contains_key("--pixels-per-point") {
-            Err(input_error())
-        } else {
-            Ok(())
-        };
+    let renderer = match renderer.or(args.library_path.as_ref().map(|_| "pdfium")) {
+        Some("hayro") => "hayro",
+        Some(_) => "pdfium",
+        None => {
+            return if args.values.contains_key("--pixels-per-point") {
+                Err(input_error())
+            } else {
+                Ok(None)
+            };
+        }
     };
     if renderer == "hayro" && !cfg!(feature = "hayro") {
         return Err((2, "hayro_feature_disabled"));
@@ -697,31 +738,89 @@ fn configure_rendering(
             return Err((2, "rendering_required"));
         }
     }
+    Ok(Some(renderer))
+}
+#[cfg(any(feature = "pdfium", feature = "hayro"))]
+fn render_config(
+    args: &Args,
+    renderer: &str,
+) -> Result<vf_legacy::render::RenderConfig, (u8, &'static str)> {
+    let mut config = if renderer == "hayro" {
+        vf_legacy::render::RenderConfig::hayro()
+    } else {
+        vf_legacy::render::RenderConfig::new(
+            args.library_path
+                .as_ref()
+                .ok_or((2, "rendering_required"))?,
+        )
+    };
+    config.pixels_per_point = args
+        .values
+        .get("--pixels-per-point")
+        .map(|scale| scale.parse::<f64>())
+        .transpose()
+        .map_err(|_| (2, "invalid_render_scale"))?
+        .unwrap_or(1.5);
+    if !config.pixels_per_point.is_finite() || config.pixels_per_point <= 0.0 {
+        return Err((2, "invalid_render_scale"));
+    }
+    args.resources.apply_render(&mut config);
+    Ok(config)
+}
+fn configure_rendering(
+    options: &mut ExtractOptions,
+    args: &Args,
+) -> Result<(), (u8, &'static str)> {
+    let _ = &options;
+    let Some(renderer) = select_renderer(args)? else {
+        return Ok(());
+    };
     #[cfg(any(feature = "pdfium", feature = "hayro"))]
     {
-        let mut config = if renderer == "hayro" {
-            vf_legacy::render::RenderConfig::hayro()
-        } else {
-            vf_legacy::render::RenderConfig::new(
-                args.library_path
-                    .as_ref()
-                    .ok_or((2, "rendering_required"))?,
-            )
-        };
-        config.pixels_per_point = args
-            .values
-            .get("--pixels-per-point")
-            .map(|scale| scale.parse::<f64>())
-            .transpose()
-            .map_err(|_| (2, "invalid_render_scale"))?
-            .unwrap_or(1.5);
-        if !config.pixels_per_point.is_finite() || config.pixels_per_point <= 0.0 {
-            return Err((2, "invalid_render_scale"));
-        }
-        args.resources.apply_render(&mut config);
-        options.render_config = Some(config);
+        options.render_config = Some(render_config(args, renderer)?);
     }
+    #[cfg(not(any(feature = "pdfium", feature = "hayro")))]
+    let _ = renderer;
     Ok(())
+}
+/// The validated render configuration for `fill --remote --images`. Without
+/// a renderer feature no configuration can exist.
+#[cfg(any(feature = "pdfium", feature = "hayro"))]
+type FillRender = vf_core::images::RenderConfig;
+#[cfg(not(any(feature = "pdfium", feature = "hayro")))]
+type FillRender = std::convert::Infallible;
+fn fill_render(args: &Args, model: &str) -> Result<FillRender, (u8, &'static str)> {
+    if !vf_core::images::supports_images(model) {
+        return Err((2, "model_does_not_support_images"));
+    }
+    let renderer = select_renderer(args)?.ok_or((2, "rendering_required"))?;
+    #[cfg(any(feature = "pdfium", feature = "hayro"))]
+    {
+        let config = render_config(args, renderer)?;
+        config
+            .validate()
+            .map_err(|_| (2, "invalid_render_config"))?;
+        Ok(config)
+    }
+    #[cfg(not(any(feature = "pdfium", feature = "hayro")))]
+    {
+        let _ = renderer;
+        Err((2, "rendering_required"))
+    }
+}
+/// Exit code and reason for an image-step refusal; every one comes before a
+/// send. The two input refusals (page count, image size) exit 2 like other
+/// unusable inputs, whether found right after the renderer opens or later.
+#[cfg(any(feature = "pdfium", feature = "hayro"))]
+fn image_error(error: vf_core::images::ImageError) -> (u8, &'static str) {
+    use vf_core::images::ImageError;
+    match error {
+        ImageError::PageLimit => (2, "image_page_limit_exceeded"),
+        ImageError::ImageSize => (2, "image_size_out_of_range"),
+        ImageError::ModelWithoutImages => (2, "model_does_not_support_images"),
+        ImageError::Fill(error) => (4, error.code()),
+        _ => (4, "fill_assist_failed"),
+    }
 }
 fn log_level(args: &Args) -> Result<log::LevelFilter, (u8, &'static str)> {
     match args
@@ -829,6 +928,10 @@ fn run_command<E: Evaluator, T: assist::Transport, C: assist::Clock>(
         // Layout and matching stop at the deadline; inspection is bounded by
         // PdfLimits and is not interrupted, but its time counts.
         let deadline = Instant::now() + fill_deadline(args)?;
+        let limits = vf_core::fill::FillLimits {
+            deadline: Some(deadline),
+            ..vf_core::fill::FillLimits::default()
+        };
         // Remote options are validated before any input or credential is read.
         let options = if args.flag("--allow-remote") {
             let options = assist::AssistOptions {
@@ -848,10 +951,35 @@ fn run_command<E: Evaluator, T: assist::Transport, C: assist::Clock>(
         } else {
             None
         };
+        let render = match &options {
+            Some(options) if args.flag("--images") => Some(fill_render(args, &options.model)?),
+            _ => None,
+        };
         let form =
             vf_core::fill::parse_form(&read(args.value("--form")?, vf_core::fill::MAX_FORM_BYTES)?)
                 .map_err(|_| (2, "invalid_form"))?;
         let bytes = read(args.value("--pdf")?, args.resources.pdf.max_bytes)?;
+        // The renderer reads the page tree and page geometry before any
+        // credential is read, so a document the image step must refuse (too
+        // many pages, a page image outside the accepted size) stops here; the
+        // backend loads when the first page is rendered.
+        // The image step's layout analysis and selections share the
+        // `--deadline-ms` deadline of the offline step.
+        #[cfg(any(feature = "pdfium", feature = "hayro"))]
+        let image_options = vf_core::images::ImageOptions {
+            limits,
+            ..vf_core::images::ImageOptions::default()
+        };
+        #[cfg(any(feature = "pdfium", feature = "hayro"))]
+        let mut renderer = match &render {
+            Some(config) => {
+                let renderer = vf_core::images::DocumentRenderer::open(&bytes, config)
+                    .map_err(|_| (4, "render_unavailable"))?;
+                vf_core::images::check_pages(&renderer, &image_options).map_err(image_error)?;
+                Some(renderer)
+            }
+            None => None,
+        };
         let remote = match options {
             Some(options) => Some((options, load_secret()?, make_fill_remote()?)),
             None => None,
@@ -863,25 +991,56 @@ fn run_command<E: Evaluator, T: assist::Transport, C: assist::Clock>(
             &snapshot.fragments,
             &acroform,
             &form,
-            &vf_core::fill::FillLimits {
-                deadline: Some(deadline),
-                ..vf_core::fill::FillLimits::default()
-            },
+            &limits,
         )
         .map_err(|error| (4, error.code()))?;
         let Some((options, secret, (mut transport, mut clock))) = remote else {
             output(sink, &result)?;
             return Ok(0);
         };
-        log::debug!(target: "vf_cli", "{}", json!({"event":"fill_assist_config","model":options.model,"config":options.execution}));
-        let assisted = assist::assist(result, &form, &options, &secret, &mut transport, &mut clock)
-            .map_err(|_| (4, "fill_assist_failed"))?;
+        log::debug!(target: "vf_cli", "{}", json!({"event":"fill_assist_config","model":options.model,"config":options.execution,"images":render.is_some()}));
+        let assisted = match render {
+            None => assist::assist(result, &form, &options, &secret, &mut transport, &mut clock)
+                .map_err(|_| (4, "fill_assist_failed"))?,
+            #[cfg(any(feature = "pdfium", feature = "hayro"))]
+            Some(_) => {
+                use vf_core::images::{self, ImageInputs};
+                let renderer = renderer.as_mut().ok_or((4, "render_unavailable"))?;
+                images::assist_with_images(
+                    result,
+                    &form,
+                    &options,
+                    ImageInputs {
+                        snapshot: &snapshot,
+                        renderer,
+                        options: &image_options,
+                    },
+                    &secret,
+                    &mut transport,
+                    &mut clock,
+                )
+                .map_err(image_error)?
+            }
+            #[cfg(not(any(feature = "pdfium", feature = "hayro")))]
+            Some(never) => match never {},
+        };
         output(sink, &assisted)?;
         // The full result with every received body is written first; a run in
-        // which every sent field failed then exits like a failed extraction.
-        let all_failed =
-            !assisted.assist.is_empty() && assisted.assist.values().all(|a| a.outcome.is_failure());
-        log::info!(target: "vf_cli", "{}", json!({"event":"fill_assist_completed","questions":assisted.assist.len(),"attempts":assisted.usage.attempts,"responses":assisted.jev_responses.len(),"exit_code":if all_failed { 4 } else { 0 }}));
+        // which every field of every step failed then exits like a failed
+        // extraction.
+        let failures: Vec<bool> = assisted
+            .assist
+            .values()
+            .map(|a| a.outcome.is_failure())
+            .chain(
+                assisted
+                    .image_assist
+                    .values()
+                    .map(|a| a.outcome.is_failure()),
+            )
+            .collect();
+        let all_failed = !failures.is_empty() && failures.iter().all(|&failed| failed);
+        log::info!(target: "vf_cli", "{}", json!({"event":"fill_assist_completed","questions":assisted.assist.len(),"image_fields":assisted.image_assist.len(),"attempts":assisted.usage.attempts,"responses":assisted.jev_responses.len(),"exit_code":if all_failed { 4 } else { 0 }}));
         if all_failed {
             return Err((4, "fill_assist_all_failed"));
         }
@@ -2098,5 +2257,274 @@ mod tests {
                 .iter()
                 .all(|r| r["http_status"] == 503 && r["body"] == "private_unavailable_canary")
         );
+    }
+
+    /// One Letter page with a gray rectangle and no text layer, like a scan.
+    #[cfg(feature = "hayro")]
+    fn scanned_pdf() -> Vec<u8> {
+        let content = "0.5 g 72 500 300 200 re f\n";
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>".to_owned(),
+            format!(
+                "<< /Length {} >>\nstream\n{content}endstream",
+                content.len()
+            ),
+        ];
+        let mut pdf = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::new();
+        for (i, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf += &format!("{} 0 obj\n{object}\nendobj\n", i + 1);
+        }
+        let xref = pdf.len();
+        pdf += &format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1);
+        for offset in offsets {
+            pdf += &format!("{offset:010} 00000 n \n");
+        }
+        pdf += &format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        );
+        pdf.into_bytes()
+    }
+
+    /// Answers image requests: the first with 503, then present at a fixed box.
+    /// Content type and body of each send.
+    #[cfg(feature = "hayro")]
+    type Sends = Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
+    #[cfg(feature = "hayro")]
+    #[derive(Clone)]
+    struct ImageWire(Sends);
+    #[cfg(feature = "hayro")]
+    impl Transport for ImageWire {
+        fn send(&mut self, request: HttpRequest<'_>) -> Result<HttpResponse, TransportError> {
+            let mut sent = self.0.lock().expect("the request log must not be poisoned");
+            sent.push((
+                request.body.content_type.clone(),
+                request.body.bytes().to_vec(),
+            ));
+            if sent.len() == 1 {
+                return Ok(HttpResponse {
+                    status: 503,
+                    body: b"private_image_retry_canary".to_vec(),
+                    body_error: None,
+                    retry_after_ms: None,
+                });
+            }
+            Ok(image_reply(request.body.bytes()))
+        }
+    }
+
+    /// Answers every image question: present, at a box near the top left.
+    #[cfg(feature = "hayro")]
+    fn image_reply(body: &[u8]) -> HttpResponse {
+        let text = String::from_utf8_lossy(body).into_owned();
+        let start = text.find("\r\n\r\n").expect("a part header") + 4;
+        let end = start
+            + text[start..]
+                .find("\r\n--")
+                .expect("the request part ends at a boundary");
+        let request: Value =
+            serde_json::from_str(&text[start..end]).expect("the request part is JSON");
+        let mut answers = serde_json::Map::new();
+        for (id, question) in request["questions"].as_object().expect("questions") {
+            let answer = if question["type"] == "noul" {
+                json!({"type":"noul","noul":0.9})
+            } else {
+                json!({"type":"box","box":{"left":0.1,"top":0.1,"right":0.3,"bottom":0.15},"confidence":0.7})
+            };
+            answers.insert(id.clone(), answer);
+        }
+        HttpResponse {
+                status: 200,
+                body: serde_json::to_vec(&json!({"model":request["model"],"answers":answers,"usage":{"input_tokens":16100,"output_tokens":4}}))
+                    .expect("the scripted response serializes"),
+                body_error: None,
+                retry_after_ms: None,
+            }
+    }
+
+    /// Answers image questions after a real delay, so that wall-clock time
+    /// passes between the image step's preparation and its selections.
+    #[cfg(feature = "hayro")]
+    struct LateImageWire(Duration);
+    #[cfg(feature = "hayro")]
+    impl Transport for LateImageWire {
+        fn send(&mut self, request: HttpRequest<'_>) -> Result<HttpResponse, TransportError> {
+            std::thread::sleep(self.0);
+            Ok(image_reply(request.body.bytes()))
+        }
+    }
+
+    #[cfg(feature = "hayro")]
+    #[test]
+    fn fill_remote_images_locates_a_scanned_page_and_keeps_every_body() {
+        let dir =
+            std::env::temp_dir().join(format!("voltfill-fill-images-unit-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("the temp dir must be writable");
+        let pdf = dir.join("scan.pdf");
+        fs::write(&pdf, scanned_pdf()).expect("the PDF must be writable");
+        let form = dir.join("form.json");
+        fs::write(&form, br#"{"fields":[{"id":"no","label":"Invoice No"}]}"#)
+            .expect("the form must be writable");
+        let output = dir.join("result.json");
+        let sent: Sends = Arc::default();
+        let code = run_with::<FixtureEvaluator, _, _>(
+            [
+                "fill".into(),
+                arg(&pdf),
+                arg(&form),
+                "--remote".into(),
+                "--images".into(),
+                "--renderer".into(),
+                "hayro".into(),
+                "-o".into(),
+                arg(&output),
+            ],
+            |_, _| Ok(()),
+            || {
+                Ok(Secret::try_new("synthetic_secret_canary".into())
+                    .expect("the synthetic bearer is valid"))
+            },
+            |_, _, _| Err((9, "legacy_evaluator_unexpected")),
+            || Ok((ImageWire(sent.clone()), FakeClock::default())),
+        )
+        .expect("fill --remote --images with a scripted transport succeeds");
+        assert_eq!(code, 0);
+        let result: Value =
+            serde_json::from_slice(&fs::read(&output).expect("the result file exists"))
+                .expect("the result is JSON");
+        fs::remove_dir_all(&dir).ok();
+
+        let sent = sent.lock().expect("the request log must not be poisoned");
+        assert_eq!(sent.len(), 2);
+        for (content_type, body) in sent.iter() {
+            assert!(content_type.starts_with("multipart/form-data"));
+            // The rendered page itself is attached; the key never is.
+            assert!(body.windows(8).any(|w| w == b"\x89PNG\r\n\x1a\n"));
+            assert!(!body.windows(23).any(|w| w == b"synthetic_secret_canary"));
+        }
+        assert!(result["evaluation_only"].as_bool().expect("flag"));
+        let field = &result["fields"]["no"];
+        assert_eq!(field["status"], "no_text");
+        assert!(field.get("raw").is_none() && field.get("method").is_none());
+        assert_eq!(field["evidence"], json!([]));
+        assert_eq!(field["located"]["source"], "model");
+        assert_eq!(field["located"]["page"], 1);
+        assert_eq!(field["located"]["normalized"]["left"], 0.1);
+        let record = &result["image_assist"]["no"];
+        assert_eq!(record["outcome"], "located");
+        assert_eq!(record["page"], 1);
+        assert_eq!(record["pages"][0]["presence"], 0.9);
+        assert_eq!(result["assist"], json!({}));
+        assert_eq!(result["usage"]["attempts"], 2);
+        let responses = result["jev_responses"].as_array().expect("responses");
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["http_status"], 503);
+        assert_eq!(responses[0]["body"], "private_image_retry_canary");
+        for response in responses {
+            assert_eq!(response["page"], 1);
+            assert_eq!(response["field_ids"], json!(["no"]));
+            assert_eq!(response["question_ids"], json!(["i0_present", "i0_box"]));
+        }
+        let body: Value = serde_json::from_str(
+            responses[1]["body"]
+                .as_str()
+                .expect("the success body is kept as text"),
+        )
+        .expect("the success body is the original JSON");
+        assert_eq!(body["answers"]["i0_box"]["confidence"], 0.7);
+    }
+
+    /// One Letter page with `AB12` drawn in a Type3 font (each glyph a
+    /// filled square), so a renderer needs no font file.
+    #[cfg(feature = "hayro")]
+    fn renderable_text_pdf() -> Vec<u8> {
+        let content = "BT /F1 12 Tf 72 700 Td (AB12) Tj ET\n";
+        let glyph = "1000 0 0 0 750 750 d1 0 0 750 750 re f";
+        let cmap = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapName /Adobe-Identity-UCS def /CMapType 2 def 1 begincodespacerange <00> <FF> endcodespacerange\n4 beginbfchar\n<41> <0041>\n<42> <0042>\n<31> <0031>\n<32> <0032>\nendbfchar endcmap CMapName currentdict /CMap defineresource pop end end";
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".to_owned(),
+            format!(
+                "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /A 6 0 R /B 6 0 R /one 6 0 R /two 6 0 R >> /Encoding << /Type /Encoding /Differences [49 /one /two 65 /A /B] >> /FirstChar 32 /LastChar 126 /Widths [{}] /ToUnicode 7 0 R >>",
+                vec!["1000"; 95].join(" ")
+            ),
+            format!("<< /Length {} >>\nstream\n{content}endstream", content.len()),
+            format!("<< /Length {} >>\nstream\n{glyph}\nendstream", glyph.len() + 1),
+            format!("<< /Length {} >>\nstream\n{cmap}\nendstream", cmap.len() + 1),
+        ];
+        let mut pdf = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::new();
+        for (i, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf += &format!("{} 0 obj\n{object}\nendobj\n", i + 1);
+        }
+        let xref = pdf.len();
+        pdf += &format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1);
+        for offset in offsets {
+            pdf += &format!("{offset:010} 00000 n \n");
+        }
+        pdf += &format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        );
+        pdf.into_bytes()
+    }
+
+    #[cfg(feature = "hayro")]
+    #[test]
+    fn the_fill_deadline_bounds_the_image_steps_selections() {
+        let (dir, _, _) = fill_inputs("fill-images-deadline");
+        let pdf = dir.join("renderable.pdf");
+        fs::write(&pdf, renderable_text_pdf()).expect("the PDF must be writable");
+        // `Reference` has no candidate offline, so only the image step asks.
+        let form = dir.join("reference.json");
+        fs::write(&form, br#"{"fields":[{"id":"ref","label":"Reference"}]}"#)
+            .expect("the form must be writable");
+        let output = dir.join("result.json");
+        let result = run_with::<FixtureEvaluator, _, _>(
+            [
+                "fill".into(),
+                arg(&pdf),
+                arg(&form),
+                "--remote".into(),
+                "--images".into(),
+                "--renderer".into(),
+                "hayro".into(),
+                "--deadline-ms".into(),
+                "3000".into(),
+                "-o".into(),
+                arg(&output),
+            ],
+            |_, _| Ok(()),
+            || {
+                Ok(Secret::try_new("synthetic_secret_canary".into())
+                    .expect("the synthetic bearer is valid"))
+            },
+            |_, _, _| Err((9, "legacy_evaluator_unexpected")),
+            || {
+                Ok((
+                    LateImageWire(Duration::from_millis(3500)),
+                    FakeClock::default(),
+                ))
+            },
+        );
+        // The answer arrives after the deadline: the page is not judged, and
+        // the full result is still written.
+        assert_eq!(result, Err((4, "fill_assist_all_failed").into()));
+        let written: Value =
+            serde_json::from_slice(&fs::read(&output).expect("the result file exists"))
+                .expect("the result is JSON");
+        fs::remove_dir_all(&dir).ok();
+        assert_eq!(
+            written["image_assist"]["ref"]["outcome"],
+            "deadline_exceeded"
+        );
+        assert_eq!(written["fields"]["ref"]["status"], "not_found");
+        assert_eq!(written["jev_responses"].as_array().map(Vec::len), Some(1));
     }
 }

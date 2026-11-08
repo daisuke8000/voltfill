@@ -552,8 +552,10 @@ fn is_delimiter(text: &str, at: usize, c: char) -> bool {
 }
 
 /// Whether a fragment has no label delimiter (`請求日：`, `品名：りんご`):
-/// it can be a table header cell or a cell. Times (`9:00`) and URL schemes
-/// are not delimiters. Reads the fragment's text once.
+/// it can be a table header cell or a cell, a label or a value. Times
+/// (`9:00`) and URL schemes are not delimiters. [`Pair::split`] marks a
+/// value line whose fragment is followed on its line by such a fragment.
+/// Reads the fragment's text once.
 #[must_use]
 pub fn is_plain(fragment: &SourceFragment) -> bool {
     classify(fragment) == Kind::Plain
