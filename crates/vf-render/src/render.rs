@@ -206,6 +206,18 @@ impl<'document> RenderDocument<'document> {
         self.pages.len()
     }
 
+    /// The pixel size a 1-based page renders at with the configured scale,
+    /// from its page geometry alone: nothing is rasterized and no backend is
+    /// loaded.
+    pub fn planned_size(&self, page: u32) -> Result<(u32, u32), RenderError> {
+        let index = page.checked_sub(1).ok_or(RenderError::InvalidPdf)?;
+        let geometry = (self.pages.get(index as usize))
+            .ok_or(RenderError::InvalidPdf)?
+            .as_ref()
+            .map_err(|e| *e)?;
+        raster_size(geometry, &self.config)
+    }
+
     /// Render a 1-based page at the configured scale.
     pub fn render(&self, page: u32) -> Result<RenderedImage, RenderError> {
         self.render_at(page, self.config.pixels_per_point)

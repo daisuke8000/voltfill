@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 vf-source.workspace = true
 vf-client.workspace = true
+vf-render = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -17,3 +18,9 @@ unicode-normalization.workspace = true
 [dev-dependencies]
 lopdf.workspace = true
 log.workspace = true
+
+[features]
+default = []
+# Page rendering for the image fallback (`images::DocumentRenderer`).
+pdfium = ["dep:vf-render", "vf-render/pdfium"]
+hayro = ["dep:vf-render", "vf-render/hayro"]

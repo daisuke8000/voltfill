@@ -165,6 +165,20 @@ fn fill_validates_the_form_and_its_remote_flags() {
             assert_error_response(&out.stderr, "input_read_failed");
         }
     }
+    // `--images` accepts it too: it also bounds the image step's selections.
+    for value in ["0", "600001"] {
+        let out = cli(&[
+            "fill",
+            "missing.pdf",
+            "missing-form.json",
+            "--remote",
+            "--images",
+            "--deadline-ms",
+            value,
+        ]);
+        assert_eq!(out.status.code(), Some(2), "{value}");
+        assert_error_response(&out.stderr, "invalid_deadline");
+    }
     let out = cli(&["inspect", "missing.pdf", "--deadline-ms", "100"]);
     assert_error_response(&out.stderr, "invalid_arguments");
     std::fs::remove_dir_all(&dir).ok();

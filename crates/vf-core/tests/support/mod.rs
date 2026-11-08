@@ -1,8 +1,24 @@
+//! Synthetic PDFs drawn with a Type3 font (every glyph a filled square one em
+//! wide), so renderers need no font file and the text layer is exact.
+#![allow(dead_code, reason = "each test binary uses its own subset")]
+
+/// One page with `text` at (80, 240).
 pub fn pdf_with_text(text: &str) -> Vec<u8> {
+    pdf_with_pages(&[&[(80.0, 240.0, text)]])
+}
+
+/// US Letter pages (612 x 792) with 12 pt runs at PDF coordinates (x, y,
+/// text). A page without runs gets only a filled rectangle, like a scan
+/// without a text layer.
+pub fn pdf_with_pages(pages: &[&[(f64, f64, &str)]]) -> Vec<u8> {
     use lopdf::content::{Content, Operation};
     use lopdf::{Document, Object, Stream, dictionary};
     let mut doc = Document::with_version("1.5");
     let pages_id = doc.new_object_id();
+    let text: String = pages
+        .iter()
+        .flat_map(|runs| runs.iter().map(|(_, _, text)| *text))
+        .collect();
     // Type3 glyphs need no font file, which renderers refuse to substitute.
     let glyph = |c: char| match c {
         ' ' => "space".to_owned(),
@@ -45,30 +61,44 @@ pub fn pdf_with_text(text: &str) -> Vec<u8> {
         "FirstChar" => 32, "LastChar" => 126,
         "Widths" => vec![Object::Integer(1000); 95],
     });
-    let content = Content {
-        operations: vec![
-            Operation::new("BT", vec![]),
-            Operation::new("Tf", vec!["F1".into(), 12.into()]),
-            Operation::new("Td", vec![80.into(), 240.into()]),
-            Operation::new("Tj", vec![Object::string_literal(text)]),
-            Operation::new("ET", vec![]),
-        ],
-    };
-    let content_id = doc.add_object(Stream::new(
-        dictionary! {},
-        content
-            .encode()
-            .expect("synthetic text operations must encode"),
-    ));
-    let page_id = doc.add_object(dictionary! {
-        "Type" => "Page", "Parent" => pages_id, "Contents" => content_id,
-        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
-        "Resources" => dictionary! {"Font" => dictionary! {"F1" => font_id}},
-    });
+    let mut kids = Vec::new();
+    for runs in pages {
+        let mut operations = Vec::new();
+        if runs.is_empty() {
+            operations.push(Operation::new("g", vec![0.5.into()]));
+            operations.push(Operation::new(
+                "re",
+                vec![72.into(), 500.into(), 300.into(), 200.into()],
+            ));
+            operations.push(Operation::new("f", vec![]));
+        }
+        for (x, y, text) in runs.iter() {
+            operations.extend([
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["F1".into(), 12.into()]),
+                Operation::new("Td", vec![(*x).into(), (*y).into()]),
+                Operation::new("Tj", vec![Object::string_literal(*text)]),
+                Operation::new("ET", vec![]),
+            ]);
+        }
+        let content_id = doc.add_object(Stream::new(
+            dictionary! {},
+            Content { operations }
+                .encode()
+                .expect("synthetic page operations must encode"),
+        ));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id, "Contents" => content_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => dictionary! {"Font" => dictionary! {"F1" => font_id}},
+        });
+        kids.push(Object::from(page_id));
+    }
+    let count = kids.len() as i64;
     doc.objects.insert(
         pages_id,
         Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => vec![page_id.into()], "Count" => 1,
+            "Type" => "Pages", "Kids" => kids, "Count" => count,
         }),
     );
     let catalog_id = doc.add_object(dictionary! {"Type" => "Catalog", "Pages" => pages_id});

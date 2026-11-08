@@ -703,7 +703,7 @@ const LINE_BREAKS: [char; 7] = [
 ];
 
 /// Positive-area intersection of two Display rectangles.
-fn intersects(a: Rect, b: Rect) -> bool {
+pub(crate) fn intersects(a: Rect, b: Rect) -> bool {
     a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
 }
 
