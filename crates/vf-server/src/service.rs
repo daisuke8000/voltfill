@@ -1201,6 +1201,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fill_returns_the_same_json_as_the_library_including_holds() {
+        // A label and a value without a delimiter on one line: a held candidate.
+        let pdf = streams_pdf(&["BT /F1 24 Tf 72 700 Td (Ref) Tj 80 0 Td (AB12) Tj ET".to_owned()]);
+        let state = state();
+        let response = post_fill(&state, &[("pdf", &pdf), ("form", FORM)], &[]).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        let snapshot = vf_source::inspect(&pdf, state.config.resources.pdf)
+            .expect("inspect the local test PDF");
+        let form = fill::parse_form(FORM).expect("parse the test form");
+        let direct = fill::fill_with_limits(
+            &snapshot.document_id,
+            &snapshot.fragments,
+            &form,
+            &fill::FillLimits::default(),
+        )
+        .expect("the small test document stays within the fill limits");
+        assert_eq!(
+            body,
+            serde_json::from_slice::<serde_json::Value>(
+                &serde_json::to_vec(&direct).expect("serialize the library fill result")
+            )
+            .expect("parse the serialized library fill result")
+        );
+        let reference = &body["fields"]["reference"];
+        assert_eq!(reference["status"], "ambiguous");
+        assert!(
+            reference["candidates"][0]["holds"]
+                .as_array()
+                .is_some_and(|holds| !holds.is_empty()),
+            "{reference}"
+        );
+        assert_eq!(state.jobs.available_permits(), 1);
+    }
+
+    #[tokio::test]
     async fn fill_rejects_missing_unknown_duplicate_and_invalid_parts() {
         let state = state();
         let pdf = text_pdf("Ref: AB12");
