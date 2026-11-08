@@ -1,0 +1,26 @@
+{
+  "description": "値が空欄の「担当者」の右隣が別の「ラベル：値」（部署：経理部）。右隣を担当者の値として採らない",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 76, "text": "会社名"},
+    {"x": 180, "y": 76, "text": "株式会社サンプル商事"},
+    {"x": 60, "y": 100, "text": "担当者"},
+    {"x": 300, "y": 100, "text": "部署：経理部"}
+  ],
+  "form": {"fields": [
+    {"id": "company", "label": "会社名"},
+    {"id": "person", "label": "担当者"},
+    {"id": "department", "label": "部署"}
+  ]},
+  "expect": {
+    "company": {"raw": "株式会社サンプル商事"},
+    "person": {
+      "abstain": "any",
+      "known_wrong": {
+        "status": "filled", "raw": "部署：経理部", "value": "部署：経理部",
+        "reason": "同じ行の右隣のランを、それ自体が「ラベル：値」であっても右方向の値（Right）として採用する"
+      }
+    },
+    "department": {"raw": "経理部"}
+  }
+}

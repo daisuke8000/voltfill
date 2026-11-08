@@ -1,0 +1,25 @@
+{
+  "description": "日付の後に「以降」が続く値は1つの日付ではないため日付項目は空欄（和暦・西暦）",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "発行日：2026年11月1日"},
+    {"x": 60, "y": 124, "text": "発送予定日：令和8年11月8日以降"},
+    {"x": 60, "y": 148, "text": "納品予定日：2026年11月8日以降"}
+  ],
+  "form": {"fields": [
+    {"id": "issued", "label": "発行日", "type": "date"},
+    {"id": "ship", "label": "発送予定日", "type": "date"},
+    {"id": "deliver", "label": "納品予定日", "type": "date"}
+  ]},
+  "expect": {
+    "issued": {"raw": "2026年11月1日", "value": "2026-11-01"},
+    "ship": {"abstain": "invalid"},
+    "deliver": {
+      "abstain": "any",
+      "known_wrong": {
+        "status": "filled", "raw": "2026年11月8日以降", "value": "2026-11-08",
+        "reason": "日付の正規化は日付の後ろに続く「以降」を無視する"
+      }
+    }
+  }
+}

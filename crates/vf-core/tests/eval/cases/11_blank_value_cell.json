@@ -1,7 +1,6 @@
 {
   "description": "行間の詰まったラベル表で値が空欄の行。次の行のラベル（フォームにない）を値として採らない",
   "support": "supported",
-  "known_failure": "現行コード: 値が空欄の「部署」行で、直下の行の先頭にある「役職」（フォームにないラベル）を下方向の値（Below）として採用し、部署＝役職と誤って埋める",
   "runs": [
     {"x": 60, "y": 100, "text": "会社名"},
     {"x": 180, "y": 100, "text": "株式会社サンプル"},
@@ -18,7 +17,13 @@
   ]},
   "expect": {
     "company": {"raw": "株式会社サンプル"},
-    "department": {"abstain": "any"},
+    "department": {
+      "abstain": "any",
+      "known_wrong": {
+        "status": "filled", "raw": "役職", "value": "役職",
+        "reason": "値が空欄の「部署」行で、直下の行の先頭にある「役職」（フォームにないラベル）を下方向の値（Below）として採用する"
+      }
+    },
     "person": {"raw": "佐藤 花子"}
   }
 }

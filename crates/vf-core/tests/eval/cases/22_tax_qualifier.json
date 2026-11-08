@@ -1,0 +1,26 @@
+{
+  "description": "文書には税抜の金額だけがあり、フォームは税込の金額を求める。括弧内の区別（税抜・税込）を無視して埋めない",
+  "support": "supported",
+  "runs": [
+    {"x": 330, "y": 300, "text": "金額（税抜）"},
+    {"right": 520, "y": 300, "text": "¥10,000"},
+    {"x": 330, "y": 320, "text": "消費税（10%）"},
+    {"right": 520, "y": 320, "text": "¥1,000"}
+  ],
+  "form": {"fields": [
+    {"id": "net", "label": "金額（税抜）", "type": "amount"},
+    {"id": "gross", "label": "金額（税込）", "type": "amount"},
+    {"id": "tax", "label": "消費税", "type": "amount"}
+  ]},
+  "expect": {
+    "net": {"raw": "¥10,000", "value": 10000},
+    "gross": {
+      "abstain": "any",
+      "known_wrong": {
+        "status": "filled", "raw": "¥10,000", "value": 10000,
+        "reason": "ラベル照合で括弧内の限定（税抜・税込）を捨てるため、金額（税込）が金額（税抜）と完全一致する"
+      }
+    },
+    "tax": {"raw": "¥1,000", "value": 1000}
+  }
+}

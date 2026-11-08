@@ -7,7 +7,7 @@
     {"x": 360, "y": 100, "text": "単価"},
     {"x": 440, "y": 100, "text": "金額"},
     {"x": 60, "y": 118, "text": "USBケーブル Type-C 1m"},
-    {"x": 300, "y": 118, "text": "2"},
+    {"id": "quantity", "x": 300, "y": 118, "text": "2"},
     {"x": 360, "y": 118, "text": "¥1,200"},
     {"x": 440, "y": 118, "text": "¥2,400"}
   ],
@@ -18,9 +18,9 @@
     {"id": "amount", "label": "金額", "type": "amount"}
   ]},
   "expect": {
-    "item": {"raw": "USBケーブル Type-C 1m"},
-    "quantity": {"raw": "2", "value": 2},
-    "unit_price": {"raw": "¥1,200", "value": 1200},
-    "amount": {"raw": "¥2,400", "value": 2400}
+    "item": {"raw": "USBケーブル Type-C 1m", "currently_correct": true},
+    "quantity": {"raw": "2", "value": 2, "source": ["quantity"], "currently_correct": true},
+    "unit_price": {"raw": "¥1,200", "value": 1200, "currently_correct": true},
+    "amount": {"raw": "¥2,400", "value": 2400, "currently_correct": true}
   }
 }

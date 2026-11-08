@@ -1,0 +1,25 @@
+{
+  "description": "1つの値に税率と金額が並ぶ（消費税：10% ¥1,100）。どちらの数値か決めきれないため金額項目は空欄",
+  "support": "supported",
+  "runs": [
+    {"x": 330, "y": 300, "text": "小計：¥11,000"},
+    {"x": 330, "y": 320, "text": "消費税：10% ¥1,100"},
+    {"x": 330, "y": 340, "text": "合計：¥12,100"}
+  ],
+  "form": {"fields": [
+    {"id": "subtotal", "label": "小計", "type": "amount"},
+    {"id": "tax", "label": "消費税", "type": "amount"},
+    {"id": "total", "label": "合計", "type": "amount"}
+  ]},
+  "expect": {
+    "subtotal": {"raw": "¥11,000", "value": 11000},
+    "tax": {
+      "abstain": "any",
+      "known_wrong": {
+        "status": "filled", "raw": "10% ¥1,100", "value": 10,
+        "reason": "金額の正規化は通貨記号が値のどこかにあれば最初の数値（税率の10）を採る"
+      }
+    },
+    "total": {"raw": "¥12,100", "value": 12100}
+  }
+}

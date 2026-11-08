@@ -1,0 +1,22 @@
+{
+  "description": "未対応: 1つのランに「ラベル：値」が2組ある（TEL・FAX）",
+  "support": "unsupported",
+  "runs": [
+    {"x": 60, "y": 76, "text": "架空テック株式会社"},
+    {"x": 60, "y": 100, "text": "TEL：03-1234-5678 FAX：03-1234-5679"}
+  ],
+  "form": {"fields": [
+    {"id": "phone", "label": "電話番号", "hints": ["TEL"]},
+    {"id": "fax", "label": "FAX番号", "hints": ["FAX"]}
+  ]},
+  "expect": {
+    "phone": {
+      "raw": "03-1234-5678",
+      "known_wrong": {
+        "status": "filled", "raw": "03-1234-5678 FAX：03-1234-5679", "value": "03-1234-5678 FAX：03-1234-5679",
+        "reason": "ラン内の最初の区切り記号だけで分け、後ろの「FAX：…」まで値に含める"
+      }
+    },
+    "fax": {"raw": "03-1234-5679"}
+  }
+}

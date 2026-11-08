@@ -7,13 +7,15 @@
 //! ToUnicode map, so Japanese text can be built without any font file;
 //! renderers would substitute a font (glyph fidelity is not part of this set).
 //! Sequential CIDs (not CID = code point) make extraction depend on the
-//! ToUnicode map rather than on an identity guess.
+//! ToUnicode map rather than on an identity guess. Characters outside the
+//! BMP map to UTF-16 surrogate pairs in the ToUnicode CMap.
 //!
 //! Observed with pdf-inspector 1.25.2: each run becomes one text item with
 //! its exact text, a box from the baseline up one em and its declared
 //! advance. Runs on one line whose gap is at most about 0.5 em are joined
-//! into one item with a space; gaps of 0.75 em or more stay separate. Cases
-//! that need separate runs therefore keep gaps of at least one em.
+//! into one item with a space (overlapping runs are joined without one); gaps
+//! of 0.75 em or more stay separate. Cases that need separate runs therefore
+//! keep gaps of at least one em.
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, Stream, StringFormat, dictionary};
 use std::collections::BTreeMap;
@@ -26,6 +28,9 @@ pub const PAGE_HEIGHT: f64 = 842.0;
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Run {
+    /// Name for expectations that must point at this run (`source`).
+    #[serde(default)]
+    pub id: Option<String>,
     /// 1-based page number.
     #[serde(default = "first_page")]
     pub page: u32,
@@ -52,6 +57,11 @@ impl Run {
             _ => panic!("run {:?} needs exactly one of x and right", self.text),
         }
     }
+
+    /// Right edge in points.
+    pub fn right(&self) -> f64 {
+        self.left() + text_width(&self.text, self.size)
+    }
 }
 
 fn first_page() -> u32 {
@@ -76,7 +86,8 @@ pub fn advance(c: char) -> u32 {
         | 0xF900..=0xFAFF
         | 0xFE30..=0xFE4F
         | 0xFF00..=0xFF60
-        | 0xFFE0..=0xFFE6);
+        | 0xFFE0..=0xFFE6
+        | 0x20000..=0x3FFFD);
     if wide { 1000 } else { 500 }
 }
 
@@ -96,8 +107,8 @@ pub fn build(runs: &[Run]) -> Vec<u8> {
     let mut cids: BTreeMap<char, u16> = BTreeMap::new();
     for c in runs.iter().flat_map(|r| r.text.chars()) {
         assert!(
-            (c as u32) <= 0xFFFF && !c.is_control(),
-            "builder covers printable BMP characters only: {c:?}"
+            !c.is_control(),
+            "builder covers printable characters only: {c:?}"
         );
         cids.entry(c).or_insert(0);
     }
@@ -169,7 +180,14 @@ fn add_font(doc: &mut Document, cids: &BTreeMap<char, u16>) -> lopdf::ObjectId {
     for chunk in entries.chunks(100) {
         cmap += &format!("{} beginbfchar\n", chunk.len());
         for (c, cid) in chunk {
-            cmap += &format!("<{cid:04X}> <{:04X}>\n", **c as u32);
+            // UTF-16BE: a surrogate pair for characters outside the BMP.
+            let mut units = [0u16; 2];
+            let target: String = c
+                .encode_utf16(&mut units)
+                .iter()
+                .map(|unit| format!("{unit:04X}"))
+                .collect();
+            cmap += &format!("<{cid:04X}> <{target}>\n");
         }
         cmap += "endbfchar\n";
     }

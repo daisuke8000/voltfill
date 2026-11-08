@@ -20,7 +20,7 @@
   ]},
   "expect": {
     "company": {"raw": "株式会社サンプル商事"},
-    "person": {"raw": "佐藤 花子"},
+    "person": {"raw": "佐藤 花子", "currently_correct": true},
     "phone": {"raw": "03-5555-0100"}
   }
 }
