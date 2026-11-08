@@ -1,0 +1,25 @@
+[package]
+name = "vf-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "voltfill"
+path = "src/main.rs"
+
+[dependencies]
+vf-core = { path = "../vf-core" }
+vf-server = { path = "../vf-server" }
+toml = { version = "=1.1.8", default-features = false, features = ["parse", "serde", "std"] }
+serde-saphyr = { version = "=2.0.0", default-features = false, features = ["deserialize"] }
+serde_json.workspace = true
+serde.workspace = true
+log.workspace = true
+
+[features]
+default = []
+pdfium = ["vf-core/pdfium", "vf-server/pdfium"]
+hayro = ["vf-core/hayro", "vf-server/hayro"]

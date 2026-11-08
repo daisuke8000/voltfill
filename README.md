@@ -13,7 +13,7 @@ PDFのテキスト層から、指定された項目に対応する原文の値�
 Rust 1.99.1で、リポジトリのルートから実行します。
 
 ```sh
-cargo install --path crates/cli --locked
+cargo install --path crates/vf-cli --locked
 ```
 
 ## 使い方
@@ -97,7 +97,7 @@ voltfill run --config examples/voltfill.yaml
 Vision／Hybridはレンダラーのビルドと選択が必要です。自動切り替え・自動取得・OCRは行いません。
 
 ```sh
-cargo install --path crates/cli --locked --features hayro
+cargo install --path crates/vf-cli --locked --features hayro
 voltfill run input.pdf examples/vision-form.json --remote --strategy vision --renderer hayro
 ```
 

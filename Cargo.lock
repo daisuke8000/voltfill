@@ -2444,7 +2444,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
-name = "voltfill-cli"
+name = "vf-cli"
 version = "0.1.0"
 dependencies = [
  "log",
@@ -2452,12 +2452,12 @@ dependencies = [
  "serde-saphyr",
  "serde_json",
  "toml",
- "voltfill-domain",
- "voltfill-http",
+ "vf-core",
+ "vf-server",
 ]
 
 [[package]]
-name = "voltfill-client"
+name = "vf-client"
 version = "0.1.0"
 dependencies = [
  "bytes",
@@ -2471,7 +2471,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "voltfill-domain"
+name = "vf-core"
 version = "0.1.0"
 dependencies = [
  "log",
@@ -2481,13 +2481,24 @@ dependencies = [
  "sha2",
  "thiserror",
  "unicode-normalization",
- "voltfill-client",
- "voltfill-render",
- "voltfill-source",
+ "vf-client",
+ "vf-render",
+ "vf-source",
 ]
 
 [[package]]
-name = "voltfill-http"
+name = "vf-render"
+version = "0.1.0"
+dependencies = [
+ "firecrawl-pdfium",
+ "hayro",
+ "png",
+ "thiserror",
+ "vf-source",
+]
+
+[[package]]
+name = "vf-server"
 version = "0.1.0"
 dependencies = [
  "axum",
@@ -2496,22 +2507,11 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower",
- "voltfill-domain",
+ "vf-core",
 ]
 
 [[package]]
-name = "voltfill-render"
-version = "0.1.0"
-dependencies = [
- "firecrawl-pdfium",
- "hayro",
- "png",
- "thiserror",
- "voltfill-source",
-]
-
-[[package]]
-name = "voltfill-source"
+name = "vf-source"
 version = "0.1.0"
 dependencies = [
  "lopdf 0.46.0",
