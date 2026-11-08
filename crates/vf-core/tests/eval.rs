@@ -44,6 +44,11 @@ struct Case {
     description: String,
     support: Support,
     runs: Vec<Run>,
+    /// Texts extraction must return when the case needs runs merged into
+    /// one fragment (for example a number split over runs). By default
+    /// supported cases expect exactly one fragment per run.
+    #[serde(default)]
+    fragments: Option<Vec<String>>,
     /// Passed verbatim to `fill::parse_form`.
     form: Value,
     expect: BTreeMap<String, Expect>,
@@ -660,20 +665,24 @@ fn evaluation_set_has_no_unexpected_wrong_fills() {
         if !snapshot.pages.iter().all(|p| p.text_available) {
             problems.push(format!("{name}: a page has no usable text layer"));
         }
-        // Supported cases assume one fragment per run; a merge means the
-        // case geometry does not test what it says.
-        if case.support == Support::Supported {
-            let mut runs: Vec<&str> = case.runs.iter().map(|r| r.text.as_str()).collect();
+        // Supported cases assume one fragment per run unless they list the
+        // merged fragments; any other merge means the case geometry does
+        // not test what it says.
+        if case.support == Support::Supported || case.fragments.is_some() {
+            let mut expected: Vec<&str> = match &case.fragments {
+                Some(texts) => texts.iter().map(String::as_str).collect(),
+                None => case.runs.iter().map(|r| r.text.as_str()).collect(),
+            };
             let mut fragments: Vec<&str> = snapshot
                 .fragments
                 .iter()
                 .map(|f| f.raw_text.as_str())
                 .collect();
-            runs.sort_unstable();
+            expected.sort_unstable();
             fragments.sort_unstable();
-            if runs != fragments {
+            if expected != fragments {
                 problems.push(format!(
-                    "{name}: runs were merged or split by extraction; widen the gaps"
+                    "{name}: extraction returned {fragments:?}, expected {expected:?}; adjust the gaps"
                 ));
             }
         }
@@ -809,13 +818,13 @@ fn evaluation_set_has_no_unexpected_wrong_fills() {
         "empty",
         "abstain",
     ];
-    let _ = write!(out, "{:<30} {:<11}", "case", "support");
+    let _ = write!(out, "{:<34} {:<11}", "case", "support");
     for column in header {
         let _ = write!(out, " {column:>10}");
     }
     out.push('\n');
     let row = |out: &mut String, name: &str, support: &str, c: Counts| {
-        let _ = write!(out, "{name:<30} {support:<11}");
+        let _ = write!(out, "{name:<34} {support:<11}");
         for n in [
             c.fields,
             c.correct,

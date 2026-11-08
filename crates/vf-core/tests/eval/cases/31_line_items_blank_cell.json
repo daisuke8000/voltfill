@@ -1,0 +1,27 @@
+{
+  "description": "2行の明細表で2行目の数量が空欄。他の列がそろう行はデータ行として数え、数量は1行目だけでも空欄（ambiguous）。単価は全行同じ値でも空欄",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "品名"},
+    {"x": 300, "y": 100, "text": "数量"},
+    {"x": 360, "y": 100, "text": "単価"},
+    {"x": 440, "y": 100, "text": "金額"},
+    {"x": 60, "y": 118, "text": "りんご"},
+    {"x": 300, "y": 118, "text": "3"},
+    {"x": 360, "y": 118, "text": "¥100"},
+    {"x": 440, "y": 118, "text": "¥300"},
+    {"x": 60, "y": 136, "text": "みかん"},
+    {"x": 360, "y": 136, "text": "¥100"},
+    {"x": 440, "y": 136, "text": "¥500"}
+  ],
+  "form": {"fields": [
+    {"id": "quantity", "label": "数量", "type": "number"},
+    {"id": "unit_price", "label": "単価", "type": "amount"},
+    {"id": "amount", "label": "金額", "type": "amount"}
+  ]},
+  "expect": {
+    "quantity": {"abstain": "ambiguous"},
+    "unit_price": {"abstain": "ambiguous"},
+    "amount": {"abstain": "ambiguous"}
+  }
+}

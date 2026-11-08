@@ -1,39 +1,50 @@
 //! Form fill (L3/L4): match layout pairs to form fields by label and type.
 //!
-//! Deterministic and offline. A field is filled only when exactly one value
-//! is supported by the best label match; otherwise it stays empty with its
-//! candidates ("a wrong value is worse than an empty one"). Values are exact
-//! source text; `value` is a deterministic normalization of that text.
+//! Deterministic and offline. Offline fill is a whitelist: a field is
+//! filled only when the evidence is unambiguous ("a wrong value is worse
+//! than an empty one"); everything else stays empty (`ambiguous`, `invalid`
+//! or `not_found`) with its candidates, for later model assistance. Values
+//! are exact source text; `value` is a deterministic normalization of it.
 //! Results are evaluation-only and carry no calibrated probability.
 //!
-//! Conservative rules:
-//! - Labels compare by base text and bracketed qualifiers: `金額（税抜）`
-//!   never matches `金額（税込）`, and a qualifier on only one side lowers the
-//!   score by the qualifier's share of the label (`(変更前) 住所` does not
-//!   reach the partial-match threshold for `住所`; `消費税（10%）` does for
-//!   `消費税`).
-//! - A header above two or more data rows ([`Placement::Column`]) leaves the
-//!   field ambiguous, even when the rows agree. A column whose first row
-//!   reads as one of the form's labels is a label column of a label/value
-//!   grid and is ignored.
-//! - A multi-line value ends before a line that reads as one of the form's
-//!   labels.
-//! - Amounts use the number attached to a currency mark; dates must be one
-//!   whole date (a trailing weekday is allowed), never a range or a date with
-//!   a qualifier such as `以降`.
+//! A field is filled only when all of these hold:
+//! - Only the best-scoring candidates decide (exact label over partial
+//!   match). Every one of them must agree; a lower-scoring candidate never
+//!   fills the field when a better one is unusable.
+//! - Labels compare by base text and bracketed qualifiers. Equal qualifiers
+//!   match; different ones never do (`金額（税込）` vs `金額（税抜）`). A
+//!   qualifier on one side only (`消費税（10%）` vs `消費税`, `住所（旧）` vs
+//!   `住所`) scores lower by the qualifier's share of the label and is kept
+//!   as a candidate only ([`Hold::OneSidedQualifier`]): if it is among the
+//!   best candidates the field is ambiguous.
+//! - None of the best candidates is a row of a table or list with two or more
+//!   data rows ([`Placement::Column`]). A column whose first row reads as one
+//!   of the form's labels is a label column of a label/value grid and is
+//!   ignored.
+//! - Text values: the value holds no two values of one kind (phone numbers,
+//!   dates, amounts) separated by words, as in `03-1234-5678 FAX
+//!   03-1234-5679` ([`Hold::SeveralValues`]). A multi-line value ends before
+//!   a line that reads as one of the form's labels.
+//! - Typed values: the whole value matches the type's grammar (one date
+//!   with at most its own bracketed weekday, one amount, one number with an
+//!   optional unit); otherwise the field is `invalid`. Amounts and
+//!   numbers whose label states a scale unit (`売上高（千円）`, `金額（万円）`)
+//!   are not normalized.
 //!
 //! Work is bounded by [`FillLimits`]: layout hypotheses per document, work
-//! units (label comparisons and value spans examined) over all fields, and an
-//! optional deadline. Exceeding a limit is a typed [`FillError`] from
-//! [`fill_with_limits`], never a partial result.
+//! units over layout and matching (see [`DEFAULT_MAX_WORK`]), and an
+//! optional deadline checked at least once per field and every
+//! [`vf_source::budget::CHECK_INTERVAL`] units. Exceeding a limit is a typed
+//! [`FillError`] from [`fill_with_limits`], never a partial result.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Instant;
 use unicode_normalization::UnicodeNormalization;
 use vf_source::SourceFragment;
+use vf_source::budget::{Budget, BudgetError};
 use vf_source::geometry::Rect;
-use vf_source::layout::{self, LayoutLimits, Pair, Placement, Precision};
+use vf_source::layout::{self, LayoutError, Pair, Placement, Precision};
 
 pub const MAX_FORM_BYTES: usize = 1024 * 1024;
 pub const MAX_FIELDS: usize = 512;
@@ -43,20 +54,23 @@ const MAX_HINTS: usize = 16;
 const MAX_CANDIDATES: usize = 5;
 /// Minimum label similarity for a partial (containment) match.
 const MIN_PARTIAL: f64 = 0.5;
-/// Default work units for one document over all fields: one per label
-/// comparison and one per value span examined.
-pub const DEFAULT_MAX_WORK: u64 = 20_000_000;
-/// Work units between deadline checks.
-const DEADLINE_CHECK_INTERVAL: u64 = 4096;
+/// Most digits in a normalized amount or number, so that every accepted
+/// value is exact as a JSON number.
+const MAX_DIGITS: usize = 15;
+/// Default work units for one document: layout analysis (see
+/// [`layout::analyze_within`]) plus matching, which spends one unit per byte
+/// of form label compared with each distinct document label, per byte of
+/// value text examined or normalized, and per byte copied into the result.
+pub const DEFAULT_MAX_WORK: u64 = 200_000_000;
 
 /// Resource limits for [`fill_with_limits`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FillLimits {
     /// Label/value hypotheses allowed for one document.
     pub max_pairs: usize,
-    /// Work units allowed over all fields (see [`DEFAULT_MAX_WORK`]).
+    /// Work units allowed for layout and matching (see [`DEFAULT_MAX_WORK`]).
     pub max_work: u64,
-    /// Optional wall-clock deadline, checked during matching.
+    /// Optional wall-clock deadline for layout and matching.
     pub deadline: Option<Instant>,
 }
 
@@ -88,6 +102,25 @@ impl FillError {
             Self::LayoutLimitExceeded => "layout_limit_exceeded",
             Self::BudgetExceeded => "fill_budget_exceeded",
             Self::DeadlineExceeded => "fill_deadline_exceeded",
+        }
+    }
+}
+
+impl From<BudgetError> for FillError {
+    fn from(error: BudgetError) -> Self {
+        match error {
+            BudgetError::WorkExceeded => Self::BudgetExceeded,
+            BudgetError::DeadlineExceeded => Self::DeadlineExceeded,
+        }
+    }
+}
+
+impl From<LayoutError> for FillError {
+    fn from(error: LayoutError) -> Self {
+        match error {
+            LayoutError::LimitExceeded => Self::LayoutLimitExceeded,
+            LayoutError::BudgetExceeded => Self::BudgetExceeded,
+            LayoutError::DeadlineExceeded => Self::DeadlineExceeded,
         }
     }
 }
@@ -167,14 +200,30 @@ pub fn parse_form(bytes: &[u8]) -> Result<Form, FormError> {
 #[serde(rename_all = "snake_case")]
 pub enum FillStatus {
     Filled,
+    /// Candidates disagree, or the best ones may not be filled offline
+    /// (a table or list column, or a [`Hold`]).
     Ambiguous,
+    /// No value candidate for the field's labels.
     NotFound,
     NoText,
+    /// The best candidates do not fit the field type.
     Invalid,
     /// Not evaluated because the document exceeded the default
     /// [`FillLimits`]. Only [`fill`] reports this; [`fill_with_limits`]
     /// returns a [`FillError`] instead.
     LimitExceeded,
+}
+
+/// Why a candidate may not be filled offline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Hold {
+    /// The document label or the form label has a bracketed qualifier the
+    /// other lacks (`消費税（10%）` for `消費税`).
+    OneSidedQualifier,
+    /// A text value holds several values of one kind separated by words
+    /// (`03-1234-5678 FAX 03-1234-5679`).
+    SeveralValues,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -197,6 +246,9 @@ pub struct FillCandidate {
     pub value: Option<Value>,
     pub score: f64,
     pub placement: Placement,
+    /// Set when this candidate may not be filled offline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hold: Option<Hold>,
     pub evidence: Vec<FillEvidence>,
 }
 
@@ -245,8 +297,8 @@ pub fn fill(document_id: &str, fragments: &[SourceFragment], form: &Form) -> Fil
 ///
 /// # Errors
 /// [`FillError::LayoutLimitExceeded`] when the layout would hold more than
-/// `limits.max_pairs` hypotheses, [`FillError::BudgetExceeded`] when matching
-/// needs more than `limits.max_work` units, and
+/// `limits.max_pairs` hypotheses, [`FillError::BudgetExceeded`] when layout
+/// and matching need more than `limits.max_work` units, and
 /// [`FillError::DeadlineExceeded`] once `limits.deadline` has passed.
 pub fn fill_with_limits(
     document_id: &str,
@@ -254,11 +306,7 @@ pub fn fill_with_limits(
     form: &Form,
     limits: &FillLimits,
 ) -> Result<FillResult, FillError> {
-    let mut budget = Budget {
-        remaining: limits.max_work,
-        deadline: limits.deadline,
-        until_check: DEADLINE_CHECK_INTERVAL,
-    };
+    let mut budget = Budget::new(limits.max_work, limits.deadline);
     budget.check_deadline()?;
     let has_text = fragments
         .iter()
@@ -274,33 +322,35 @@ pub fn fill_with_limits(
                 .collect(),
         });
     }
-    let layout_limits = LayoutLimits {
-        max_pairs: limits.max_pairs,
-    };
-    let pairs = layout::analyze(fragments, &layout_limits)
-        .map_err(|_| FillError::LayoutLimitExceeded)?
-        .pairs;
-    budget.check_deadline()?;
+    let pairs = layout::analyze_within(fragments, limits.max_pairs, &mut budget)?.pairs;
+    budget.spend(fragments.len() as u64)?;
     let texts: HashMap<&str, &SourceFragment> =
         fragments.iter().map(|f| (f.id.as_str(), f)).collect();
     // A value that reads as one of the form's own labels is a neighbouring label, not a value.
-    let labels: BTreeSet<String> = form
+    let mut labels = BTreeSet::new();
+    for name in form
         .fields
         .iter()
         .flat_map(|f| std::iter::once(&f.label).chain(&f.hints))
-        .map(|s| normalize_label(s).base)
-        .collect();
-    budget.spend(pairs.len() as u64)?;
-    let index = PairLabels::new(&pairs, &texts);
+    {
+        budget.spend_bytes(name)?;
+        labels.insert(normalize_label(name).base);
+    }
+    let index = PairLabels::new(&pairs, &texts, &mut budget)?;
     let context = Context {
         pairs: &pairs,
         index: &index,
         texts: &texts,
         labels: &labels,
     };
+    let mut cache = Cache {
+        slots: (0..pairs.len()).map(|_| None).collect(),
+    };
     let mut fields = BTreeMap::new();
     for field in &form.fields {
-        fields.insert(field.id.clone(), context.fill_field(field, &mut budget)?);
+        budget.check_deadline()?;
+        let fill = context.fill_field(field, &mut cache, &mut budget)?;
+        fields.insert(field.id.clone(), fill);
     }
     Ok(FillResult {
         evaluation_only: true,
@@ -320,67 +370,79 @@ fn empty(status: FillStatus) -> FieldFill {
     }
 }
 
-/// Remaining work units and the deadline.
-struct Budget {
-    remaining: u64,
-    deadline: Option<Instant>,
-    until_check: u64,
-}
-
-impl Budget {
-    fn spend(&mut self, units: u64) -> Result<(), FillError> {
-        self.remaining = self
-            .remaining
-            .checked_sub(units)
-            .ok_or(FillError::BudgetExceeded)?;
-        if units >= self.until_check {
-            self.until_check = DEADLINE_CHECK_INTERVAL;
-            self.check_deadline()
-        } else {
-            self.until_check -= units;
-            Ok(())
-        }
-    }
-
-    fn check_deadline(&self) -> Result<(), FillError> {
-        match self.deadline {
-            Some(deadline) if Instant::now() >= deadline => Err(FillError::DeadlineExceeded),
-            _ => Ok(()),
-        }
-    }
-}
-
 /// Pair labels normalized once per document and grouped by normalized text,
 /// so each field compares against every distinct label once.
 struct PairLabels {
     groups: Vec<(Label, Vec<usize>)>,
-    /// Each pair's label text; `None` when its span does not resolve.
-    texts: Vec<Option<String>>,
+    /// Each pair's label text and group; `None` when its span does not resolve.
+    texts: Vec<Option<(String, usize)>>,
 }
 
 impl PairLabels {
-    fn new(pairs: &[Pair], texts: &HashMap<&str, &SourceFragment>) -> Self {
+    fn new(
+        pairs: &[Pair],
+        texts: &HashMap<&str, &SourceFragment>,
+        budget: &mut Budget,
+    ) -> Result<Self, BudgetError> {
         let mut groups: Vec<(Label, Vec<usize>)> = Vec::new();
         let mut positions: HashMap<Label, usize> = HashMap::new();
         let mut label_texts = Vec::with_capacity(pairs.len());
         for (i, pair) in pairs.iter().enumerate() {
-            let text = slice(texts, &pair.label);
-            if let Some(text) = &text {
-                let label = normalize_label(text);
-                if let Some(&at) = positions.get(&label) {
-                    groups[at].1.push(i);
-                } else {
-                    positions.insert(label.clone(), groups.len());
-                    groups.push((label, vec![i]));
-                }
-            }
-            label_texts.push(text);
+            budget.spend(1)?;
+            let Some(text) = slice(texts, &pair.label) else {
+                label_texts.push(None);
+                continue;
+            };
+            // Copy, normalization and hashing each read the text once.
+            budget.spend(3 * text.len() as u64)?;
+            let label = normalize_label(&text);
+            let group = if let Some(&at) = positions.get(&label) {
+                groups[at].1.push(i);
+                at
+            } else {
+                positions.insert(label.clone(), groups.len());
+                groups.push((label, vec![i]));
+                groups.len() - 1
+            };
+            label_texts.push(Some((text, group)));
         }
-        Self {
+        Ok(Self {
             groups,
             texts: label_texts,
-        }
+        })
     }
+}
+
+/// A pair's value prepared once per document and shared by every field.
+struct Prepared {
+    /// The first value line reads as one of the form's labels.
+    first_is_label: bool,
+    /// `None` when the pair is not a value candidate.
+    value: Option<PreparedValue>,
+}
+
+struct PreparedValue {
+    raw: String,
+    evidence: Vec<FillEvidence>,
+    /// Several values of one kind separated by words.
+    several: bool,
+    /// The pair label states a scale unit (`千円`, `万円`).
+    scaled: bool,
+    /// Normalized values for date, amount and number fields, on first use.
+    typed: [Option<Option<Value>>; 3],
+}
+
+struct Cache {
+    slots: Vec<Option<Prepared>>,
+}
+
+/// A label-matched pair for one field.
+#[derive(Debug, Clone)]
+struct Candidate {
+    pair: usize,
+    score: f64,
+    hold: Option<Hold>,
+    value: Option<Value>,
 }
 
 struct Context<'a> {
@@ -391,21 +453,31 @@ struct Context<'a> {
 }
 
 impl Context<'_> {
-    fn fill_field(&self, field: &FormField, budget: &mut Budget) -> Result<FieldFill, FillError> {
-        let names: Vec<Label> = std::iter::once(&field.label)
-            .chain(&field.hints)
-            .map(|s| normalize_label(s))
-            .filter(|label| !label.base.is_empty())
-            .collect();
-        let mut matched: Vec<(usize, f64)> = Vec::new();
+    fn fill_field(
+        &self,
+        field: &FormField,
+        cache: &mut Cache,
+        budget: &mut Budget,
+    ) -> Result<FieldFill, FillError> {
+        let mut names = Vec::new();
+        for name in std::iter::once(&field.label).chain(&field.hints) {
+            budget.spend_bytes(name)?;
+            let label = normalize_label(name);
+            if !label.base.is_empty() {
+                names.push(label);
+            }
+        }
+        let cost: u64 = names.iter().map(|n| n.base.len() as u64 + 1).sum();
+        let mut matched: Vec<(usize, Match)> = Vec::new();
         for (label, members) in &self.index.groups {
-            budget.spend(names.len() as u64)?;
-            let score = names
+            budget.spend(cost)?;
+            let best = names
                 .iter()
                 .map(|name| label_score(name, label))
-                .fold(0.0, f64::max);
-            if score >= MIN_PARTIAL {
-                matched.extend(members.iter().map(|&pair| (pair, score)));
+                .fold(Match::NONE, Match::better);
+            if best.score >= MIN_PARTIAL {
+                budget.spend(members.len() as u64)?;
+                matched.extend(members.iter().map(|&pair| (pair, best)));
             }
         }
         // Document order first, so equal scores keep a deterministic order.
@@ -414,25 +486,35 @@ impl Context<'_> {
         // The header of a column whose first row reads as a form label: that
         // column lists labels (a label/value grid), not data rows.
         let mut label_column: Option<&layout::Span> = None;
-        for (index, score) in matched {
+        for (index, found) in matched {
             let pair = &self.pairs[index];
-            budget.spend(pair.value.len() as u64)?;
+            let prepared = self.prepare(index, cache, budget)?;
             if pair.placement == Placement::Column {
                 if self.first_column_row(index) {
-                    label_column = pair
-                        .value
-                        .first()
-                        .is_some_and(|span| self.reads_as_label(span))
-                        .then_some(&pair.label);
+                    label_column = prepared.first_is_label.then_some(&pair.label);
                 } else if label_column == Some(&pair.label) {
                     continue;
                 }
             }
-            if let Some(candidate) = self.candidate(field, index, score) {
-                candidates.push(candidate);
-            }
+            let Some(value) = prepared.value.as_ref() else {
+                continue;
+            };
+            let hold = if found.one_sided {
+                Some(Hold::OneSidedQualifier)
+            } else if field.field_type == FieldType::Text && value.several {
+                Some(Hold::SeveralValues)
+            } else {
+                None
+            };
+            let value = self.typed_value(index, field.field_type, cache, budget)?;
+            candidates.push(Candidate {
+                pair: index,
+                score: found.score,
+                hold,
+                value,
+            });
         }
-        Ok(decide(field, candidates))
+        self.decide(field, candidates, cache, budget)
     }
 
     /// Column pairs of one header are consecutive, first row first.
@@ -445,22 +527,43 @@ impl Context<'_> {
             })
     }
 
-    fn reads_as_label(&self, span: &layout::Span) -> bool {
-        slice(self.texts, span)
-            .is_some_and(|text| self.labels.contains(&normalize_label(&text).base))
+    /// The pair's value, prepared on first use.
+    fn prepare<'c>(
+        &self,
+        index: usize,
+        cache: &'c mut Cache,
+        budget: &mut Budget,
+    ) -> Result<&'c Prepared, BudgetError> {
+        let slot = &mut cache.slots[index];
+        let prepared = match slot.take() {
+            Some(prepared) => prepared,
+            None => self.prepare_value(index, budget)?,
+        };
+        Ok(slot.insert(prepared))
     }
 
-    fn candidate(&self, field: &FormField, index: usize, score: f64) -> Option<FillCandidate> {
+    fn prepare_value(&self, index: usize, budget: &mut Budget) -> Result<Prepared, BudgetError> {
         let pair = &self.pairs[index];
-        let label = self.index.texts[index].clone()?;
+        let rejected = |first_is_label| Prepared {
+            first_is_label,
+            value: None,
+        };
+        let Some((_, group)) = &self.index.texts[index] else {
+            return Ok(rejected(false));
+        };
         let mut evidence = Vec::with_capacity(pair.value.len());
         for (line, span) in pair.value.iter().enumerate() {
-            let text = slice(self.texts, span)?;
+            budget.spend(1)?;
+            let Some(text) = slice(self.texts, span) else {
+                return Ok(rejected(false));
+            };
+            // Copy and label normalization.
+            budget.spend(2 * text.len() as u64)?;
             if self.labels.contains(&normalize_label(&text).base) {
                 // A first line that reads as a form label is a neighbouring
                 // label; a later one starts the next field's block.
                 if line == 0 {
-                    return None;
+                    return Ok(rejected(true));
                 }
                 break;
             }
@@ -479,74 +582,158 @@ impl Context<'_> {
             .map(|e| e.text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
+        // Join, label normalization, NFKC and the value-shape scan.
+        budget.spend(4 * raw.len() as u64)?;
         if self.labels.contains(&normalize_label(&raw).base) {
-            return None;
+            return Ok(rejected(false));
         }
-        Some(FillCandidate {
-            value: normalize_value(field.field_type, &raw),
-            label,
-            raw,
-            score,
-            placement: pair.placement,
-            evidence,
+        let several = several_values(&raw.nfkc().collect::<String>());
+        let scaled = states_scale(&self.index.groups[*group].0);
+        Ok(Prepared {
+            first_is_label: false,
+            value: Some(PreparedValue {
+                raw,
+                evidence,
+                several,
+                scaled,
+                typed: [None, None, None],
+            }),
         })
     }
-}
 
-/// Fill, leave ambiguous or report invalid from the label-matched candidates.
-fn decide(field: &FormField, mut candidates: Vec<FillCandidate>) -> FieldFill {
-    candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
-    candidates.dedup_by(|a, b| a.evidence == b.evidence);
-    let Some(first) = candidates.first() else {
-        return empty(FillStatus::NotFound);
-    };
-    // Typed fields only accept candidates whose text normalizes to that type.
-    let typed: Vec<&FillCandidate> = candidates
-        .iter()
-        .filter(|c| field.field_type == FieldType::Text || c.value.is_some())
-        .collect();
-    let best_score = typed.first().map_or(first.score, |c| c.score);
-    let same_score = |c: &FillCandidate| (c.score - best_score).abs() < 1e-9;
-    // A header over several data rows never determines one value, even
-    // when the rows agree or only one row fits the type.
-    let column_rows = candidates
-        .iter()
-        .filter(|c| c.placement == Placement::Column && same_score(c))
-        .count();
-    if column_rows >= 2 {
-        let mut result = empty(FillStatus::Ambiguous);
-        result.candidates = candidates.into_iter().take(MAX_CANDIDATES).collect();
-        return result;
-    }
-    let Some(best) = typed.first() else {
-        // A labelled value was found but it does not parse as the field type.
-        let mut result = empty(FillStatus::Invalid);
-        result.raw = Some(first.raw.clone());
-        result.evidence = first.evidence.clone();
-        result.candidates = candidates.into_iter().take(MAX_CANDIDATES).collect();
-        return result;
-    };
-    let top: Vec<&&FillCandidate> = typed.iter().filter(|c| same_score(c)).collect();
-    let agreed = top
-        .iter()
-        .all(|c| c.value == best.value && c.raw == best.raw)
-        || field.field_type != FieldType::Text && top.iter().all(|c| c.value == best.value);
-    if agreed {
-        FieldFill {
-            status: FillStatus::Filled,
-            method: Some("label_match"),
-            raw: Some(best.raw.clone()),
-            value: best
-                .value
-                .clone()
-                .or_else(|| Some(Value::String(best.raw.clone()))),
-            evidence: best.evidence.clone(),
-            candidates: Vec::new(),
+    /// The pair's normalized value for `field_type`, computed once per type.
+    fn typed_value(
+        &self,
+        index: usize,
+        field_type: FieldType,
+        cache: &mut Cache,
+        budget: &mut Budget,
+    ) -> Result<Option<Value>, BudgetError> {
+        let slot = match field_type {
+            FieldType::Text => return Ok(None),
+            FieldType::Date => 0,
+            FieldType::Amount => 1,
+            FieldType::Number => 2,
+        };
+        let Some(value) = cache.slots[index].as_mut().and_then(|p| p.value.as_mut()) else {
+            return Ok(None);
+        };
+        if value.typed[slot].is_none() {
+            budget.spend(2 * value.raw.len() as u64)?;
+            let normalized = if value.scaled && field_type != FieldType::Date {
+                None
+            } else {
+                normalize_value(field_type, &value.raw)
+            };
+            value.typed[slot] = Some(normalized);
         }
-    } else {
-        let mut result = empty(FillStatus::Ambiguous);
-        result.candidates = typed.into_iter().take(MAX_CANDIDATES).cloned().collect();
-        result
+        Ok(value.typed[slot].clone().flatten())
+    }
+
+    /// Fill, leave ambiguous or report invalid. Only the best-scoring
+    /// candidates decide, and all of them must allow the same value.
+    fn decide(
+        &self,
+        field: &FormField,
+        mut candidates: Vec<Candidate>,
+        cache: &Cache,
+        budget: &mut Budget,
+    ) -> Result<FieldFill, FillError> {
+        // Stable: equal scores keep document order.
+        candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
+        candidates.dedup_by(|a, b| self.pairs[a.pair].value == self.pairs[b.pair].value);
+        let Some(best) = candidates.first() else {
+            return Ok(empty(FillStatus::NotFound));
+        };
+        let top: Vec<&Candidate> = candidates
+            .iter()
+            .take_while(|c| (c.score - best.score).abs() < 1e-9)
+            .collect();
+        let raw = |c: &Candidate| {
+            cache.slots[c.pair]
+                .as_ref()
+                .and_then(|p| p.value.as_ref())
+                .map_or("", |v| v.raw.as_str())
+        };
+        // A row of a table or list never determines one value, even when the
+        // rows agree or only one row fits the type.
+        let column_rows = top
+            .iter()
+            .filter(|c| self.pairs[c.pair].placement == Placement::Column)
+            .count();
+        let held = column_rows >= 1 || top.iter().any(|c| c.hold.is_some());
+        let status = if held {
+            FillStatus::Ambiguous
+        } else if field.field_type == FieldType::Text {
+            if top.iter().all(|c| raw(c) == raw(best)) {
+                FillStatus::Filled
+            } else {
+                FillStatus::Ambiguous
+            }
+        } else if top.iter().all(|c| c.value.is_none()) {
+            FillStatus::Invalid
+        } else if top
+            .iter()
+            .all(|c| c.value.is_some() && c.value == best.value)
+        {
+            FillStatus::Filled
+        } else {
+            FillStatus::Ambiguous
+        };
+        let mut result = empty(status);
+        match status {
+            FillStatus::Filled => {
+                let (raw, evidence) = self.output(best, cache, budget)?;
+                result.method = Some("label_match");
+                result.value = best
+                    .value
+                    .clone()
+                    .or_else(|| Some(Value::String(raw.clone())));
+                result.raw = Some(raw);
+                result.evidence = evidence;
+            }
+            _ => {
+                if status == FillStatus::Invalid {
+                    let (raw, evidence) = self.output(best, cache, budget)?;
+                    result.raw = Some(raw);
+                    result.evidence = evidence;
+                }
+                for candidate in candidates.iter().take(MAX_CANDIDATES) {
+                    let (raw, evidence) = self.output(candidate, cache, budget)?;
+                    let label = self.index.texts[candidate.pair]
+                        .as_ref()
+                        .map_or_else(String::new, |(text, _)| text.clone());
+                    budget.spend_bytes(&label)?;
+                    result.candidates.push(FillCandidate {
+                        label,
+                        raw,
+                        value: candidate.value.clone(),
+                        score: candidate.score,
+                        placement: self.pairs[candidate.pair].placement,
+                        hold: candidate.hold,
+                        evidence,
+                    });
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// A copy of a candidate's raw text and evidence for the result.
+    fn output(
+        &self,
+        candidate: &Candidate,
+        cache: &Cache,
+        budget: &mut Budget,
+    ) -> Result<(String, Vec<FillEvidence>), BudgetError> {
+        let Some(value) = cache.slots[candidate.pair]
+            .as_ref()
+            .and_then(|p| p.value.as_ref())
+        else {
+            return Ok((String::new(), Vec::new()));
+        };
+        budget.spend(2 * value.raw.len() as u64 + value.evidence.len() as u64)?;
+        Ok((value.raw.clone(), value.evidence.clone()))
     }
 }
 
@@ -611,10 +798,34 @@ fn normalize_label(s: &str) -> Label {
     }
 }
 
+/// A label comparison: its score and whether a bracketed qualifier is on
+/// one side only.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Match {
+    score: f64,
+    one_sided: bool,
+}
+
+impl Match {
+    const NONE: Self = Self {
+        score: 0.0,
+        one_sided: false,
+    };
+
+    /// The higher score; at equal scores, a match with equal qualifiers.
+    fn better(self, other: Self) -> Self {
+        if other.score > self.score || other.score == self.score && self.one_sided {
+            other
+        } else {
+            self
+        }
+    }
+}
+
 /// Base similarity, then qualifiers: equal qualifiers keep the score,
 /// different ones on both sides never match, and a qualifier on one side
-/// scales the score by that label's base share.
-fn label_score(a: &Label, b: &Label) -> f64 {
+/// scales the score by that label's base share and marks the match one-sided.
+fn label_score(a: &Label, b: &Label) -> Match {
     let (short, long) = if a.base_chars <= b.base_chars {
         (a, b)
     } else {
@@ -622,31 +833,58 @@ fn label_score(a: &Label, b: &Label) -> f64 {
     };
     // Containment scores short/long, so shorter ratios never reach MIN_PARTIAL.
     if short.base_chars == 0 || (short.base_chars as f64) < MIN_PARTIAL * long.base_chars as f64 {
-        return 0.0;
+        return Match::NONE;
     }
     let base = if a.base == b.base {
         1.0
     } else if long.base.contains(short.base.as_str()) {
         short.base_chars as f64 / long.base_chars as f64
     } else {
-        return 0.0;
+        return Match::NONE;
     };
     if a.qualifiers == b.qualifiers {
-        return base;
+        return Match {
+            score: base,
+            one_sided: false,
+        };
     }
-    match (a.qualifiers.is_empty(), b.qualifiers.is_empty()) {
-        (true, _) => base * b.base_share(),
-        (_, true) => base * a.base_share(),
-        (false, false) => 0.0,
+    let share = match (a.qualifiers.is_empty(), b.qualifiers.is_empty()) {
+        (true, _) => b.base_share(),
+        (_, true) => a.base_share(),
+        (false, false) => return Match::NONE,
+    };
+    Match {
+        score: base * share,
+        one_sided: true,
     }
 }
 
-/// Deterministic normalization; `None` when the text does not fit the type.
+/// Scale units that make a label's amounts and numbers multiples
+/// (`売上高（千円）`, `金額（単位：万円）`, `売上高百万円`).
+fn states_scale(label: &Label) -> bool {
+    const SCALES: [&str; 5] = ["千", "万", "百万", "億", "兆"];
+    let in_base = ["千円", "万円", "億円", "兆円"]
+        .iter()
+        .any(|unit| label.base.contains(unit));
+    in_base
+        || label.qualifiers.iter().any(|q| {
+            let q = q.trim_start_matches("単位").trim_start_matches([':', '：']);
+            SCALES.iter().any(|scale| q.starts_with(scale))
+        })
+}
+
+/// Deterministic whole-text normalization; `None` when the text is not
+/// exactly one value of the type:
+/// - date: one date ([`parse_date`]), optionally followed by its weekday in
+///   brackets, which must match the date;
+/// - amount: one amount ([`parse_amount`]);
+/// - number: one number with an optional unit ([`parse_number`]).
 fn normalize_value(field_type: FieldType, raw: &str) -> Option<Value> {
     match field_type {
         FieldType::Text => None,
         FieldType::Date => parse_date(&raw.nfkc().collect::<String>()).map(Value::String),
-        FieldType::Amount | FieldType::Number => parse_number(&numeric_text(raw)?, field_type),
+        FieldType::Amount => parse_amount(&numeric_text(raw)?),
+        FieldType::Number => parse_number(&numeric_text(raw)?),
     }
 }
 
@@ -672,23 +910,29 @@ fn numeric_text(raw: &str) -> Option<String> {
 
 /// One whole date to `YYYY-MM-DD`: `2026年11月8日`, `2026/11/08`, `2026-11-8`,
 /// `2026.11.08`, and Japanese era dates via [`parse_era_name_date`] and
-/// [`parse_era_letter_date`]. Only a weekday may follow (`(日)`, `（月）`,
-/// `日曜日`); ranges and qualifiers such as `以降` or `まで` are `None`.
+/// [`parse_era_letter_date`]. Only the date's own weekday in brackets may
+/// follow (`(日)`, `（日曜日）`, `(Sun)`); an unbracketed or mismatching
+/// weekday, a range, a time or a qualifier such as `以降` or `まで` is `None`.
 fn parse_date(text: &str) -> Option<String> {
     let text = text.trim();
-    if ERA_NAMES.iter().any(|name| text.contains(name)) {
+    let (date, rest) = if ERA_NAMES.iter().any(|name| text.contains(name)) {
         // Never digit-scan mixed notations such as `2026年(令和8年)11月8日`.
-        return parse_era_name_date(text);
-    }
-    if let Some(date) = parse_era_letter_date(text) {
-        return Some(date);
-    }
-    parse_gregorian_date(text)
+        parse_era_name_date(text)?
+    } else if let Some(found) = parse_era_letter_date(text) {
+        found
+    } else {
+        parse_gregorian_date(text)?
+    };
+    weekday_matches(rest, date).then(|| format!("{:04}-{:02}-{:02}", date.0, date.1, date.2))
 }
 
+/// A valid calendar date (year, month, day).
+type Date = (u32, u32, u32);
+
 /// `2026年11月8日` (spaces allowed between parts) or a four-digit year,
-/// month and day joined by one separator kind (`/`, `-` or `.`).
-fn parse_gregorian_date(text: &str) -> Option<String> {
+/// month and day joined by one separator kind (`/`, `-` or `.`); with the
+/// text after it.
+fn parse_gregorian_date(text: &str) -> Option<(Date, &str)> {
     let (year, rest) = leading_digits(text, 4, 4)?;
     let (month, day, rest) = if let Some(rest) = rest.trim_start().strip_prefix('年') {
         let (month, rest) = leading_digits(rest.trim_start(), 1, 2)?;
@@ -704,32 +948,39 @@ fn parse_gregorian_date(text: &str) -> Option<String> {
         let (day, rest) = leading_digits(rest.strip_prefix(separator)?, 1, 2)?;
         (month, day, rest)
     };
-    if !weekday_only(rest) {
-        return None;
-    }
-    calendar_date(year, month, day)
+    Some((calendar_date(year, month, day)?, rest))
 }
 
-/// Text after a date that keeps its meaning: nothing, or a weekday such as
-/// `(日)`, `(日曜日)`, `日曜日` or `(Sun)`.
-fn weekday_only(rest: &str) -> bool {
+/// Text after a date that keeps its meaning: nothing, or the date's own
+/// weekday in brackets: `(日)`, `(日曜)`, `(日曜日)` or `(Sun)`.
+fn weekday_matches(rest: &str, (year, month, day): Date) -> bool {
     const DAYS: [&str; 7] = ["日", "月", "火", "水", "木", "金", "土"];
     const ENGLISH: [&str; 7] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
     let rest = rest.trim();
     if rest.is_empty() {
         return true;
     }
-    let (inner, bracketed) = match rest.strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
-        Some(inner) => (inner.trim(), true),
-        None => (rest, false),
+    let Some(inner) = rest.strip_prefix('(').and_then(|r| r.strip_suffix(')')) else {
+        return false;
     };
-    let named = DAYS.iter().any(|day| {
+    let inner = inner.trim();
+    let named = DAYS.iter().position(|day| {
         inner
             .strip_prefix(day)
-            .is_some_and(|tail| tail == "曜" || tail == "曜日")
+            .is_some_and(|tail| tail.is_empty() || tail == "曜" || tail == "曜日")
     });
-    let short = DAYS.contains(&inner) || ENGLISH.contains(&inner.to_ascii_lowercase().as_str());
-    named || bracketed && short
+    let english = ENGLISH
+        .iter()
+        .position(|day| inner.eq_ignore_ascii_case(day));
+    named.or(english) == Some(weekday(year, month, day))
+}
+
+/// Day of the week, 0 = Sunday (Sakamoto's method).
+fn weekday(year: u32, month: u32, day: u32) -> usize {
+    const OFFSETS: [u32; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+    let year = if month < 3 { year - 1 } else { year };
+    let index = (month as usize).saturating_sub(1).min(11);
+    ((year + year / 4 - year / 100 + year / 400 + OFFSETS[index] + day) % 7) as usize
 }
 
 /// A Japanese era with its abbreviation and first and last day (inclusive).
@@ -771,8 +1022,8 @@ const ERAS: [Era; 4] = [
 const ERA_NAMES: [&str; 5] = ["令和", "平成", "昭和", "大正", "明治"];
 
 /// `令和8年11月8日`, `令和元年5月1日`, `平成 31年 4月 30日`: the era name first,
-/// then year, month and day; only a weekday may follow.
-fn parse_era_name_date(text: &str) -> Option<String> {
+/// then year, month and day; with the text after it.
+fn parse_era_name_date(text: &str) -> Option<(Date, &str)> {
     let era = ERAS.iter().find(|era| text.starts_with(era.name))?;
     let rest = text[era.name.len()..].trim_start();
     let (year, rest) = match rest.strip_prefix('元') {
@@ -784,14 +1035,11 @@ fn parse_era_name_date(text: &str) -> Option<String> {
     let rest = rest.trim_start().strip_prefix('月')?;
     let (day, rest) = leading_digits(rest.trim_start(), 1, 2)?;
     let rest = rest.trim_start().strip_prefix('日')?;
-    if !weekday_only(rest) {
-        return None;
-    }
-    era_date(era, year, month, day)
+    Some((era_date(era, year, month, day)?, rest))
 }
 
-/// `R8.11.8`, `H31/4/30`, `S55.3.1`: the whole text, one separator kind.
-fn parse_era_letter_date(text: &str) -> Option<String> {
+/// `R8.11.8`, `H31/4/30`, `S55.3.1`: one separator kind; with the text after it.
+fn parse_era_letter_date(text: &str) -> Option<(Date, &str)> {
     let mut chars = text.chars();
     let letter = chars.next()?;
     let era = ERAS.iter().find(|era| era.letter == Some(letter))?;
@@ -799,10 +1047,7 @@ fn parse_era_letter_date(text: &str) -> Option<String> {
     let separator = rest.chars().next().filter(|c| matches!(c, '.' | '/'))?;
     let (month, rest) = leading_digits(rest.strip_prefix(separator)?, 1, 2)?;
     let (day, rest) = leading_digits(rest.strip_prefix(separator)?, 1, 2)?;
-    if !rest.is_empty() {
-        return None;
-    }
-    era_date(era, year, month, day)
+    Some((era_date(era, year, month, day)?, rest))
 }
 
 /// Between `min` and `max` leading ASCII digits and the rest of the text.
@@ -817,7 +1062,7 @@ fn leading_digits(text: &str, min: usize, max: usize) -> Option<(u32, &str)> {
 }
 
 /// The Gregorian date of an era date, only when it falls inside that era.
-fn era_date(era: &Era, year: u32, month: u32, day: u32) -> Option<String> {
+fn era_date(era: &Era, year: u32, month: u32, day: u32) -> Option<Date> {
     if year == 0 {
         return None;
     }
@@ -826,8 +1071,8 @@ fn era_date(era: &Era, year: u32, month: u32, day: u32) -> Option<String> {
     in_era.then(|| calendar_date(date.0, month, day)).flatten()
 }
 
-/// `YYYY-MM-DD` for a valid calendar date with a four-digit year.
-fn calendar_date(year: u32, month: u32, day: u32) -> Option<String> {
+/// A valid calendar date with a four-digit year.
+fn calendar_date(year: u32, month: u32, day: u32) -> Option<Date> {
     let days = match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
@@ -837,51 +1082,109 @@ fn calendar_date(year: u32, month: u32, day: u32) -> Option<String> {
         2 => 28,
         _ => return None,
     };
-    ((1000..=9999).contains(&year) && (1..=days).contains(&day))
-        .then(|| format!("{year:04}-{month:02}-{day:02}"))
+    ((1000..=9999).contains(&year) && (1..=days).contains(&day)).then_some((year, month, day))
 }
 
-const CURRENCY_MARKS: [char; 3] = ['¥', '$', '€'];
+/// Tax notes allowed after an amount (after NFKC, `（税込）` is `(税込)`).
+const TAX_NOTES: [&str; 4] = ["(税込)", "(税抜)", "税込", "税抜"];
+/// Currency marks allowed before an amount (after NFKC, `￥` is `¥`).
+const CURRENCY_PREFIXES: [char; 3] = ['¥', '$', '€'];
+/// Signs that make an amount negative.
+const AMOUNT_SIGNS: [char; 4] = ['-', '\u{2212}', '△', '▲'];
 
-/// A number token: its byte range in the text.
-struct Token {
-    start: usize,
-    end: usize,
-}
-
-/// Numbers with optional sign and thousands separators, in text order.
-fn number_tokens(text: &str) -> Vec<Token> {
-    let mut tokens = Vec::new();
-    let mut start = None;
-    let mut chars = text.char_indices().peekable();
-    while let Some((at, c)) = chars.next() {
-        let next_digit = chars.peek().is_some_and(|&(_, n)| n.is_ascii_digit());
-        if c.is_ascii_digit()
-            || (c == '.' || c == ',') && start.is_some() && next_digit
-            || c == '-' && start.is_none() && next_digit
-        {
-            start.get_or_insert(at);
-        } else if let Some(start) = start.take() {
-            tokens.push(Token { start, end: at });
+/// The whole text as exactly one amount:
+/// `[sign] [currency] [sign] number [円] [tax note]`, where
+/// - sign is one of `-`, `−` (U+2212), `△`, `▲`, or the amount is enclosed in
+///   parentheses; any of them makes it negative, and at most one is allowed;
+/// - currency is one of `¥` `￥` `$` `€` before the number, or `円` after
+///   it, never both;
+/// - number is digits with valid thousands separators (`12,100`), no
+///   internal spaces, and at most two decimals;
+/// - tax note is one of `（税込）` `（税抜）` `(税込)` `(税抜)` `税込` `税抜`.
+///
+/// Spaces are allowed only between these parts. Ranges, `以上` / `まで` /
+/// `約`, rates, several numbers and `万` / `千` units are `None`.
+fn parse_amount(text: &str) -> Option<Value> {
+    let mut rest = text.trim();
+    if let Some(stripped) = TAX_NOTES.iter().find_map(|note| rest.strip_suffix(note)) {
+        rest = stripped.trim_end();
+    }
+    let mut signs = 0;
+    if let Some(inner) = rest.strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
+        rest = inner.trim();
+        signs += 1;
+    }
+    if let Some(stripped) = rest.strip_prefix(AMOUNT_SIGNS) {
+        rest = stripped.trim_start();
+        signs += 1;
+    }
+    let prefixed = match rest.strip_prefix(CURRENCY_PREFIXES) {
+        Some(stripped) => {
+            rest = stripped.trim_start();
+            true
         }
+        None => false,
+    };
+    if let Some(stripped) = rest.strip_prefix(AMOUNT_SIGNS) {
+        rest = stripped.trim_start();
+        signs += 1;
     }
-    if let Some(start) = start {
-        tokens.push(Token {
-            start,
-            end: text.len(),
-        });
+    let suffixed = match rest.strip_suffix('円') {
+        Some(stripped) => {
+            rest = stripped.trim_end();
+            true
+        }
+        None => false,
+    };
+    if signs > 1 || prefixed && suffixed {
+        return None;
     }
-    tokens
+    let value = parse_decimal(rest, 2)?;
+    if signs == 1 {
+        negate(&value)
+    } else {
+        Some(value)
+    }
 }
 
-/// The number of a token: thousands separators must group by three and a
-/// fraction holds digits only.
-fn token_number(token: &str) -> Option<Value> {
-    let (sign, digits) = token
-        .strip_prefix('-')
-        .map_or(("", token), |digits| ("-", digits));
-    let (integer, fraction) = digits.split_once('.').unwrap_or((digits, ""));
-    if !fraction.chars().all(|c| c.is_ascii_digit()) {
+/// Units allowed after a number (after NFKC; `㎡` is `m2`, `m²` is `m`).
+const NUMBER_UNITS: [&str; 16] = [
+    "個", "点", "件", "名", "人", "枚", "本", "台", "回", "kg", "g", "km", "m", "cm", "mm", "m2",
+];
+
+/// The whole text as exactly one number: `[sign] number [unit]`, with sign
+/// `-`, `−` (U+2212) or `+`, number as in [`parse_amount`] with any number
+/// of decimals, and unit one of [`NUMBER_UNITS`] (spaces allowed before it).
+fn parse_number(text: &str) -> Option<Value> {
+    let text = text.trim();
+    let body = NUMBER_UNITS
+        .iter()
+        .filter_map(|unit| text.strip_suffix(unit))
+        .map(str::trim_end)
+        .find(|body| body.ends_with(|c: char| c.is_ascii_digit()))
+        .unwrap_or(text);
+    let (negative, digits) = if let Some(digits) = body.strip_prefix(['-', '\u{2212}']) {
+        (true, digits.trim_start())
+    } else {
+        (false, body.strip_prefix('+').map_or(body, str::trim_start))
+    };
+    let value = parse_decimal(digits, MAX_DIGITS)?;
+    if negative {
+        negate(&value)
+    } else {
+        Some(value)
+    }
+}
+
+/// ASCII digits with optional thousands separators (a group of one to three
+/// digits, then groups of three) and an optional fraction of one to
+/// `max_fraction` digits; at most [`MAX_DIGITS`] digits in all.
+fn parse_decimal(text: &str, max_fraction: usize) -> Option<Value> {
+    let (integer, fraction) = match text.split_once('.') {
+        Some((integer, fraction)) => (integer, Some(fraction)),
+        None => (text, None),
+    };
+    if integer.is_empty() || !integer.chars().all(|c| c.is_ascii_digit() || c == ',') {
         return None;
     }
     if integer.contains(',') {
@@ -891,85 +1194,25 @@ fn token_number(token: &str) -> Option<Value> {
             return None;
         }
     }
-    let integer = integer.replace(',', "");
-    if !digits.contains('.')
-        && let Ok(n) = format!("{sign}{integer}").parse::<i64>()
-    {
-        return Some(Value::from(n));
-    }
-    format!("{sign}{integer}.{fraction}")
-        .trim_end_matches('.')
-        .parse::<f64>()
-        .ok()
-        .filter(|n| n.is_finite())
-        .and_then(|n| serde_json::Number::from_f64(n).map(Value::Number))
-}
-
-/// Amounts take the number attached to a currency mark (`¥1,100`,
-/// `1,100円`); several different attached numbers are refused. Without a
-/// mark, and for `number` fields, the text must hold exactly one number with
-/// only whitespace, a sign or a currency mark before it. A magnitude kanji
-/// after a number (`1.5万円`) is refused.
-fn parse_number(text: &str, field_type: FieldType) -> Option<Value> {
-    let tokens = number_tokens(text);
-    if tokens.iter().any(|t| {
-        text[t.end..]
-            .trim_start()
-            .starts_with(['千', '万', '億', '兆'])
-    }) {
-        return None;
-    }
-    if field_type == FieldType::Amount {
-        let mut attached = None;
-        for token in &tokens {
-            let Some(value) = currency_value(text, token) else {
-                continue;
-            };
-            let value = value?;
-            if attached.as_ref().is_some_and(|seen| *seen != value) {
-                return None;
-            }
-            attached = Some(value);
-        }
-        if attached.is_some() {
-            return attached;
-        }
-    }
-    let [token] = &tokens[..] else {
-        return None;
-    };
-    // Only whitespace, a sign or a currency mark may precede the number, so
-    // labels such as `消費税(10%)` and ordinals such as `第3期` are refused.
-    if !text[..token.start]
-        .chars()
-        .all(|c| c.is_whitespace() || CURRENCY_MARKS.contains(&c) || matches!(c, '+' | '-'))
+    let digits = integer.replace(',', "");
+    if let Some(fraction) = fraction
+        && (fraction.is_empty()
+            || fraction.len() > max_fraction
+            || !fraction.chars().all(|c| c.is_ascii_digit()))
     {
         return None;
     }
-    token_number(&text[token.start..token.end])
-}
-
-/// `None` when `token` has no currency mark; otherwise its signed value,
-/// `Some(None)` when the number or its sign is unclear (`(¥1,000)`, `△¥1,000`).
-fn currency_value(text: &str, token: &Token) -> Option<Option<Value>> {
-    let before = text[..token.start].trim_end();
-    let suffixed = text[token.end..].trim_start().starts_with('円');
-    let prefix = before.strip_suffix(CURRENCY_MARKS);
-    if prefix.is_none() && !suffixed {
+    if digits.len() + fraction.map_or(0, str::len) > MAX_DIGITS {
         return None;
     }
-    let number = &text[token.start..token.end];
-    let negative = match prefix.and_then(|p| p.trim_end().chars().next_back()) {
-        Some('-') => true,
-        Some('−' | '△' | '▲' | '(' | '[') => return Some(None),
-        _ => false,
-    };
-    let value = token_number(number);
-    Some(if negative {
-        value.and_then(|v| negate(&v))
-    } else {
-        value
-    })
+    match fraction {
+        None => digits.parse::<i64>().ok().map(Value::from),
+        Some(fraction) => format!("{digits}.{fraction}")
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(Value::Number),
+    }
 }
 
 fn negate(value: &Value) -> Option<Value> {
@@ -979,6 +1222,164 @@ fn negate(value: &Value) -> Option<Value> {
     value
         .as_f64()
         .and_then(|n| serde_json::Number::from_f64(-n).map(Value::Number))
+}
+
+/// A kind of value that may appear in a text value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    Phone,
+    Date,
+    Amount,
+}
+
+/// Whether NFKC `text` holds two values of one kind (phone numbers, dates
+/// or currency amounts) with a word between them, as in `03-1234-5678 FAX
+/// 03-1234-5679`. Values joined only by spaces or punctuation (a range such
+/// as `2026年11月8日〜2026年12月8日`) are one value.
+fn several_values(text: &str) -> bool {
+    let mut tokens = value_shapes(text);
+    tokens.sort_by_key(|&(_, start, _)| start);
+    [Shape::Phone, Shape::Date, Shape::Amount]
+        .iter()
+        .any(|&shape| {
+            tokens
+                .iter()
+                .filter(|(kind, _, _)| *kind == shape)
+                .collect::<Vec<_>>()
+                .windows(2)
+                .any(|pair| {
+                    let (_, _, end) = *pair[0];
+                    let (_, start, _) = *pair[1];
+                    text.get(end..start)
+                        .is_some_and(|between| between.chars().any(char::is_alphabetic))
+                })
+        })
+}
+
+/// Phone numbers, dates and currency amounts in `text` with their byte ranges.
+fn value_shapes(text: &str) -> Vec<(Shape, usize, usize)> {
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let at = |i: usize| chars.get(i).map_or(text.len(), |&(at, _)| at);
+    let mut tokens = Vec::new();
+    // Runs of digits and separators: numeric dates, phone numbers, amounts.
+    let mut i = 0;
+    while i < chars.len() {
+        if !chars[i].1.is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < chars.len()
+            && (chars[i].1.is_ascii_digit() || matches!(chars[i].1, '-' | '/' | '.' | ','))
+        {
+            i += 1;
+        }
+        let mut end = i;
+        while !chars[end - 1].1.is_ascii_digit() {
+            end -= 1;
+        }
+        let run = &text[at(start)..at(end)];
+        let before = text[..at(start)].trim_end();
+        let before = before
+            .strip_suffix(AMOUNT_SIGNS)
+            .unwrap_or(before)
+            .trim_end();
+        let shape = if numeric_date(run) {
+            Some(Shape::Date)
+        } else if phone(run) {
+            Some(Shape::Phone)
+        } else if before.ends_with(CURRENCY_PREFIXES)
+            || text[at(end)..].trim_start().starts_with('円')
+        {
+            Some(Shape::Amount)
+        } else {
+            None
+        };
+        if let Some(shape) = shape {
+            tokens.push((shape, at(start), at(end)));
+        }
+    }
+    // Kanji dates: `11月8日`, extended back over a year and an era name.
+    for (n, &(_, c)) in chars.iter().enumerate() {
+        if c != '月' {
+            continue;
+        }
+        let digits_back = |mut j: usize, max: usize| {
+            let mut count = 0;
+            while j > 0 && count < max && chars[j - 1].1.is_ascii_digit() {
+                j -= 1;
+                count += 1;
+            }
+            (j, count)
+        };
+        let skip_space_back = |mut j: usize| {
+            while j > 0 && chars[j - 1].1.is_whitespace() {
+                j -= 1;
+            }
+            j
+        };
+        let skip_space = |mut j: usize| {
+            while j < chars.len() && chars[j].1.is_whitespace() {
+                j += 1;
+            }
+            j
+        };
+        let (mut start, month_digits) = digits_back(skip_space_back(n), 2);
+        let mut j = skip_space(n + 1);
+        let day_start = j;
+        while j < chars.len() && j - day_start < 2 && chars[j].1.is_ascii_digit() {
+            j += 1;
+        }
+        let day_digits = j - day_start;
+        let j = skip_space(j);
+        if month_digits == 0 || day_digits == 0 || chars.get(j).is_none_or(|&(_, c)| c != '日') {
+            continue;
+        }
+        let year = skip_space_back(start);
+        if year > 0 && chars[year - 1].1 == '年' {
+            let digits = skip_space_back(year - 1);
+            let (year_start, count) = digits_back(digits, 4);
+            if count > 0 {
+                start = year_start;
+            } else if digits > 0 && chars[digits - 1].1 == '元' {
+                start = digits - 1;
+            }
+            let era = skip_space_back(start);
+            if era >= 2 && ERA_NAMES.contains(&&text[at(era - 2)..at(era)]) {
+                start = era - 2;
+            }
+        }
+        tokens.push((Shape::Date, at(start), at(j + 1)));
+    }
+    tokens
+}
+
+/// A numeric date such as `2026/11/08`, `R8.11.8` (from its digits) or
+/// `2026-11-08`: three digit groups joined by one separator kind, `/` or
+/// `.` (`-` only after a four-digit year), month and day of one or two digits.
+fn numeric_date(run: &str) -> bool {
+    let Some(separator) = run.chars().find(|c| matches!(c, '/' | '.' | '-')) else {
+        return false;
+    };
+    let groups: Vec<&str> = run.split(separator).collect();
+    let [year, month, day] = groups[..] else {
+        return false;
+    };
+    let digits =
+        |s: &str, max: usize| (1..=max).contains(&s.len()) && s.chars().all(|c| c.is_ascii_digit());
+    digits(year, 4) && digits(month, 2) && digits(day, 2) && (separator != '-' || year.len() == 4)
+}
+
+/// Three or more digit groups joined by hyphens with 9 to 13 digits in all
+/// (`03-1234-5678`, `0120-123-456`).
+fn phone(run: &str) -> bool {
+    let groups: Vec<&str> = run.split('-').collect();
+    let digits: usize = groups.iter().map(|g| g.len()).sum();
+    groups.len() >= 3
+        && groups
+            .iter()
+            .all(|g| !g.is_empty() && g.chars().all(|c| c.is_ascii_digit()))
+        && (9..=13).contains(&digits)
 }
 
 #[cfg(test)]
@@ -1120,7 +1521,7 @@ mod tests {
     }
 
     fn score(a: &str, b: &str) -> f64 {
-        label_score(&normalize_label(a), &normalize_label(b))
+        label_score(&normalize_label(a), &normalize_label(b)).score
     }
 
     #[test]
@@ -1222,6 +1623,8 @@ mod tests {
             ("H31.4.30", "2019-04-30"),
             ("H31/4/30", "2019-04-30"),
             ("S55.3.1", "1980-03-01"),
+            // Changed: an abbreviation may carry its own weekday in brackets.
+            ("R8.11.8(日)", "2026-11-08"),
         ] {
             assert_eq!(date(text), Some(json!(iso)), "{text}");
         }
@@ -1251,7 +1654,8 @@ mod tests {
             "2026年11月8日(令和8年)",
             // Abbreviations need the whole text, one separator kind and a known letter.
             "R8.11/8",
-            "R8.11.8(日)",
+            "R8.11.8(月)",
+            "R8.11.8 日",
             "T2.3.4",
             "r8.11.8",
             "R123.1.1",
@@ -1268,9 +1672,12 @@ mod tests {
             ("2026 年 11 月 8 日", "2026-11-08"),
             ("2026年11月8日(日)", "2026-11-08"),
             ("2026/11/08（日）", "2026-11-08"),
-            ("2026-11-08 日曜日", "2026-11-08"),
             ("2026.11.08 (Sun)", "2026-11-08"),
+            ("2026.11.08 (sun)", "2026-11-08"),
             ("令和8年11月8日（日曜日）", "2026-11-08"),
+            ("2026/11/09(月曜)", "2026-11-09"),
+            ("2024年2月29日(木)", "2024-02-29"),
+            ("2000/1/1 (土)", "2000-01-01"),
         ] {
             assert_eq!(date(text), Some(json!(iso)), "{text}");
         }
@@ -1289,6 +1696,12 @@ mod tests {
             "2026年11月8",
             "26/11/08",
             "2026/11/08 10:00",
+            // Changed: a weekday must be bracketed and must match the date.
+            "2026-11-08 日曜日",
+            "2026年11月8日(月)",
+            "2026/11/08 (Mon)",
+            "2026/11/08（日）（日）",
+            "2026/11/08(日",
         ] {
             assert_eq!(date(text), None, "{text}");
         }
@@ -1306,31 +1719,88 @@ mod tests {
     }
 
     #[test]
-    fn amounts_use_the_currency_attached_number() {
+    fn amounts_must_be_one_whole_amount() {
         let amount = |s: &str| normalize_value(FieldType::Amount, s);
+        for (text, value) in [
+            ("12,100", json!(12100)),
+            ("¥12,100", json!(12100)),
+            ("￥ 12,100", json!(12100)),
+            ("12,100円", json!(12100)),
+            ("12,100 円", json!(12100)),
+            ("１２，１００円", json!(12100)),
+            ("$12.50", json!(12.5)),
+            ("€0.5", json!(0.5)),
+            ("¥12,100（税込）", json!(12100)),
+            ("¥12,100 (税抜)", json!(12100)),
+            ("12,100円税込", json!(12100)),
+            ("-¥1,000", json!(-1000)),
+            ("¥-1,000", json!(-1000)),
+            // Changed: these signs were refused; they are negative amounts.
+            ("△¥1,000", json!(-1000)),
+            ("▲1,000円", json!(-1000)),
+            ("−1,000円", json!(-1000)),
+            ("(¥1,000)", json!(-1000)),
+            ("（1,000円）（税込）", json!(-1000)),
+        ] {
+            assert_eq!(amount(text), Some(value), "{text}");
+        }
+        for text in [
+            // Before (first round): the currency-attached number (1100, 12100,
+            // 1100, 12100). A rate or count next to an amount is not one amount.
+            "10% ¥1,100",
+            "3点 ¥12,100",
+            "¥1,100（10%対象）",
+            "¥12,100円",
+            // Before: 12 and 1 (a number split over runs or by a space).
+            "¥12, 100",
+            "¥1 100",
+            // Before: 2000, 5000, 5000, 50000.
+            "1,000〜2,000円",
+            "5,000円以上",
+            "約5,000円",
+            "50,000円まで",
+            "¥1,000 + ¥100",
+            "10% 1,100",
+            "1.5万円",
+            "¥1,00",
+            "¥1,000.123",
+            "€1.000",
+            "--1,000",
+            "-(¥1,000)",
+            "△-1,000",
+            "¥",
+            "1,000円（税込）（税抜）",
+            "1,000円(10%税込)",
+            "1234567890123456",
+        ] {
+            assert_eq!(amount(text), None, "{text}");
+        }
         let number = |s: &str| normalize_value(FieldType::Number, s);
-        // Before: 10 and 3 (the first number).
-        assert_eq!(amount("10% ¥1,100"), Some(json!(1100)));
-        assert_eq!(amount("3点 ¥12,100"), Some(json!(12100)));
-        assert_eq!(amount("¥1,100（10%対象）"), Some(json!(1100)));
-        assert_eq!(amount("12,100 円"), Some(json!(12100)));
-        assert_eq!(amount("¥12,100円"), Some(json!(12100)));
-        assert_eq!(amount("-¥1,000"), Some(json!(-1000)));
-        assert_eq!(amount("$12.50"), Some(json!(12.5)));
-        assert_eq!(amount("12,100"), Some(json!(12100)));
-        // Several different currency numbers, or several bare numbers: refused.
-        assert_eq!(amount("¥1,000 + ¥100"), None);
-        assert_eq!(amount("10% 1,100"), None);
-        assert_eq!(amount("△¥1,000"), None);
-        assert_eq!(amount("(¥1,000)"), None);
-        assert_eq!(amount("1.5万円"), None);
-        assert_eq!(amount("¥1,00"), None);
-        // Number fields hold exactly one number.
-        assert_eq!(number("3点 ¥12,100"), None);
-        assert_eq!(number("12 個"), Some(json!(12)));
-        assert_eq!(number("50 m²"), Some(json!(50)));
-        assert_eq!(number("10²"), None);
-        assert_eq!(number("3個 (1個あたり500円)"), None);
+        for (text, value) in [
+            ("12", json!(12)),
+            ("12 個", json!(12)),
+            ("3.5 kg", json!(3.5)),
+            ("50 m²", json!(50)),
+            ("50㎡", json!(50)),
+            ("-3", json!(-3)),
+            ("+3", json!(3)),
+            ("1,234.5678", json!(1234.5678)),
+        ] {
+            assert_eq!(number(text), Some(value), "{text}");
+        }
+        for text in [
+            "3点 ¥12,100",
+            "10²",
+            "3個 (1個あたり500円)",
+            "12,100円",
+            "10%",
+            "2 名 3 回",
+            "1〜3個",
+            "約3個",
+            "3個以上",
+        ] {
+            assert_eq!(number(text), None, "{text}");
+        }
         let fragments = [
             frag("a", "消費税：10% ¥1,100", [60.0, 100.0, 180.0, 110.0]),
             frag("b", "合計：3点 ¥12,100", [60.0, 120.0, 180.0, 130.0]),
@@ -1344,9 +1814,175 @@ mod tests {
                 {"id":"count","label":"合計","type":"number"}
             ]})),
         );
-        assert_eq!(result.fields["tax"].value, Some(json!(1100)));
-        assert_eq!(result.fields["total"].value, Some(json!(12100)));
-        assert_eq!(result.fields["count"].status, FillStatus::Invalid);
+        // Changed: these were filled with 1100 and 12100.
+        for id in ["tax", "total", "count"] {
+            assert_eq!(result.fields[id].status, FillStatus::Invalid, "{id}");
+        }
+    }
+
+    #[test]
+    fn scale_units_in_the_label_leave_numbers_unnormalized() {
+        for label in [
+            "売上高（千円）",
+            "金額(万円)",
+            "売上（単位：百万円）",
+            "売上高千円",
+        ] {
+            assert!(states_scale(&normalize_label(label)), "{label}");
+        }
+        for label in ["売上高", "消費税（10%）", "金額（税込）"] {
+            assert!(!states_scale(&normalize_label(label)), "{label}");
+        }
+        let fragments = [
+            frag("a", "売上高（千円）：1,234", [60.0, 100.0, 180.0, 110.0]),
+            frag("b", "金額（万円）：56", [60.0, 124.0, 160.0, 134.0]),
+        ];
+        let result = fill(
+            "doc",
+            &fragments,
+            &form(json!({"fields":[
+                {"id":"sales","label":"売上高（千円）","type":"amount"},
+                {"id":"sales_number","label":"売上高（千円）","type":"number"},
+                {"id":"sales_plain","label":"売上高","type":"amount"},
+                {"id":"amount","label":"金額","type":"amount"},
+                {"id":"sales_text","label":"売上高（千円）"}
+            ]})),
+        );
+        let f = &result.fields;
+        // Before: 1234 and 56.
+        assert_eq!(f["sales"].status, FillStatus::Invalid);
+        assert_eq!(f["sales"].raw.as_deref(), Some("1,234"));
+        assert_eq!(f["sales_number"].status, FillStatus::Invalid);
+        // Without the qualifier in the form label the pair is held as well.
+        assert_eq!(f["sales_plain"].status, FillStatus::Ambiguous);
+        assert_eq!(f["amount"].status, FillStatus::Ambiguous);
+        // Text fields keep the exact source text.
+        assert_eq!(f["sales_text"].raw.as_deref(), Some("1,234"));
+    }
+
+    #[test]
+    fn one_sided_qualifiers_are_candidates_only() {
+        let fragments = [
+            frag("a", "消費税（10%）", [330.0, 100.0, 392.0, 110.0]),
+            frag("b", "¥1,000", [480.0, 100.0, 520.0, 110.0]),
+            frag("c", "消費税（8%）", [330.0, 120.0, 387.0, 130.0]),
+            frag("d", "¥160", [490.0, 120.0, 520.0, 130.0]),
+            frag(
+                "e",
+                "住所（旧）：大阪府架空市4-5-6",
+                [60.0, 160.0, 230.0, 170.0],
+            ),
+        ];
+        let result = fill(
+            "doc",
+            &fragments,
+            &form(json!({"fields":[
+                {"id":"tax","label":"消費税","type":"amount"},
+                {"id":"tax_10","label":"消費税","type":"amount","hints":["消費税（10%）"]},
+                {"id":"address","label":"住所"}
+            ]})),
+        );
+        // Before: tax = 160 (the shorter qualifier scored higher).
+        let tax = &result.fields["tax"];
+        assert_eq!(tax.status, FillStatus::Ambiguous);
+        assert!(
+            tax.candidates.len() == 2
+                && tax
+                    .candidates
+                    .iter()
+                    .all(|c| c.hold == Some(Hold::OneSidedQualifier))
+        );
+        // An equal qualifier (here from a hint) matches exactly and fills.
+        assert_eq!(result.fields["tax_10"].value, Some(json!(1000)));
+        // Before: address = 大阪府架空市4-5-6.
+        let address = &result.fields["address"];
+        assert_eq!(address.status, FillStatus::Ambiguous);
+        assert_eq!(address.candidates[0].raw, "大阪府架空市4-5-6");
+        let held = serde_json::to_value(&address.candidates[0]).unwrap();
+        assert_eq!(held["hold"], json!("one_sided_qualifier"));
+    }
+
+    #[test]
+    fn only_the_best_candidates_decide() {
+        // The exact label says 未定; a partial match (発行日 in 再発行日) has a
+        // date. Before: the best *typed* candidate filled 2026-11-08.
+        let fragments = [
+            frag("a", "発行日：未定", [60.0, 100.0, 130.0, 110.0]),
+            frag("b", "再発行日：2026/11/08", [60.0, 124.0, 170.0, 134.0]),
+        ];
+        let result = fill(
+            "doc",
+            &fragments,
+            &form(json!({"fields":[{"id":"d","label":"発行日","type":"date"}]})),
+        );
+        assert_eq!(result.fields["d"].status, FillStatus::Invalid);
+        assert_eq!(result.fields["d"].raw.as_deref(), Some("未定"));
+        // Two exact labels, one valid and one not: ambiguous, not filled.
+        let fragments = [
+            frag("a", "発行日：未定", [60.0, 100.0, 130.0, 110.0]),
+            frag("b", "発行日：2026/11/08", [60.0, 124.0, 160.0, 134.0]),
+        ];
+        let result = fill(
+            "doc",
+            &fragments,
+            &form(json!({"fields":[{"id":"d","label":"発行日","type":"date"}]})),
+        );
+        assert_eq!(result.fields["d"].status, FillStatus::Ambiguous);
+    }
+
+    #[test]
+    fn several_values_in_one_text_value_are_held() {
+        let fragments = [
+            frag(
+                "a",
+                "TEL：03-1234-5678 FAX 03-1234-5679",
+                [60.0, 100.0, 230.0, 110.0],
+            ),
+            frag(
+                "b",
+                "期間：2026年11月8日〜2026年12月8日",
+                [60.0, 124.0, 240.0, 134.0],
+            ),
+            frag(
+                "c",
+                "日時：2026/11/08から2026/12/08まで",
+                [60.0, 148.0, 240.0, 158.0],
+            ),
+        ];
+        let result = fill(
+            "doc",
+            &fragments,
+            &form(json!({"fields":[
+                {"id":"phone","label":"電話番号","hints":["TEL"]},
+                {"id":"period","label":"期間"},
+                {"id":"when","label":"日時"}
+            ]})),
+        );
+        // Before: phone = "03-1234-5678 FAX 03-1234-5679".
+        let phone = &result.fields["phone"];
+        assert_eq!(phone.status, FillStatus::Ambiguous);
+        assert_eq!(phone.candidates[0].hold, Some(Hold::SeveralValues));
+        // A range joined by punctuation only is one value.
+        assert_eq!(
+            result.fields["period"].raw.as_deref(),
+            Some("2026年11月8日〜2026年12月8日")
+        );
+        assert_eq!(result.fields["when"].status, FillStatus::Ambiguous);
+        for (text, several) in [
+            ("03-1234-5678 FAX 03-1234-5679", true),
+            ("03-1234-5678 / 03-1234-5679", false),
+            ("0120-123-456 または 03-1234-5678", true),
+            ("令和8年11月8日 及び 令和8年12月1日", true),
+            ("¥1,000（税込） 送料 ¥500", true),
+            ("1,000円 と 500円", true),
+            ("2026年11月8日〜2026年12月8日", false),
+            ("東京都渋谷区架空1-2-3 101号室", false),
+            ("〒150-0001 東京都", false),
+            ("架空銀行 本店営業部 普通 1234567", false),
+            ("INV-2026-0042 発行 2026/11/08", false),
+        ] {
+            assert_eq!(several_values(text), several, "{text}");
+        }
     }
 
     #[test]
@@ -1528,12 +2164,18 @@ mod tests {
                 {"id":"phone","label":"電話番号"}
             ]})),
         );
-        // Before: address ran on over 電話番号 and the number.
-        assert_eq!(
-            result.fields["address"].raw.as_deref(),
-            Some("東京都架空区1-2-3\nテストビル5階")
+        // Before (first round): address = the two lines before 電話番号.
+        // Changed: lines stacked below a label cannot be told apart from a
+        // single-column list (品名 / りんご / みかん), so they are column rows
+        // and the field stays ambiguous. 電話番号 has a single value below.
+        let address = &result.fields["address"];
+        assert_eq!(address.status, FillStatus::Ambiguous);
+        assert!(
+            address
+                .candidates
+                .iter()
+                .all(|c| c.placement == Placement::Column)
         );
-        assert_eq!(result.fields["address"].evidence.len(), 2);
         assert_eq!(result.fields["phone"].raw.as_deref(), Some("03-1234-5678"));
     }
 
@@ -1631,6 +2273,72 @@ mod tests {
                 .values()
                 .all(|f| f.status == FillStatus::LimitExceeded && f.value.is_none())
         );
+    }
+
+    #[test]
+    fn a_large_value_matched_by_many_fields_stays_bounded() {
+        // A 600 KB value under one label that all 512 fields match. Before:
+        // every field re-normalized the value and the work counted one unit
+        // per line, so a 100 ms deadline was never checked (5 s in release,
+        // 40 s in debug, then Ok).
+        let value = "あ".repeat(200_000);
+        let fragments = [
+            frag("l", "備考", [60.0, 100.0, 80.0, 110.0]),
+            frag("v", &value, [200.0, 100.0, 500.0, 110.0]),
+        ];
+        let fields: Vec<serde_json::Value> = (0..MAX_FIELDS)
+            .map(|f| json!({"id": format!("f{f}"), "label": "備考"}))
+            .collect();
+        let many = form(json!({"fields": fields}));
+        // Copies into the result count as work: the default budget stops it.
+        let error = fill_with_limits("doc", &fragments, &many, &FillLimits::default()).unwrap_err();
+        assert_eq!(error, FillError::BudgetExceeded);
+        // With an unlimited budget the deadline stops it, checked per field.
+        let started = Instant::now();
+        let limits = FillLimits {
+            max_work: u64::MAX,
+            deadline: Some(started + std::time::Duration::from_millis(20)),
+            ..FillLimits::default()
+        };
+        let error = fill_with_limits("doc", &fragments, &many, &limits).unwrap_err();
+        assert_eq!(error, FillError::DeadlineExceeded);
+        assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+        // One field is fine: the value is prepared once and copied once.
+        let one = form(json!({"fields":[{"id":"note","label":"備考"}]}));
+        let result = fill_with_limits("doc", &fragments, &one, &FillLimits::default()).unwrap();
+        assert_eq!(result.fields["note"].raw.as_deref(), Some(value.as_str()));
+    }
+
+    #[test]
+    fn crowded_layouts_are_near_linear_and_stop_at_the_deadline() {
+        // 40,000 plain fragments over 40,000 `い：` fragments at one x.
+        // Before: 1.6e9 fragment checks in layout, which never checked the
+        // deadline (1.8 s in release before DeadlineExceeded at 100 ms).
+        let fragments: Vec<SourceFragment> = (0..40_000)
+            .flat_map(|i| {
+                [
+                    frag(&format!("a{i}"), "あ", [60.0, 100.0, 70.0, 110.0]),
+                    frag(&format!("b{i}"), "い：", [60.0, 112.0, 75.0, 122.0]),
+                ]
+            })
+            .collect();
+        let target = form(json!({"fields":[{"id":"x","label":"あ"}]}));
+        let started = Instant::now();
+        let result = fill_with_limits("doc", &fragments, &target, &FillLimits::default()).unwrap();
+        assert!(started.elapsed().as_secs() < 30, "{:?}", started.elapsed());
+        // The Right pairs あ → あ are not values: あ reads as the form label.
+        assert_eq!(result.fields["x"].status, FillStatus::NotFound);
+        let error = fill_with_limits(
+            "doc",
+            &fragments,
+            &target,
+            &FillLimits {
+                max_work: 1_000_000,
+                ..FillLimits::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, FillError::BudgetExceeded);
     }
 
     #[test]

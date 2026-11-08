@@ -1,0 +1,24 @@
+{
+  "description": "括弧内の補足が文書のラベルにだけある（消費税（10%）と（8%）、お届け先住所（変更前）、住所（旧））。フォームの「消費税」「お届け先住所」「住所」は候補止まりで空欄（ambiguous）。補足まで同じ「消費税（10%）」は埋める",
+  "support": "supported",
+  "runs": [
+    {"x": 330, "y": 100, "text": "消費税（10%）"},
+    {"right": 520, "y": 100, "text": "¥1,000"},
+    {"x": 330, "y": 120, "text": "消費税（8%）"},
+    {"right": 520, "y": 120, "text": "¥160"},
+    {"x": 60, "y": 170, "text": "お届け先住所（変更前）：東京都架空区1-2-3"},
+    {"x": 60, "y": 194, "text": "住所（旧）：大阪府架空市4-5-6"}
+  ],
+  "form": {"fields": [
+    {"id": "tax", "label": "消費税", "type": "amount"},
+    {"id": "tax_10", "label": "消費税（10%）", "type": "amount"},
+    {"id": "delivery_address", "label": "お届け先住所"},
+    {"id": "address", "label": "住所"}
+  ]},
+  "expect": {
+    "tax": {"abstain": "ambiguous"},
+    "tax_10": {"raw": "¥1,000", "value": 1000},
+    "delivery_address": {"abstain": "ambiguous"},
+    "address": {"abstain": "ambiguous"}
+  }
+}

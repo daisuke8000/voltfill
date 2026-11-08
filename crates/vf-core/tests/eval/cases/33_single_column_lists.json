@@ -1,0 +1,20 @@
+{
+  "description": "ラベルの下に1列の一覧が続く（金額 ¥1,000・¥1,000、品名 りんご・みかん）。複数行の値は未対応のため、値が同じでも空欄（ambiguous）",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "金額"},
+    {"x": 60, "y": 118, "text": "¥1,000"},
+    {"x": 60, "y": 136, "text": "¥1,000"},
+    {"x": 60, "y": 200, "text": "品名"},
+    {"x": 60, "y": 218, "text": "りんご"},
+    {"x": 60, "y": 236, "text": "みかん"}
+  ],
+  "form": {"fields": [
+    {"id": "amount", "label": "金額", "type": "amount"},
+    {"id": "item", "label": "品名"}
+  ]},
+  "expect": {
+    "amount": {"abstain": "ambiguous"},
+    "item": {"abstain": "ambiguous"}
+  }
+}

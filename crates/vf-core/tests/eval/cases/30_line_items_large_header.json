@@ -1,0 +1,25 @@
+{
+  "description": "見出しが14ptで行間24ptの明細表（2行）。行の間隔は見出しから1行目までの間隔で測り、複数行の列として空欄（ambiguous）",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "size": 14, "text": "品名"},
+    {"x": 300, "y": 100, "size": 14, "text": "数量"},
+    {"x": 440, "y": 100, "size": 14, "text": "金額"},
+    {"x": 60, "y": 124, "text": "りんご"},
+    {"x": 300, "y": 124, "text": "3"},
+    {"x": 440, "y": 124, "text": "¥300"},
+    {"x": 60, "y": 148, "text": "みかん"},
+    {"x": 300, "y": 148, "text": "2"},
+    {"x": 440, "y": 148, "text": "¥500"}
+  ],
+  "form": {"fields": [
+    {"id": "item", "label": "品名"},
+    {"id": "quantity", "label": "数量", "type": "number"},
+    {"id": "amount", "label": "金額", "type": "amount"}
+  ]},
+  "expect": {
+    "item": {"abstain": "ambiguous"},
+    "quantity": {"abstain": "ambiguous"},
+    "amount": {"abstain": "ambiguous"}
+  }
+}
