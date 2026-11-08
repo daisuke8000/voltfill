@@ -1,10 +1,10 @@
-use jev_client::multipart::Body;
-use jev_client::transport::{
+use std::collections::VecDeque;
+use voltfill_jev::multipart::Body;
+use voltfill_jev::transport::{
     self, AttemptBudget, Clock, Execution, Failure, HttpRequest, HttpResponse, NoopObserver,
     Policy, Secret, Transport, TransportError,
 };
-use jev_client::{self as jev, PngImage};
-use std::collections::VecDeque;
+use voltfill_jev::{self as jev, PngImage};
 
 #[derive(Default)]
 struct Wire {

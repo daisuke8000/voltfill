@@ -7,11 +7,11 @@
 //! Results are evaluation-only and carry no calibrated probability.
 use crate::geometry::Rect;
 use crate::model::SourceFragment;
-use pdf_probe::layout::{self, Pair, Placement, Precision};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use unicode_normalization::UnicodeNormalization;
+use voltfill_pdf::layout::{self, Pair, Placement, Precision};
 
 pub const MAX_FORM_BYTES: usize = 1024 * 1024;
 pub const MAX_FIELDS: usize = 512;

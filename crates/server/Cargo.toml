@@ -7,7 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-voltfill-core = { path = "../voltfill-core" }
+voltfill-core = { path = "../core" }
 axum.workspace = true
 tokio.workspace = true
 serde.workspace = true

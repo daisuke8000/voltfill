@@ -4,13 +4,13 @@ pub mod candidates;
 pub mod engine;
 pub mod evaluate;
 pub mod fill;
-pub use pdf_probe::geometry;
+pub use voltfill_pdf::geometry;
 pub mod jev;
 pub mod logging;
 pub mod model;
 pub mod pdf;
 #[cfg(any(feature = "pdfium", feature = "hayro"))]
-pub use pdf_render as render;
+pub use voltfill_render as render;
 pub mod resources;
 pub mod schema;
 pub mod validate;

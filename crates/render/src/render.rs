@@ -2,14 +2,14 @@
 //! cover the requested raster and PNG output, not parser-internal allocations.
 #[cfg(feature = "pdfium")]
 use firecrawl_pdfium::{PagePoint, Pdfium, PixelFormat};
-use pdf_probe::geometry::{
-    AffineTransform, ImageTransform, Padding, PageGeometry, Point, Rect, Rotation,
-};
-use pdf_probe::metadata;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use thiserror::Error;
+use voltfill_pdf::geometry::{
+    AffineTransform, ImageTransform, Padding, PageGeometry, Point, Rect, Rotation,
+};
+use voltfill_pdf::metadata;
 
 /// Explicit renderer choice; PDFium requires a caller-supplied absolute library path.
 #[derive(Debug, Clone)]

@@ -7,9 +7,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-pdf-probe = { path = "../pdf-probe" }
-pdf-render = { path = "../pdf-render" }
-jev-client = { path = "../jev-client" }
+voltfill-pdf = { path = "../pdf" }
+voltfill-render = { path = "../render" }
+voltfill-jev = { path = "../jev" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -20,5 +20,5 @@ unicode-normalization.workspace = true
 
 [features]
 default = []
-pdfium = ["pdf-render/pdfium"]
-hayro = ["pdf-render/hayro"]
+pdfium = ["voltfill-render/pdfium"]
+hayro = ["voltfill-render/hayro"]

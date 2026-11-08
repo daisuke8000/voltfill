@@ -1,7 +1,7 @@
 //! Extraction-specific observer compatibility over the Jev execution boundary.
 use super::multipart::{Body, PngImage};
 use super::{Limits, Request, Response};
-pub use jev_client::transport::*;
+pub use voltfill_jev::transport::*;
 
 pub struct RequestScope<'request> {
     pub field_id: &'request str,
@@ -109,7 +109,7 @@ pub fn execute_in_scope<T: Transport, C: Clock, O: AttemptObserver>(
     observer: &mut O,
     scope: RequestScope<'_>,
 ) -> Execution {
-    jev_client::transport::execute_observed(
+    voltfill_jev::transport::execute_observed(
         request,
         images,
         boundary,
@@ -130,7 +130,7 @@ struct ScopedObserver<'observer, 'request, O> {
     inner: &'observer mut O,
     scope: RequestScope<'request>,
 }
-impl<O: AttemptObserver> jev_client::transport::AttemptObserver for ScopedObserver<'_, '_, O> {
+impl<O: AttemptObserver> voltfill_jev::transport::AttemptObserver for ScopedObserver<'_, '_, O> {
     fn waiting(&mut self, duration_ms: u64) -> Result<(), Failure> {
         self.inner.waiting(duration_ms)
     }
@@ -139,7 +139,7 @@ impl<O: AttemptObserver> jev_client::transport::AttemptObserver for ScopedObserv
         body: &Body,
         budget: &AttemptBudget,
         timeout_cap_ms: u64,
-        context: &jev_client::transport::AttemptContext<'_>,
+        context: &voltfill_jev::transport::AttemptContext<'_>,
     ) -> Result<(), Failure> {
         self.inner.before_send(
             body,
@@ -159,7 +159,7 @@ impl<O: AttemptObserver> jev_client::transport::AttemptObserver for ScopedObserv
         attempt: &Attempt,
         response: Option<&Response>,
         budget: &AttemptBudget,
-        context: &jev_client::transport::AttemptContext<'_>,
+        context: &voltfill_jev::transport::AttemptContext<'_>,
     ) -> Result<(), Failure> {
         self.inner.after_send(
             attempt,

@@ -1,10 +1,11 @@
-//! Print the layout hypotheses for a PDF: `cargo run -p pdf-probe --example layout -- INPUT.pdf`.
+//! Print the layout hypotheses for a PDF: `cargo run -p voltfill-pdf --example layout -- INPUT.pdf`.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::args().nth(1).ok_or("usage: layout INPUT.pdf")?;
-    let snapshot = pdf_probe::inspect(&std::fs::read(path)?, pdf_probe::PdfLimits::default())?;
-    let layout = pdf_probe::layout::analyze(&snapshot.fragments);
+    let snapshot =
+        voltfill_pdf::inspect(&std::fs::read(path)?, voltfill_pdf::PdfLimits::default())?;
+    let layout = voltfill_pdf::layout::analyze(&snapshot.fragments);
     for pair in &layout.pairs {
-        let text = |s: &pdf_probe::layout::Span| {
+        let text = |s: &voltfill_pdf::layout::Span| {
             snapshot
                 .fragments
                 .iter()
