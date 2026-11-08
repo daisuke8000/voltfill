@@ -105,7 +105,7 @@ fn explicit_empty_server_config_is_an_error_for_launch_and_legacy_files() {
 fn server_environment_and_credential_files_are_validated_before_listening() {
     let temp = Temp::new();
     let key = temp.file("synthetic-server-key", "synthetic-server-canary\r\n");
-    let fixture = root().join("examples/text-mock.json");
+    let fixture = root().join("examples/legacy/text-mock.json");
     for (args, variables, error) in [
         (
             vec![],

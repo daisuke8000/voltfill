@@ -278,7 +278,7 @@ mod tests {
     use super::*;
 
     fn fixture() -> ServerConfig {
-        ServerConfig::fixture(include_bytes!("../../../examples/text-mock.json").to_vec())
+        ServerConfig::fixture(include_bytes!("../../../examples/legacy/text-mock.json").to_vec())
             .expect("the checked-in mock must initialize a fixture server config")
     }
     fn values(entries: &[(&str, &str)]) -> BTreeMap<String, String> {

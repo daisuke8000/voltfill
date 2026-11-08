@@ -74,10 +74,10 @@ fn extraction_matches_before_foundation_split() {
     log::set_logger(&Targets).expect("this integration-test binary must install its logger once");
     log::set_max_level(log::LevelFilter::Info);
     let bytes = support::pdf_with_text("ALPHA42");
-    let form = schema::parse(include_bytes!("../../../examples/text-form.json"))
+    let form = schema::parse(include_bytes!("../../../examples/legacy/text-form.json"))
         .expect("the checked-in text form must satisfy the schema");
     let mut fixture =
-        FixtureEvaluator::from_bytes(include_bytes!("../../../examples/text-mock.json"))
+        FixtureEvaluator::from_bytes(include_bytes!("../../../examples/legacy/text-mock.json"))
             .expect("the checked-in text mock must initialize the fixture evaluator");
     let mock = engine::extract(&bytes, &form, &ExtractOptions::default(), &mut fixture)
         .expect("fixture extraction must succeed on the synthetic PDF");

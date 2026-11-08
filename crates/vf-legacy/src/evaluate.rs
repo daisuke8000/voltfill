@@ -722,7 +722,7 @@ mod concurrent_tests {
                 },
             )
             .expect("the scripted request must complete before testing extraction failure");
-        let form = crate::schema::parse(include_bytes!("../../../examples/text-form.json"))
+        let form = crate::schema::parse(include_bytes!("../../../examples/legacy/text-form.json"))
             .expect("the checked-in text form satisfies the schema");
         let error = crate::engine::extract(
             b"invalid PDF",

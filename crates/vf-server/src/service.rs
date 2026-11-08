@@ -609,7 +609,7 @@ mod tests {
 
     fn state() -> AppState {
         AppState::try_new(
-            ServerConfig::fixture(include_bytes!("../../../examples/text-mock.json").to_vec())
+            ServerConfig::fixture(include_bytes!("../../../examples/legacy/text-mock.json").to_vec())
                 .expect("the checked-in mock must initialize the fixture server config"),
         )
         .expect("the default fixture server config must initialize app state")
@@ -742,7 +742,7 @@ mod tests {
 
     fn busy_state(upload_timeout_ms: u64) -> AppState {
         let mut config =
-            ServerConfig::fixture(include_bytes!("../../../examples/text-mock.json").to_vec())
+            ServerConfig::fixture(include_bytes!("../../../examples/legacy/text-mock.json").to_vec())
                 .expect("the checked-in mock must initialize the fixture server config");
         config.upload_timeout_ms = upload_timeout_ms;
         AppState::try_new(config).expect("the requested upload deadline must initialize app state")
@@ -941,7 +941,7 @@ mod tests {
             ("options", options.as_bytes()),
             (
                 "schema",
-                &include_bytes!("../../../examples/text-form.json")[..],
+                &include_bytes!("../../../examples/legacy/text-form.json")[..],
             ),
         ] {
             body.extend(
@@ -964,7 +964,7 @@ mod tests {
 
     fn reuse_state(ttl_ms: u64) -> (AppState, Arc<DocumentReuse>) {
         let mut config =
-            ServerConfig::fixture(include_bytes!("../../../examples/text-mock.json").to_vec())
+            ServerConfig::fixture(include_bytes!("../../../examples/legacy/text-mock.json").to_vec())
                 .expect("the checked-in mock must initialize the fixture server config");
         config.reuse_document = true;
         config.reuse_document_ttl_ms = ttl_ms;
@@ -1059,7 +1059,7 @@ mod tests {
     #[test]
     fn reuse_is_off_by_default_and_the_ttl_is_range_checked() {
         let config = || {
-            ServerConfig::fixture(include_bytes!("../../../examples/text-mock.json").to_vec())
+            ServerConfig::fixture(include_bytes!("../../../examples/legacy/text-mock.json").to_vec())
                 .expect("the checked-in mock must initialize the fixture server config")
         };
         assert!(
