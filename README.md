@@ -137,7 +137,7 @@ cargo test --workspace --locked
 | 検査 | 対象 | 失敗条件 |
 |---|---|---|
 | cargo-audit | `Cargo.lock`（RustSec） | 脆弱性・unsound |
-| OSV-Scanner | `Cargo.lock`（OSV） | 脆弱性・unsound。unmaintainedなどの情報系は警告表示のみ。ワークスペース内のcrateと同名のcrates.io crateの情報は対象外として表示 |
+| OSV-Scanner | `Cargo.lock`（OSV） | 脆弱性・unsound。unmaintainedなどの情報系は警告表示のみ |
 | cargo-deny | ライセンス・重複／ワイルドカード依存・取得元（[deny.toml](deny.toml)） | 許可外ライセンス、ワイルドカード依存、crates.io以外の取得元 |
 | Gitleaks | Git履歴 | 秘密情報の検出 |
 | actionlint・zizmor | ワークフロー | 構文・セキュリティの問題 |

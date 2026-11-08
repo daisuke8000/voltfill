@@ -149,19 +149,12 @@ jobs:
             echo "::error::osv-scanner failed with exit code $status"
             exit "$status"
           fi
-          # Workspace members have no source in Cargo.lock. OSV matches by crates.io name,
-          # so an advisory for a same-named crates.io crate does not apply to them.
-          LOCAL_PACKAGES=$(awk '/^\[\[package\]\]/ { if (name != "" && !remote) print name "@" version; name = ""; remote = 0 }
-            /^name = / { name = $3 } /^version = / { version = $3 } /^source = / { remote = 1 }
-            END { if (name != "" && !remote) print name "@" version }' Cargo.lock | tr -d '"' | jq -R -s -c 'split("\n") | map(select(length > 0))')
-          export LOCAL_PACKAGES
           findings='[.results[]?.packages[]?
             | {name: .package.name, version: .package.version}
               + (.vulnerabilities[]? | {id, summary,
                  info: ([.affected[]?.database_specific.informational // empty] | first)})
-            | .local = ((.name + "@" + .version) | IN(env.LOCAL_PACKAGES | fromjson | .[]))
-            | .blocking = ((.local | not) and ((.info == null) or (.info == "unsound")))]'
-          jq -r "$findings | .[] | \"\(if .local then \"::notice\" elif .blocking then \"::error\" else \"::warning\" end)::\(.id) \(.name) \(.version) (\(if .local then \"workspace crate, not the crates.io package\" else (.info // \"vulnerability\") end)): \(.summary)\"" "$report"
+            | .blocking = ((.info == null) or (.info == "unsound"))]'
+          jq -r "$findings | .[] | \"\(if .blocking then \"::error\" else \"::warning\" end)::\(.id) \(.name) \(.version) (\(.info // \"vulnerability\")): \(.summary)\"" "$report"
           blocking=$(jq "$findings | map(select(.blocking)) | length" "$report")
           echo "Blocking OSV findings: $blocking"
           test "$blocking" -eq 0
