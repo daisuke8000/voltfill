@@ -57,7 +57,7 @@ voltfill fill input.pdf examples/forms/invoice.json --remote -o result.json
 - 送るのは項目のラベル・型・別名と、候補ごとのページ・原文のラベルと値だけです。選択肢は候補の順に `c0`・`c1`…と `none` です。ページ画像・前後の行・ほかの項目は送りません。候補の文は選択対象の文書データで指示ではないと、要求に明記します。
 - 選ばれた候補が確率の単独最大で、確率の合計が1のときだけ `filled`（`method: "jev_choice"`）にし、`raw`・`value`・`evidence` はその候補の原文から取ります。`none` が単独最大なら `not_found`、同率・不正な回答（確率の合計が1でないものを含む）・送信失敗では `ambiguous` のままです。送った項目は `candidates` を残します。
 - 結果には `model`・`assist`（項目ごとの質問ID・`outcome`・選ばれたキー）・`usage`・`jev_responses` が加わります。`jev_responses` は再試行・エラー・不完全な本文を含む全試行の受信本文です。
-- `outcome` は、回答を得た場合が `selected`・`none_selected`・`not_unique_maximum` です。失敗には `answer_invalid`・`request_failed`・`budget_exhausted`（上限に達したか予算が停止していて送らなかった）・`usage_exceeded_budget`・`deadline_exceeded`・`request_too_large` があります。`usage_exceeded_budget` は、受信して解析できた回答の使用量が予約か費用上限を超えた場合です。その回答は使わず（本文は残します）、以降のバッチも送りません。
+- `outcome` は、回答を得た場合が `selected`・`none_selected`・`not_unique_maximum` です。失敗には `answer_invalid`・`request_failed`・`budget_exhausted`（上限に達したか予算が停止していて、そのバッチかその再試行を送らなかった）・`usage_exceeded_budget`・`deadline_exceeded`・`request_too_large` があります。`usage_exceeded_budget` は、受信して解析できた回答の使用量が予約か費用上限を超えた場合です。その回答は使わず（本文は残します）、以降のバッチも送りません。
 - `--model`・`--max-attempts`・`--execution-config FILE` が使えます。バッチは1件ずつ送ります。送信回数（`max_requests`）・費用・本文量・期限の上限は全バッチと再試行の合計に適用します。試行回数（`--max-attempts`）はバッチごとで、各試行も送信回数に数えます。トークンの上限は1試行ごと（`input_tokens_per_attempt`）と1秒あたり（`input_tokens_per_second`）です。
 - 送った項目がすべて失敗で終わった場合も、全受信本文を含む結果を書き出してから終了コード4（`fill_assist_all_failed`）を返します。
 - `-o` の出力先がシンボリックリンク、または入力・設定・キーファイルと同じ場合は、入力や認証情報を読む前・送信前に終了コード5で拒否します（全コマンド共通）。
