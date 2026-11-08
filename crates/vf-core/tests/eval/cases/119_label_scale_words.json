@@ -1,0 +1,21 @@
+{
+  "description": "ラベルの単位は十・百・十万・十億・百億などどの桁でも変換しない（売上高（十億円）：1,234、金額（百円）：1,000 は invalid）。税の扱い（金額（税込）：1,000）は単位ではなく変換する",
+  "support": "supported",
+  "runs": [
+    {"id": "sales", "x": 60, "y": 100, "text": "売上高（十億円）：1,234"},
+    {"id": "fee", "x": 60, "y": 124, "text": "金額（百円）：1,000"},
+    {"id": "billed", "x": 60, "y": 148, "text": "金額（税込）：1,000"}
+  ],
+  "form": {"fields": [
+    {"id": "sales", "label": "売上高（十億円）", "type": "amount"},
+    {"id": "sales_number", "label": "売上高（十億円）", "type": "number"},
+    {"id": "fee", "label": "金額（百円）", "type": "amount"},
+    {"id": "billed", "label": "金額（税込）", "type": "amount"}
+  ]},
+  "expect": {
+    "sales": {"abstain": "invalid"},
+    "sales_number": {"abstain": "invalid"},
+    "fee": {"abstain": "invalid"},
+    "billed": {"raw": "1,000", "value": 1000, "source": ["billed"]}
+  }
+}
