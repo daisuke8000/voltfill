@@ -35,7 +35,7 @@ jobs:
     env:
       FEATURES: ${{ matrix.features }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - name: Install pinned toolchain
@@ -74,7 +74,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - name: Install pinned workflow checkers
@@ -89,17 +89,24 @@ jobs:
           toolchain=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)
           test -n "$toolchain"
           rustup toolchain install "$toolchain" --profile minimal
-          cargo install zizmor --locked --version 1.30.1 --root "$RUNNER_TEMP/workflow-rust"
+          cargo install zizmor --locked --version 1.32.0 --root "$RUNNER_TEMP/workflow-rust"
       - name: Check workflow syntax and shell scripts
         run: '"$RUNNER_TEMP/workflow-bin/actionlint" -color'
       - name: Check workflow security
         run: '"$RUNNER_TEMP/workflow-rust/bin/zizmor" --offline .github/workflows'
+      # Every action, including transitive ones, must resolve to the commit in actions.lock.
+      - name: Verify the actions lockfile
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh extension install github/gh-actions-lock --pin v0.4.1
+          gh actions-lock --verify --no-interactive
   audit:
     name: Dependency vulnerabilities
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - name: Install pinned toolchain and auditor
@@ -119,7 +126,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - name: Install pinned OSV-Scanner
@@ -156,7 +163,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - name: Install pinned toolchain and cargo-deny
@@ -176,7 +183,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -206,7 +213,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       # Publish only the checked revision, and skip runs superseded on main.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -239,15 +246,15 @@ jobs:
           cp docs/architecture.html "$RUNNER_TEMP/voltfill-pages/index.html"
       - name: Configure GitHub Pages
         if: steps.changed.outputs.deploy == 'true'
-        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+        uses: actions/configure-pages@v6.0.0
       - name: Upload Pages artifact
         if: steps.changed.outputs.deploy == 'true'
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        uses: actions/upload-pages-artifact@v5.0.0
         with:
           path: ${{ runner.temp }}/voltfill-pages
       - name: Deploy GitHub Pages
         if: steps.changed.outputs.deploy == 'true'
         id: deployment
-        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+        uses: actions/deploy-pages@v5.0.1
         with:
           timeout: 180000

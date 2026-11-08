@@ -23,6 +23,7 @@ These rules protect users, credentials and response data. Do not relax them with
 
 ## Conventions
 
+- Workflow actions are locked in .github/workflows/actions.lock. After changing any `uses:`, regenerate it with `gh actions-lock` and never edit it by hand.
 - Use the toolchain pinned in rust-toolchain.toml. Preserve the MSRV and Edition in Cargo.toml unless asked to change them.
 - Use targeted tests for behavioral changes, then the workspace checks in README.md. Run default and renderer-feature test configurations sequentially because they share executable paths. Run `cargo clean` after final verification. Preserve toolchains, dependency downloads and caller-supplied native libraries.
 - Documentation is README.md and the architecture/C4 page docs/architecture.html (published to GitHub Pages), in Japanese. Keep both accurate when documented behavior or crate structure changes, and mark unimplemented parts as planned. Focus it on usage and supported behavior. Exclude account-specific settings, local environment details, investigation reports and conversation history. State validation limits honestly.
