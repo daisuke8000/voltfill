@@ -142,9 +142,10 @@ jobs:
             echo "::error::osv-scanner failed with exit code $status"
             exit "$status"
           fi
-          findings='[.results[]?.packages[]? as $p | $p.vulnerabilities[]?
-            | {name: $p.package.name, version: $p.package.version, id, summary,
-               info: ([.affected[]?.database_specific.informational // empty] | first)}
+          findings='[.results[]?.packages[]?
+            | {name: .package.name, version: .package.version}
+              + (.vulnerabilities[]? | {id, summary,
+                 info: ([.affected[]?.database_specific.informational // empty] | first)})
             | .blocking = ((.info == null) or (.info == "unsound"))]'
           jq -r "$findings | .[] | \"\(if .blocking then \"::error\" else \"::warning\" end)::\(.id) \(.name) \(.version) (\(.info // \"vulnerability\")): \(.summary)\"" "$report"
           blocking=$(jq "$findings | map(select(.blocking)) | length" "$report")
