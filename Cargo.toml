@@ -31,7 +31,7 @@ bytes = "1"
 httpdate = "1.0"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 pdf-inspector = { version = "=1.25.2", default-features = false }
-lopdf = { version = "=0.46.0", default-features = false }
+lopdf = { version = "=0.47.0", default-features = false }
 firecrawl-pdfium = "=0.1.0"
 png = "0.18"
 hayro = { version = "=0.8.0", default-features = false, features = ["embed-cmaps", "simd"] }

@@ -418,48 +418,50 @@ fn rows(snapshot: &DocumentSnapshot) -> Vec<Row> {
 
 /// Captured from `inspect` before rotated-text and writing-mode handling
 /// existed: upright pages must keep identical ids, text, boxes and quality.
+/// Ids hash the whole PDF, which lopdf serializes here, so a change in its
+/// writer moves them; lopdf 0.47 writes whole-number reals as `80.0`.
 #[test]
 fn horizontal_pages_keep_their_snapshot() {
     let snapshot = snapshot(&horizontal_document());
     let expected: Vec<Row> = [
         (
-            "b442b2865c67864bf5016576a784242f0c2d526afb42473531e6859cc4fb8f5f",
+            "7e2b69bd00f8ed970dc11618ce7be3216fee055cd23904c87ac14b7363387451",
             1,
             "Invoice No: A-1",
             [80.0, 80.0, 188.0, 92.0],
         ),
         (
-            "e73859bbf43b2692f2e639f46cfea40ab22bc97f78b45fb28669cf6ea2647a7a",
+            "04d4dcd8132107cfc2d4b7dbd371520a60f16ebcc312fa781cffb85abc7a4744",
             1,
             "Total",
             [80.0, 120.0, 140.0, 132.0],
         ),
         (
-            "d44fc527b72a6e61c689c5f994fc6aad12c306cb05e7102d5dd9eb52d0234351",
+            "160cc815027009e2ca84701141b17c0d8fe9c05a9fb55855335ab82e93e50f07",
             1,
             "1000",
             [200.0, 120.0, 248.0, 132.0],
         ),
         (
-            "741ad500419d7ff2eabd5a580e43f3894a2d1c4d926f2262663bf651a4739672",
+            "f566d40299c5c83c051b9c3da1cdcf62ce12e71287d9927136d9b730cfec602d",
             2,
             "Date: 2026-01-01",
             [80.0, 80.0, 195.20001220703125, 92.0],
         ),
         (
-            "dc1724dbe0d7fb38ed2ab4f326af5dd584a26dc6e5de3d4ef3209b52aed805e1",
+            "aba632a17aacef711e8d26cb69ab8ca1bf76f8bae0ec3afe798db994e2fb8f62",
             2,
             "Code",
             [80.0, 120.0, 128.0, 132.0],
         ),
         (
-            "1cd08c2f41d5e938694ca8454ce818c25961d2db2ef2361cf04f5fab228dea3f",
+            "b28e377e20e561c64dd165f4242374a81eb919c103cc4121bc6ede881aa51d29",
             3,
             "Total: 2000",
             [80.0, 80.0, 159.20001220703125, 92.0],
         ),
         (
-            "36c889d4af4a64a8a003c6400466af963b5dbb0f75e3e02d1467ac5c20cc98d4",
+            "b6ecac8d3d749c6301c4d8907f5598bfdf0fd9fd62645ffcbb24240c0231239d",
             3,
             "Form",
             [80.0, 180.0, 128.0, 192.0],
