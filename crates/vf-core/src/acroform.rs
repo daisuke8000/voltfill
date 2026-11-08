@@ -16,8 +16,9 @@
 //!   label normalization of offline fill (condition (a) of [`crate::fill`];
 //!   partial labels and one-sided qualifiers never match). Exactly one
 //!   AcroForm field may match ([`AcroFormHold::SeveralFields`]), and that
-//!   field may match no other form field: a field whose name matches one form
-//!   field and whose `/TU` another fills neither
+//!   field may match no other form field, whatever rules it fails there: a
+//!   field whose name matches one form field and whose `/TU` another fills
+//!   neither, even when its value does not fit the other's type
 //!   ([`AcroFormHold::FieldMatchesSeveralItems`]).
 //! - Document: no XFA ([`AcroFormHold::XfaPresent`]): in a hybrid form an
 //!   XFA-aware viewer may show other data.
@@ -103,7 +104,8 @@
 //! text-layer value is not counted; both are already bounded. When the
 //! AcroForm could not be read (a limit, an encrypted document, an invalid
 //! field tree), fill uses the text layer only and reports why in
-//! [`FillResult::acroform`].
+//! [`FillResult::acroform`]. An AcroForm with neither fields nor XFA is
+//! treated as absent: the output is that of the text layer alone.
 use crate::fill::{
     self, FieldFill, FieldType, FillCandidate, FillError, FillEvidence, FillLimits, FillResult,
     FillStatus, Form, FormField, rules,
@@ -158,9 +160,9 @@ pub enum AcroFormHold {
     XfaPresent,
     /// More than one AcroForm field matched the form field.
     SeveralFields,
-    /// The AcroForm field could fill two or more form fields (its name
-    /// matches one and its `/TU` another, or several form fields share a
-    /// label), so it fills none of them.
+    /// The AcroForm field matches two or more form fields (its name matches
+    /// one and its `/TU` another, or several form fields share a label),
+    /// whatever other rules it fails for them, so it fills none of them.
     FieldMatchesSeveralItems,
     /// A checkbox or radio button, or a choice for a typed field.
     KindUnsupported,
@@ -253,7 +255,8 @@ struct Evaluated {
 
 /// Fill `form` from the text layer and the document's AcroForm within
 /// `limits`; see the module documentation. Without an AcroForm (`Ok` with
-/// `present == false`) the result is exactly [`fill::fill_with_limits`]'s.
+/// `present == false`), or with one that has neither fields nor XFA, the
+/// result is exactly [`fill::fill_with_limits`]'s.
 ///
 /// # Errors
 /// As [`fill::fill_with_limits`]; AcroForm matching spends from the same
@@ -265,14 +268,19 @@ pub fn fill_with_acroform(
     form: &Form,
     limits: &FillLimits,
 ) -> Result<FillResult, FillError> {
-    let form_pdf = acroform.as_ref().ok().filter(|found| found.present);
-    let summary = match acroform {
-        Ok(found) if found.present => Some(AcroFormSummary::Read {
+    // A form without fields and without XFA (`/AcroForm <<>>`) can fill
+    // nothing, so its output stays that of the text layer alone. An XFA-only
+    // form is still reported: its values may be in the XFA, which is not read.
+    let form_pdf = acroform.as_ref().ok().filter(|found| {
+        found.present && (!found.fields.is_empty() || found.xfa != XfaPresence::Absent)
+    });
+    let summary = match (acroform, form_pdf) {
+        (Ok(_), Some(found)) => Some(AcroFormSummary::Read {
             fields: found.fields.len(),
             xfa: found.xfa,
         }),
-        Ok(_) => None,
-        Err(error) => Some(unavailable(*error)),
+        (Ok(_), None) => None,
+        (Err(error), _) => Some(unavailable(*error)),
     };
     let Some(pdf) = form_pdf else {
         let mut result = fill::fill_with_limits(document_id, fragments, form, limits)?;
@@ -309,24 +317,22 @@ pub fn fill_with_acroform(
     Ok(result)
 }
 
-/// Hold every match of an AcroForm field that could fill (or be offered for)
-/// two or more form fields ([`AcroFormHold::FieldMatchesSeveralItems`]).
+/// Hold every match of an AcroForm field that matches two or more form fields
+/// ([`AcroFormHold::FieldMatchesSeveralItems`]), whatever other rules its
+/// matches fail: a field that fails a rule for one form field (an invalid
+/// date, a choice for a typed field) must not fill another. Table fields
+/// match nothing, and in an XFA form every match is already held.
 fn hold_fields_matching_several_items(outcomes: &mut [Vec<Evaluated>]) {
-    let open = |e: &Evaluated| {
-        e.report
-            .reasons
-            .iter()
-            .all(|reason| *reason == AcroFormHold::SeveralFields)
-    };
+    let counted = |e: &Evaluated| !e.report.reasons.contains(&AcroFormHold::XfaPresent);
     let mut items: HashMap<usize, usize> = HashMap::new();
     for evaluated in outcomes.iter() {
-        for e in evaluated.iter().filter(|e| open(e)) {
+        for e in evaluated.iter().filter(|e| counted(e)) {
             *items.entry(e.index).or_default() += 1;
         }
     }
     for evaluated in outcomes.iter_mut() {
         for e in evaluated.iter_mut() {
-            if open(e) && items.get(&e.index).is_some_and(|&n| n > 1) {
+            if counted(e) && items.get(&e.index).is_some_and(|&n| n > 1) {
                 e.report
                     .reasons
                     .push(AcroFormHold::FieldMatchesSeveralItems);

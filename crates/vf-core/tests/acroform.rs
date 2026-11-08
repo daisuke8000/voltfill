@@ -1005,6 +1005,128 @@ fn a_field_whose_name_and_alternate_name_match_two_items_fills_neither() {
 }
 
 #[test]
+fn a_field_that_fails_a_rule_for_one_item_still_holds_the_other() {
+    // The /TU item cannot take the date (invalid amount), yet the field
+    // matches it, so the name item must not be filled from it either.
+    let mut dict = text_field("発行日", "2026/11/08");
+    dict.set("TU", utf16("金額"));
+    let bytes = build(&[], vec![dict], dictionary! {});
+    let both = form(json!([
+        { "id": "issued", "label": "発行日", "type": "date" },
+        { "id": "amt", "label": "金額", "type": "amount" },
+    ]));
+    let result = run_fill(&bytes, &both);
+    let issued = &result.fields["issued"];
+    assert_not_filled(issued);
+    assert_eq!(reasons(issued), [AcroFormHold::FieldMatchesSeveralItems]);
+    let amt = &result.fields["amt"];
+    assert_not_filled(amt);
+    assert!(
+        matches!(amt.status, FillStatus::NotFound | FillStatus::NoText),
+        "{amt:?}"
+    );
+    assert!(amt.evidence.is_empty());
+    assert_eq!(
+        reasons(amt),
+        [
+            AcroFormHold::FieldMatchesSeveralItems,
+            AcroFormHold::InvalidValue
+        ]
+    );
+    assert_eq!(amt.acroform[0].raw.as_deref(), Some("2026/11/08"));
+
+    // A choice whose /TU matches a typed item (kind unsupported there).
+    let mut choice = field(
+        "都道府県",
+        "Ch",
+        dictionary! { "V" => utf16("大阪府"), "Opt" => vec![utf16("大阪府")] },
+    );
+    choice.set("TU", utf16("件数"));
+    let bytes = build(&[], vec![choice], dictionary! {});
+    let both = form(json!([
+        { "id": "pref", "label": "都道府県", "type": "text" },
+        { "id": "count", "label": "件数", "type": "number" },
+    ]));
+    let result = run_fill(&bytes, &both);
+    let pref = &result.fields["pref"];
+    assert_not_filled(pref);
+    assert_eq!(reasons(pref), [AcroFormHold::FieldMatchesSeveralItems]);
+    assert!(pref.candidates.is_empty());
+    let count = &result.fields["count"];
+    assert_not_filled(count);
+    assert_eq!(
+        reasons(count),
+        [
+            AcroFormHold::FieldMatchesSeveralItems,
+            AcroFormHold::KindUnsupported
+        ]
+    );
+
+    // The choice alone commits for the text item.
+    let fill = one(&bytes, &label("pref", "都道府県", "text"));
+    assert_eq!(fill.status, FillStatus::Filled);
+    assert_eq!(fill.raw.as_deref(), Some("大阪府"));
+}
+
+#[test]
+fn an_acroform_without_fields_serializes_exactly_as_text_layer_fill() {
+    let runs = [run(72.0, 200.0, "請求番号：INV-002")];
+    let form = label("number", "請求番号", "text");
+    let text_only = |bytes: &[u8]| {
+        let (snapshot, _) = inspect_with_acroform(bytes, PdfLimits::default()).expect("inspect");
+        fill::fill_with_limits(
+            &snapshot.document_id,
+            &snapshot.fragments,
+            &form,
+            &FillLimits::default(),
+        )
+        .expect("fill")
+    };
+    // `/AcroForm << /Fields [] >>` and an empty `/AcroForm << >>`.
+    let with_fields = build(&runs, vec![], dictionary! {});
+    let mut doc = Document::load_mem(&with_fields).expect("load");
+    let acroform = doc
+        .catalog()
+        .and_then(|catalog| catalog.get(b"AcroForm"))
+        .and_then(Object::as_reference)
+        .expect("AcroForm reference");
+    doc.get_object_mut(acroform)
+        .and_then(Object::as_dict_mut)
+        .expect("AcroForm")
+        .remove(b"Fields");
+    let empty = save(doc);
+    for bytes in [with_fields, empty] {
+        let (_, acroform) = inspect_with_acroform(&bytes, PdfLimits::default()).expect("inspect");
+        let acroform_read = acroform.as_ref().expect("read");
+        assert!(acroform_read.present && acroform_read.fields.is_empty());
+        let result = run_fill(&bytes, &form);
+        assert_eq!(result.acroform, None);
+        assert_eq!(result.fields["number"].status, FillStatus::Filled);
+        let json = serde_json::to_value(&result).expect("serialize");
+        assert!(json.get("acroform").is_none(), "{json}");
+        assert!(json["fields"]["number"].get("acroform").is_none());
+        assert_eq!(
+            serde_json::to_vec(&result).expect("serialize"),
+            serde_json::to_vec(&text_only(&bytes)).expect("serialize")
+        );
+    }
+
+    // An XFA-only form is still reported: its values may be in the XFA.
+    let bytes = build(
+        &runs,
+        vec![],
+        dictionary! { "XFA" => Object::Array(vec![]) },
+    );
+    assert_eq!(
+        run_fill(&bytes, &form).acroform,
+        Some(AcroFormSummary::Read {
+            fields: 0,
+            xfa: XfaPresence::XfaOnly
+        })
+    );
+}
+
+#[test]
 fn text_inside_the_widget_that_cannot_be_compared_is_unverified() {
     let bytes = build(
         &[run(305.0, 100.0, "INV-001")],

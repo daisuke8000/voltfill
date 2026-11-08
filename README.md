@@ -132,7 +132,7 @@ voltfill fill input.pdf examples/forms/invoice.json -o result.json
 | 規則 | 満たさないときの `reasons` |
 |---|---|
 | フィールドの完全修飾名の最後の部分名（`invoice.請求番号` の `請求番号`）か別名（`/TU`）が、フォームの `label` か `hints` と、テキスト層の条件1と同じ正規化のうえで等しい（部分一致・片側だけの補足は一致としない）。一致するフィールドがちょうど1つ | `several_fields` |
-| そのフィールドがほかのフォーム項目にも一致しない（名前が `発行日`、別名が `支払期限` のフィールドは、両方の項目にあるときどちらにも使わない） | `field_matches_several_items` |
+| そのフィールドがほかのフォーム項目にも一致しない（名前が `発行日`、別名が `支払期限` のフィールドは、両方の項目にあるときどちらにも使わない。別名の項目の型に値が合わない・選択欄で型のある項目に使えないなど、もう一方の項目でほかの規則を満たさない場合も同じ） | `field_matches_several_items` |
 | XFAを持たない（XFAとAcroFormの両方を持つPDFは、XFA対応のビューアで別の値が表示されうる） | `xfa_present` |
 | テキスト入力欄は `text`・`date`・`amount`・`number` に、選択欄は `text` にだけ使う（選択欄は書き出し値を `raw` にし、表示名は `display` に示す）。チェックボックスとラジオボタンは、フォームに対応する型がないため使わない | `kind_unsupported` |
 | `/DV` 以外のフィールドの問題（`issues`）がない。正確に復号できない値、値を保存したパスワード欄、`.` を含む部分名、BOMのないPDFDocEncodingで0x80以上のバイトを含む値（`pdf_doc_high_bytes`。Shift_JISなど別の文字コードの文字化けの可能性）を含む | `field_issues` |
@@ -160,7 +160,7 @@ voltfill fill input.pdf examples/forms/invoice.json -o result.json
 - 一致するフィールドが2つ以上ある場合は埋めません。ほかの規則を満たすものは配置 `widget`・`hold` なしの候補として先頭に返し、`--remote` でJevに選ばせられます。候補のラベルはフィールドの完全修飾名で、別名があれば ` / ` の後に続けます（`販売者.氏名 / 販売者の氏名`）。テキスト層で埋めた値は、それらがすべて同じ値のときだけ残し、異なれば `ambiguous`（候補なし）にします。
 - 一致するフィールドが1つで、型の書式にだけ合わず、テキスト層に候補がない場合は `invalid` とし、AcroFormの値を `raw` と `evidence` に示します。それ以外の規則で確定できないフィールドは、テキスト層の結果を変えません。
 
-AcroFormの `evidence` は、非表示でないウィジェットごとにページとウィジェットの枠（表示座標）を持ち、`precision: "widget"`（文字の座標ではなく入力欄の枠）、`acroform_field`（フィールドの完全修飾名）、`text`（値）を示します。原文片はないため `fragment_id` は空文字です。結果全体の `acroform` は、AcroFormを読めた場合 `{"status":"read","fields":件数,"xfa":"absent"|"hybrid"|"xfa_only"}`、読めなかった場合 `{"status":"unavailable","reason":…}` です。AcroFormのないPDFでは、結果全体にも項目にも `acroform` は付かず、出力はテキスト層だけの照合と同じです。
+AcroFormの `evidence` は、非表示でないウィジェットごとにページとウィジェットの枠（表示座標）を持ち、`precision: "widget"`（文字の座標ではなく入力欄の枠）、`acroform_field`（フィールドの完全修飾名）、`text`（値）を示します。原文片はないため `fragment_id` は空文字です。結果全体の `acroform` は、AcroFormを読めた場合 `{"status":"read","fields":件数,"xfa":"absent"|"hybrid"|"xfa_only"}`、読めなかった場合 `{"status":"unavailable","reason":…}` です。AcroFormのないPDFと、フィールドもXFAもないAcroForm（`/AcroForm <<>>` など）では、結果全体にも項目にも `acroform` は付かず、出力はテキスト層だけの照合と同じです。XFAだけのフォームは、値がXFA側にありうるため `"fields":0,"xfa":"xfa_only"` を示します。
 
 AcroFormは、PDFの解析（inspect）と同じ読み込みから `vf_source::acroform::AcroFormLimits` の上限で読みます。入力サイズとページ数は `PdfLimits` と同じで、ほかは既定値（フィールドとウィジェット10,000件・注釈50,000件・入れ子の深さ32・復号した文字列4 MiB）です。上限を超えた場合・暗号化を解除して読み込んだPDF・不正なフィールドの木では、AcroFormを使わずテキスト層だけで照合し、`reason`（`limit_exceeded`（`limit` に上限名）・`encrypted`・`invalid_field_tree` など）を示します。照合の作業量（名前と値の正規化・比較・複製のバイト数、単位の注記の確認、枠の原文の選択）はテキスト層と同じ作業量の上限と期限に含めます。確かめたのは合成のPDFだけで、評価セット（下記）にはAcroFormのケースはまだありません。
 
