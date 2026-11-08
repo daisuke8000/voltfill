@@ -19,7 +19,12 @@
 //!   least one line height) plus half a line height (the reach), as for
 //!   [`super::Placement::Column`].
 //! - A line is a totals line when the caller reads any of its fragments as
-//!   a totals label ([`Totals`]).
+//!   a totals label ([`Totals`]) and the fragments left of the first such
+//!   label have at most one plain fragment in a column. A totals label
+//!   precedes its amounts, so fragments left of it are not totals; with two
+//!   or more of them in columns (an item row with a totals block beside it,
+//!   `ぶどう 1 ¥900 … 合計 ¥1,700`) the line is irregular and may be an item
+//!   row. A note in the first column beside `小計` stays a totals line.
 //! - Otherwise a line is a row when each of its fragments is plain (no
 //!   `label：` delimiter) and in exactly one column, no column has two
 //!   fragments, and at least two columns have a cell. Blank cells are `None`.
@@ -125,7 +130,8 @@ pub struct Table {
 enum Read {
     /// Fragment indexes per column.
     Row(Vec<Option<usize>>),
-    /// The strongest totals label among the line's fragments.
+    /// The strongest totals label among the line's fragments; the
+    /// fragments left of the first label are not an item row.
     Totals(Totals),
     Unaligned,
     /// `row_like`: two or more plain fragments lie in columns, so the line
@@ -274,15 +280,32 @@ impl Reader<'_> {
         {
             return Ok(Read::Irregular { row_like: true });
         }
+        // The strongest totals label, and the position of the first one.
         let mut kind = None;
-        for &f in &line.fragments {
+        let mut first = None;
+        for (n, &f) in line.fragments.iter().enumerate() {
             let fragment = &self.fragments[f];
             budget.spend_bytes(&fragment.raw_text)?;
-            kind = kind.max(totals(fragment));
+            if let Some(found) = totals(fragment) {
+                kind = kind.max(Some(found));
+                first.get_or_insert(n);
+            }
         }
-        if let Some(kind) = kind {
-            return Ok(Read::Totals(kind));
-        }
+        let (Some(kind), Some(first)) = (kind, first) else {
+            return self.cells(&line.fragments, budget);
+        };
+        // A totals label precedes its amounts: the fragments left of the
+        // first label are not totals. When they may be an item row (a
+        // totals block beside the last row), the line is irregular.
+        Ok(match self.cells(&line.fragments[..first], budget)? {
+            Read::Row(_) | Read::Irregular { row_like: true } => Read::Irregular { row_like: true },
+            _ => Read::Totals(kind),
+        })
+    }
+
+    /// How fragments `line` (indexes, left to right) read as cells, with no
+    /// totals label among them.
+    fn cells(&self, line: &[usize], budget: &mut Budget) -> Result<Read, BudgetError> {
         let mut cells = vec![None; self.columns.len()];
         let mut aligned = 0usize;
         // Plain fragments in one or more columns.
@@ -291,7 +314,7 @@ impl Reader<'_> {
         let mut irregular = false;
         // A fragment outside every column, or one with a delimiter.
         let mut stray = false;
-        for &f in &line.fragments {
+        for &f in line {
             let fragment = &self.fragments[f];
             budget.spend_bytes(&fragment.raw_text)?;
             if classify(fragment) != Kind::Plain {
@@ -676,6 +699,86 @@ mod tests {
             frag("p2", 2, "1", [300.0, 100.0, 305.0, 110.0]),
         ]);
         assert_eq!(read(&fragments), (texts(&rows), TableEnd::Subtotal));
+    }
+
+    #[test]
+    fn a_totals_block_beside_an_item_row_is_irregular() {
+        let rows = [["りんご", "3", "¥300"], ["みかん", "2", "¥500"]];
+        let beside =
+            |label: &str, top: f64| [at("b1", label, 560.0, top), at("b2", "¥1,700", 640.0, top)];
+        let item = |top: f64| {
+            [
+                at("m1", "ぶどう", 60.0, top),
+                at("m2", "1", 300.0, top),
+                at("m3", "¥900", 440.0, top),
+            ]
+        };
+        // The last item row with `合計 ¥1,700` beside it, outside every column.
+        let mut fragments = table(&rows);
+        fragments.extend(item(154.0));
+        fragments.extend(beside("合計", 154.0));
+        assert_eq!(read(&fragments), (texts(&rows), TableEnd::Irregular));
+        // The same with the label in an extra header column (`備考`).
+        let mut fragments = table(&rows);
+        fragments.push(at("h4", "備考", 560.0, 100.0));
+        fragments.extend(item(154.0));
+        fragments.extend(beside("合計", 154.0));
+        let (read_rows, end) = read(&fragments);
+        assert_eq!((read_rows.len(), end), (2, TableEnd::Irregular));
+        // A totals block beside the second row keeps the first row only.
+        let mut fragments = table(&rows[..1]);
+        fragments.extend([
+            at("r1", "みかん", 60.0, 136.0),
+            at("r2", "2", 300.0, 136.0),
+            at("r3", "¥500", 440.0, 136.0),
+        ]);
+        fragments.extend(beside("小計", 136.0));
+        assert_eq!(read(&fragments), (texts(&rows[..1]), TableEnd::Irregular));
+        // Below a subtotal, an item row with a closing total beside it.
+        let mut fragments = table(&rows);
+        fragments.extend([
+            at("t", "小計", 300.0, 154.0),
+            at("tv", "¥800", 440.0, 154.0),
+        ]);
+        fragments.extend(item(172.0));
+        fragments.extend(beside("合計", 172.0));
+        assert_eq!(read(&fragments), (texts(&rows), TableEnd::Irregular));
+        // A totals label in the first column has nothing left of it.
+        let mut fragments = table(&rows);
+        fragments.extend([
+            at("g", "合計", 60.0, 154.0),
+            at("gq", "5", 300.0, 154.0),
+            at("gv", "¥800", 440.0, 154.0),
+        ]);
+        assert_eq!(read(&fragments), (texts(&rows), TableEnd::Total));
+        // One fragment left of the label (a note) is not an item row.
+        let mut fragments = table(&rows);
+        fragments.extend([
+            at("n", "※軽減税率", 60.0, 154.0),
+            at("g", "合計", 300.0, 154.0),
+            at("gv", "¥800", 440.0, 154.0),
+        ]);
+        assert_eq!(read(&fragments), (texts(&rows), TableEnd::Total));
+        // Two fragments in columns left of the label may be an item row,
+        // even when they are a count (`点数 5 合計 ¥800` is held).
+        let mut fragments = vec![
+            at("h1", "品名", 60.0, 100.0),
+            at("h2", "数量", 300.0, 100.0),
+            at("h3", "単価", 380.0, 100.0),
+            at("h4", "金額", 440.0, 100.0),
+            at("a1", "りんご", 60.0, 118.0),
+            at("a2", "3", 300.0, 118.0),
+            at("a4", "¥300", 440.0, 118.0),
+            at("p1", "点数", 60.0, 136.0),
+            at("p2", "3", 300.0, 136.0),
+            at("p3", "合計", 380.0, 136.0),
+            at("p4", "¥300", 440.0, 136.0),
+        ];
+        let (read_rows, end) = read(&fragments);
+        assert_eq!((read_rows.len(), end), (1, TableEnd::Irregular));
+        // Without the count the line is a closing total.
+        fragments.remove(8);
+        assert_eq!(read(&fragments).1, TableEnd::Total);
     }
 
     #[test]

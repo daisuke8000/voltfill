@@ -1,0 +1,33 @@
+{
+  "description": "1ページ目の明細が合計で終わるが、2ページ目の先頭に「（前頁より続く）」があり明細と合計が続く。後ろのページが前のページの続きと書いてあれば、締めの合計があっても表を閉じない（continues_on_next_page）",
+  "support": "supported",
+  "runs": [
+    {"x": 40, "y": 100, "text": "品名"},
+    {"x": 150, "y": 100, "text": "数量"},
+    {"right": 260, "y": 100, "text": "金額"},
+    {"page": 1, "x": 40, "y": 118, "text": "りんご"},
+    {"page": 1, "x": 150, "y": 118, "text": "3"},
+    {"page": 1, "right": 260, "y": 118, "text": "¥300"},
+    {"page": 1, "x": 40, "y": 136, "text": "みかん"},
+    {"page": 1, "x": 150, "y": 136, "text": "2"},
+    {"page": 1, "right": 260, "y": 136, "text": "¥500"},
+    {"x": 150, "y": 154, "text": "合計"},
+    {"right": 260, "y": 154, "text": "¥800"},
+    {"page": 2, "x": 40, "y": 80, "text": "（前頁より続く）"},
+    {"page": 2, "x": 40, "y": 118, "text": "ぶどう"},
+    {"page": 2, "x": 150, "y": 118, "text": "1"},
+    {"page": 2, "right": 260, "y": 118, "text": "¥900"},
+    {"page": 2, "x": 150, "y": 136, "text": "合計"},
+    {"page": 2, "right": 260, "y": 136, "text": "¥1,700"}
+  ],
+  "form": {"fields": [
+    {"id": "items", "label": "明細", "type": "table", "columns": [
+      {"id": "name", "label": "品名"},
+      {"id": "qty", "label": "数量", "type": "number"},
+      {"id": "amount", "label": "金額", "type": "amount"}
+    ]}
+  ]},
+  "expect": {
+    "items": {"abstain": "ambiguous", "hold": "continues_on_next_page"}
+  }
+}

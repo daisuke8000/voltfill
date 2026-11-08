@@ -16,18 +16,22 @@
 //! - Rows: [`layout::read_table`] reads the lines below the header as rows
 //!   of cells aligned to the header cells (its documentation states the
 //!   alignment, row pitch, the rows it treats as irregular and how the
-//!   lines below a stop are read). A line with a totals label in any cell
-//!   ends the rows: closing totals such as `合計`, `請求金額`, `以下余白`,
-//!   and subtotals such as `小計`, `消費税`.
+//!   lines below a stop are read). A line with a totals label ends the
+//!   rows: closing totals such as `合計`, `請求金額`, `今回御請求額`,
+//!   `以下余白`, and subtotals such as `小計`, `消費税`. A line with an item
+//!   row left of its totals label (a totals block beside the last row) is
+//!   irregular instead.
 //! - Structure: the rows are regular, with no item row below the line where
 //!   they stopped, and each row is an item: a cell in a requested typed
 //!   column (when the field has one) and a cell in the header's first column
 //!   or a requested text column (otherwise [`Hold::IrregularTable`]); at most
 //!   [`layout::MAX_TABLE_ROWS`] rows ([`Hold::TooManyRows`]); and closed:
 //!   when a later page exists (usable or not), only a closing total closes
-//!   them, and a page that says the document continues (`次頁`, `次ページ`)
-//!   never closes them ([`Hold::ContinuesOnNextPage`]). Rows never continue
-//!   onto another page.
+//!   them, and a page that says the document continues (`次頁`, `次ページ`),
+//!   or whose next page (with any fragment) says it continues it (`前頁`,
+//!   `繰越` anywhere on that page), never closes them
+//!   ([`Hold::ContinuesOnNextPage`]). Rows never continue onto another
+//!   page.
 //! - Cells: every non-empty cell of a `date`, `amount` or `number` column
 //!   matches the scalar type's whole-text grammar; amounts and numbers are
 //!   not normalized when any page of the document has a unit note
@@ -61,7 +65,7 @@ pub const MAX_COLUMNS: usize = 16;
 
 /// Normalized labels (stems) of a closing total or end mark: the items end
 /// here, also when a later page exists.
-const TOTAL: [&str; 23] = [
+const TOTAL: [&str; 32] = [
     "合計",
     "総計",
     "総合計",
@@ -83,6 +87,15 @@ const TOTAL: [&str; 23] = [
     "支払額",
     "支払合計",
     "差引支払額",
+    "今回支払額",
+    "今回支払金額",
+    "税込総額",
+    "請求総額",
+    "税込請求額",
+    "税込請求金額",
+    "見積金額",
+    "見積額",
+    "見積総額",
     "以下余白",
     "以上",
 ];
@@ -124,6 +137,9 @@ const SUBTOTAL_ENDINGS: [&str; 7] = [
 ];
 /// Text that says the document continues on another page.
 const CONTINUATION: [&str; 4] = ["次頁", "次ページ", "次の頁", "次のページ"];
+/// Text that says a page continues the page before it (`（前頁より続く）`,
+/// `前頁より繰越`).
+const CONTINUED_FROM: [&str; 6] = ["前頁", "前ページ", "前の頁", "前のページ", "繰越", "繰り越"];
 
 /// The exact-match key of a label: its stem and qualifiers. Two labels
 /// match exactly (score 1 without a hold) when their keys are equal.
@@ -135,13 +151,16 @@ pub(super) fn key(label: &Label) -> Key {
 
 /// Whether a fragment is a totals label, and of which kind: its normalized
 /// label (bracketed qualifiers ignored: `合計（税込）`, `消費税（10%）`) without
-/// a trailing tax rate (`消費税 10%`) is one of [`TOTAL`] (a closing total),
-/// one of [`SUBTOTAL`] or ends with one of [`SUBTOTAL_ENDINGS`]. A fragment
-/// with a delimiter is read by its label side (`合計：¥2,970`).
+/// a trailing tax rate (`消費税 10%`) and without an honorific before a
+/// kanji anywhere in it (`今回御請求額`, `今回ご請求金額`) is one of [`TOTAL`]
+/// (a closing total), one of [`SUBTOTAL`] or ends with one of
+/// [`SUBTOTAL_ENDINGS`]. A fragment with a delimiter is read by its label
+/// side (`合計：¥2,970`).
 fn totals(text: &str) -> Option<Totals> {
     let kind = |text: &str| {
         let label = normalize_label(text);
-        let stem = without_rate(&label.stem);
+        let plain = without_honorifics(&label.stem);
+        let stem = without_rate(&plain);
         if TOTAL.contains(&stem) {
             Some(Totals::Total)
         } else if SUBTOTAL.contains(&stem)
@@ -156,6 +175,29 @@ fn totals(text: &str) -> Option<Totals> {
         let (label, _) = text.split_once([':', '：'])?;
         kind(label)
     })
+}
+
+/// A normalized label without `御` and without `ご` `お` before a kanji
+/// (`今回御請求額` → `今回請求額`); `ご` `お` elsewhere stay (`りんご`).
+fn without_honorifics(stem: &str) -> String {
+    let mut out = String::with_capacity(stem.len());
+    let mut chars = stem.chars().peekable();
+    while let Some(c) = chars.next() {
+        let honorific = match c {
+            '御' => true,
+            'ご' | 'お' => chars.peek().is_some_and(|&next| is_kanji(next)),
+            _ => false,
+        };
+        if !honorific {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// A CJK unified ideograph (the common and extension A blocks).
+fn is_kanji(c: char) -> bool {
+    matches!(c, '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}')
 }
 
 /// A normalized label without a trailing rate (`消費税10%` → `消費税`).
@@ -182,16 +224,19 @@ pub(super) struct Tables<'a> {
     labels: HashMap<Key, Vec<usize>>,
     /// Whether any page has a unit note (`（単位：千円）`, `（千円）`).
     scaled_document: bool,
-    /// Pages that say the document continues ([`CONTINUATION`]).
+    /// Pages that say the document continues ([`CONTINUATION`]), and the
+    /// page before each page that says it continues that page
+    /// ([`CONTINUED_FROM`]).
     continued_pages: BTreeSet<u32>,
     /// The last page with any fragment, usable or not.
     last_page: u32,
 }
 
 impl<'a> Tables<'a> {
-    /// Costs one unit per line and per fragment, and four per byte of the
-    /// text of each fragment on a line (checked for a delimiter, normalized,
-    /// copied into its key and scanned for continuation text). Only plain
+    /// Costs one unit per line and per fragment, five per byte of the text
+    /// of each fragment on a line (checked for a delimiter, normalized,
+    /// copied into its key and scanned twice for continuation text) and one
+    /// per page that says it continues the page before it. Only plain
     /// fragments (no `label：` delimiter) are header cells.
     pub(super) fn new(
         fragments: &'a [SourceFragment],
@@ -204,11 +249,14 @@ impl<'a> Tables<'a> {
         let mut line_of = vec![None; fragments.len()];
         let mut labels: HashMap<Key, Vec<usize>> = HashMap::new();
         let mut continued_pages = BTreeSet::new();
+        // Pages that say they continue the page before them.
+        let mut continued_from = BTreeSet::new();
+        let pages: BTreeSet<u32> = fragments.iter().map(|f| f.page).collect();
         for (index, line) in lines.iter().enumerate() {
             budget.spend(1 + line.fragments.len() as u64)?;
             for &f in &line.fragments {
                 let fragment = &fragments[f];
-                budget.spend(4 * fragment.raw_text.len() as u64)?;
+                budget.spend(5 * fragment.raw_text.len() as u64)?;
                 line_of[f] = Some(index);
                 if layout::is_plain(fragment) {
                     labels
@@ -219,6 +267,16 @@ impl<'a> Tables<'a> {
                 if CONTINUATION.iter().any(|m| fragment.raw_text.contains(m)) {
                     continued_pages.insert(fragment.page);
                 }
+                if CONTINUED_FROM.iter().any(|m| fragment.raw_text.contains(m)) {
+                    continued_from.insert(fragment.page);
+                }
+            }
+        }
+        // The rows of the nearest earlier page with any fragment go on.
+        budget.spend(continued_from.len() as u64)?;
+        for page in continued_from {
+            if let Some(&before) = pages.range(..page).next_back() {
+                continued_pages.insert(before);
             }
         }
         Ok(Self {
@@ -908,6 +966,30 @@ mod tests {
             hold(&fragments),
             (FillStatus::Ambiguous, Some(Hold::ContinuesOnNextPage))
         );
+        // ... and so does a closing total when the next page says it
+        // continues this one, also across a page without text.
+        for (page, marker) in [(2, "（前頁より続く）"), (3, "前頁より繰越"), (2, "繰越")]
+        {
+            let mut fragments = table(1, 100.0, &[["りんご", "3", "¥300"]]);
+            fragments.extend([
+                at("t", 1, "合計", 300.0, 136.0),
+                at("tv", 1, "¥300", 440.0, 136.0),
+                at("c", page, marker, 60.0, 80.0),
+            ]);
+            assert_eq!(
+                hold(&fragments),
+                (FillStatus::Ambiguous, Some(Hold::ContinuesOnNextPage)),
+                "{marker}"
+            );
+        }
+        // A marker on the table's own page says nothing about it.
+        let mut fragments = table(1, 100.0, &[["りんご", "3", "¥300"]]);
+        fragments.extend([
+            at("t", 1, "合計", 300.0, 136.0),
+            at("tv", 1, "¥300", 440.0, 136.0),
+            at("c", 1, "前月繰越", 60.0, 60.0),
+        ]);
+        assert_eq!(hold(&fragments), (FillStatus::Filled, None));
         // Totals close the rows even when a later page exists.
         let mut fragments = table(1, 100.0, &[["りんご", "3", "¥300"]]);
         fragments.extend([
@@ -941,6 +1023,13 @@ mod tests {
             "税込金額",
             "税込合計",
             "総 合 計",
+            "今回御請求額",
+            "今回ご請求金額",
+            "御見積金額",
+            "お見積額",
+            "税込総額",
+            "ご請求総額",
+            "今回お支払金額",
             "以下余白",
             "以上",
         ] {
@@ -975,9 +1064,18 @@ mod tests {
             "合計数量の内訳です（参考）明細",
             "品番:A-100",
             "9:00",
+            "りんご酢",
+            "おにぎり",
+            "ごま油",
+            "御中",
         ] {
             assert_eq!(totals(text), None, "{text}");
         }
+        assert_eq!(without_honorifics("今回御請求額"), "今回請求額");
+        assert_eq!(without_honorifics("今回ご請求金額"), "今回請求金額");
+        // `ご` `お` before kana (or at the end) are part of the word.
+        assert_eq!(without_honorifics("りんごおにぎり"), "りんごおにぎり");
+        assert_eq!(without_honorifics("お見積"), "見積");
     }
 
     /// Fill `items` (品名 / 数量 / 金額) of `fragments`: status, first hold,
