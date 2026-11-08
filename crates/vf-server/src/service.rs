@@ -36,7 +36,13 @@ pub struct ServerConfig {
     pub api_key: Option<Secret>,
     #[cfg(any(feature = "pdfium", feature = "hayro"))]
     pub render: Option<vf_legacy::render::RenderConfig>,
+    /// Deadline of one `/v1/fill` job; [`FILL_DEADLINE`] outside this module's tests.
+    fill_deadline: Duration,
 }
+/// Deadline of one `/v1/fill` job, counted from the start of its worker. PDF
+/// inspection is bounded by the PDF limits and is not interrupted, but its time
+/// counts, as with the CLI's default `voltfill fill --deadline-ms 30000`.
+const FILL_DEADLINE: Duration = Duration::from_secs(30);
 impl ServerConfig {
     pub fn fixture(bytes: Vec<u8>) -> Result<Self, &'static str> {
         FixtureEvaluator::from_bytes(&bytes).map_err(|_| "invalid_mock")?;
@@ -52,6 +58,7 @@ impl ServerConfig {
             api_key: None,
             #[cfg(any(feature = "pdfium", feature = "hayro"))]
             render: None,
+            fill_deadline: FILL_DEADLINE,
         })
     }
     #[must_use]
@@ -68,6 +75,7 @@ impl ServerConfig {
             api_key: None,
             #[cfg(any(feature = "pdfium", feature = "hayro"))]
             render: None,
+            fill_deadline: FILL_DEADLINE,
         }
     }
     #[must_use]
@@ -615,10 +623,11 @@ fn extraction_error(error: engine::EngineError) -> Response {
         .into_response()
 }
 
-/// `POST /v1/fill`: the HTTP form of `voltfill fill`. It inspects the PDF's own text
-/// layer and matches it to the form offline, so it never sends a Jev request, renders
-/// or uses the document cache. It shares the single job slot with extraction, but the
-/// Jev cooldown and pause do not apply because nothing here reaches Jev.
+/// `POST /v1/fill`: the HTTP form of `voltfill fill` without `--remote`. It inspects the
+/// PDF's own text layer and matches it to the form offline under the CLI's work limits
+/// and a [`FILL_DEADLINE`], so it never sends a Jev request, renders or uses the
+/// document cache. It shares the single job slot with extraction, but the Jev cooldown
+/// and pause do not apply because nothing here reaches Jev.
 async fn fill_form(State(state): State<AppState>, request: Request) -> Response {
     if let Some(response) = unauthenticated(&request, &state) {
         return response;
@@ -627,8 +636,8 @@ async fn fill_form(State(state): State<AppState>, request: Request) -> Response 
         Ok(permit) => permit,
         Err(_) => return reject_upload(request, &state, busy(2)).await,
     };
-    let limits = state.config.resources.pdf;
-    let parts = [("pdf", limits.max_bytes), ("form", MAX_FORM_BYTES)];
+    let pdf_limits = state.config.resources.pdf;
+    let parts = [("pdf", pdf_limits.max_bytes), ("form", MAX_FORM_BYTES)];
     let [pdf, definition] = match bounded_upload(
         read_upload(request, &state, parts),
         Duration::from_millis(state.config.upload_timeout_ms),
@@ -646,10 +655,11 @@ async fn fill_form(State(state): State<AppState>, request: Request) -> Response 
         Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_form"),
     };
     drop(definition);
+    let deadline = state.config.fill_deadline;
     log::info!(target:"vf_server","{}",json!({"event":"fill_started","pdf_bytes":pdf.len(),"fields":form.fields.len()}));
-    let joined = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        let snapshot = match vf_source::inspect(&pdf, limits) {
+    run_fill_job(permit, move || {
+        let started = Instant::now();
+        let snapshot = match vf_source::inspect(&pdf, pdf_limits) {
             Ok(snapshot) => snapshot,
             Err(vf_source::PdfError::LimitExceeded) => {
                 return error(StatusCode::PAYLOAD_TOO_LARGE, "input_too_large");
@@ -657,18 +667,54 @@ async fn fill_form(State(state): State<AppState>, request: Request) -> Response 
             Err(_) => return error(StatusCode::BAD_REQUEST, "pdf_inspection_failed"),
         };
         drop(pdf);
-        let result = fill::fill(&snapshot.document_id, &snapshot.fragments, &form);
-        let filled = result
-            .fields
-            .values()
-            .filter(|f| f.status == fill::FillStatus::Filled)
-            .count();
-        log::info!(target:"vf_server","{}",json!({"event":"fill_completed","fields":result.fields.len(),"filled":filled}));
-        Json(result).into_response()
+        let limits = fill::FillLimits {
+            deadline: Some(started + deadline),
+            ..fill::FillLimits::default()
+        };
+        match fill::fill_with_limits(&snapshot.document_id, &snapshot.fragments, &form, &limits) {
+            Ok(result) => {
+                let filled = result
+                    .fields
+                    .values()
+                    .filter(|f| f.status == fill::FillStatus::Filled)
+                    .count();
+                log::info!(target:"vf_server","{}",json!({"event":"fill_completed","fields":result.fields.len(),"filled":filled}));
+                Json(result).into_response()
+            }
+            Err(failure) => {
+                log::info!(target:"vf_server","{}",json!({"event":"fill_failed","error":failure.code()}));
+                fill_error(failure)
+            }
+        }
     })
-    .await;
-    // A failed worker sent nothing to Jev, so unlike extraction it does not pause admission.
-    joined.unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "worker_failed"))
+    .await
+}
+
+/// Runs a fill job on the blocking pool. The job permit moves into the worker, so the
+/// slot is released when the job returns or unwinds. A failed worker sent nothing to
+/// Jev, so unlike extraction it does not pause admission.
+async fn run_fill_job(
+    permit: tokio::sync::OwnedSemaphorePermit,
+    job: impl FnOnce() -> Response + Send + 'static,
+) -> Response {
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        job()
+    })
+    .await
+    .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "worker_failed"))
+}
+
+/// A fill over its limits returns no partial result. The work limits answer 413 like
+/// the page limit (`input_too_large`); the deadline answers 504.
+fn fill_error(failure: fill::FillError) -> Response {
+    let status = match failure {
+        fill::FillError::LayoutLimitExceeded | fill::FillError::BudgetExceeded => {
+            StatusCode::PAYLOAD_TOO_LARGE
+        }
+        fill::FillError::DeadlineExceeded => StatusCode::GATEWAY_TIMEOUT,
+    };
+    error(status, failure.code())
 }
 
 #[cfg(test)]
@@ -986,9 +1032,19 @@ mod tests {
         pages_pdf(&["Ref: AB12", "Ref: CD34"])
     }
 
-    /// One text line per page. Objects: catalog, page tree, font, then a page and its content.
+    /// One text line per page.
     fn pages_pdf(texts: &[&str]) -> Vec<u8> {
-        let kids: Vec<String> = (0..texts.len())
+        let streams: Vec<String> = texts
+            .iter()
+            .map(|text| format!("BT /F1 24 Tf 72 700 Td ({text}) Tj ET"))
+            .collect();
+        streams_pdf(&streams)
+    }
+
+    /// One page per content stream. Objects: catalog, page tree, font, then a page and
+    /// its content.
+    fn streams_pdf(streams: &[String]) -> Vec<u8> {
+        let kids: Vec<String> = (0..streams.len())
             .map(|i| format!("{} 0 R", 4 + 2 * i))
             .collect();
         let mut objects = vec![
@@ -996,12 +1052,11 @@ mod tests {
             format!(
                 "<</Type/Pages/Kids[{}]/Count {}>>",
                 kids.join(" "),
-                texts.len()
+                streams.len()
             ),
             "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>".to_owned(),
         ];
-        for (i, text) in texts.iter().enumerate() {
-            let stream = format!("BT /F1 24 Tf 72 700 Td ({text}) Tj ET");
+        for (i, stream) in streams.iter().enumerate() {
             objects.push(format!(
                 "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents {} 0 R/Resources<</Font<</F1 3 0 R>>>>>>",
                 5 + 2 * i
@@ -1078,19 +1133,36 @@ mod tests {
         parts: Parts<'_>,
         headers: &[(header::HeaderName, &str)],
     ) -> Response {
-        let mut request = Request::post("/v1/fill")
-            .header(header::CONTENT_TYPE, "multipart/form-data; boundary=b");
+        post_raw(state, "/v1/fill", multipart(parts), headers).await
+    }
+
+    async fn post_extract(
+        state: &AppState,
+        parts: Parts<'_>,
+        headers: &[(header::HeaderName, &str)],
+    ) -> Response {
+        post_raw(state, "/v1/extract", multipart(parts), headers).await
+    }
+
+    async fn post_raw(
+        state: &AppState,
+        path: &str,
+        body: Vec<u8>,
+        headers: &[(header::HeaderName, &str)],
+    ) -> Response {
+        let mut request =
+            Request::post(path).header(header::CONTENT_TYPE, "multipart/form-data; boundary=b");
         for (name, value) in headers {
             request = request.header(name, *value);
         }
         router(state.clone())
             .oneshot(
                 request
-                    .body(Body::from(multipart(parts)))
-                    .expect("construct the local multipart fill request"),
+                    .body(Body::from(body))
+                    .expect("construct the local multipart request"),
             )
             .await
-            .expect("the router must return a response to the fill request")
+            .expect("the router must return a response to the multipart request")
     }
 
     async fn json_body(response: Response) -> serde_json::Value {
@@ -1277,21 +1349,411 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
-    async fn fill_shares_the_single_job_slot_with_extraction() {
-        let state = state();
+    /// One page of `rows` stacked two-cell rows (`label(i)` and `value(i)`) in a tiny
+    /// font, so up to 10,000 text items (`PdfLimits::max_items_per_page`) fit the page.
+    fn stacked_rows_pdf(
+        rows: usize,
+        label: impl Fn(usize) -> String,
+        value: impl Fn(usize) -> String,
+    ) -> Vec<u8> {
+        let mut stream = String::from("BT /F1 0.12 Tf 72 785 Td");
+        for i in 0..rows {
+            stream.push_str(&format!(
+                " ({}) Tj 200 0 Td ({}) Tj -200 -0.156 Td",
+                label(i),
+                value(i)
+            ));
+        }
+        stream.push_str(" ET");
+        streams_pdf(&[stream])
+    }
+
+    /// One page of `lines` one-item lines stacked in one column, alternating `Note`
+    /// and `x`.
+    fn stacked_lines_pdf(lines: usize) -> Vec<u8> {
+        let mut stream = String::from("BT /F1 0.3 Tf 72 785 Td");
+        for i in 0..lines {
+            let text = if i % 2 == 0 { "Note" } else { "x" };
+            stream.push_str(&format!(" ({text}) Tj 0 -0.39 Td"));
+        }
+        stream.push_str(" ET");
+        streams_pdf(&[stream])
+    }
+
+    /// The job slot is free again and serves a normal fill.
+    async fn assert_slot_reusable(state: &AppState) {
+        assert_eq!(state.jobs.available_permits(), 1);
         let pdf = text_pdf("Ref: AB12");
+        assert_filled(post_fill(state, &[("pdf", &pdf), ("form", FORM)], &[]).await).await;
+    }
+
+    #[tokio::test]
+    async fn fill_bounds_stacked_lines_without_a_quadratic_result() {
+        // Before the layout bounds, n stacked lines gave n(n+1)/2 value spans.
+        let state = state();
+        let pdf = stacked_lines_pdf(2000);
+        let form = br#"{"fields":[{"id":"note","label":"Note"}]}"#;
+        let started = Instant::now();
+        let response = post_fill(&state, &[("pdf", &pdf), ("form", form)], &[]).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("the bounded fill result must fit the test read limit");
+        assert!(started.elapsed() < Duration::from_secs(30));
+        assert!(bytes.len() < 20_000, "{}", bytes.len());
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("the fill response must be JSON");
+        let note = &body["fields"]["note"];
+        assert_eq!(note["status"], "ambiguous");
+        let candidates = note["candidates"]
+            .as_array()
+            .expect("an ambiguous field lists its candidates");
+        assert!(!candidates.is_empty() && candidates.len() <= 5);
+        assert!(candidates.iter().all(|c| {
+            c["evidence"]
+                .as_array()
+                .is_some_and(|e| e.len() <= vf_source::layout::MAX_VALUE_LINES)
+        }));
+        assert_slot_reusable(&state).await;
+    }
+
+    #[tokio::test]
+    async fn fill_reports_the_layout_limit_for_stacked_rows_and_frees_the_slot() {
+        // 5,000 stacked rows on one page (10,000 items) yield more than the default
+        // 50,000 label/value hypotheses: an error, not a partial result.
+        let state = state();
+        let pdf = stacked_rows_pdf(5000, |_| "A".into(), |_| "1".into());
+        let form = br#"{"fields":[{"id":"a","label":"A"}]}"#;
+        let started = Instant::now();
+        assert_error(
+            post_fill(&state, &[("pdf", &pdf), ("form", form)], &[]).await,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "layout_limit_exceeded",
+        )
+        .await;
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_slot_reusable(&state).await;
+    }
+
+    #[tokio::test]
+    async fn fill_reports_the_work_budget_for_an_oversized_form_and_frees_the_slot() {
+        // The largest form (512 fields with 16 aliases each) against 4,000 rows:
+        // matching would compare every name with every label.
+        let state = state();
+        let hints: Vec<String> = (0..16).map(|h| format!("Alias{h:02}")).collect();
+        let fields: Vec<serde_json::Value> = (0..fill::MAX_FIELDS)
+            .map(|f| json!({"id": format!("f{f}"), "label": format!("Item{f:03}"), "hints": hints}))
+            .collect();
+        let form = serde_json::to_vec(&json!({ "fields": fields }))
+            .expect("the synthetic form serializes");
+        assert!(form.len() <= MAX_FORM_BYTES);
+        let pdf = stacked_rows_pdf(4000, |i| format!("Label{i:05}"), |i| format!("V{i:05}"));
+        let started = Instant::now();
+        assert_error(
+            post_fill(&state, &[("pdf", &pdf), ("form", &form)], &[]).await,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "fill_budget_exceeded",
+        )
+        .await;
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_slot_reusable(&state).await;
+    }
+
+    #[tokio::test]
+    async fn fill_reports_its_deadline_and_frees_the_slot() {
+        // Inspection is not interrupted but counts: 2,000 lines take longer than 1 ms,
+        // so matching never starts.
+        let mut config = ServerConfig::fixture(
+            include_bytes!("../../../examples/legacy/text-mock.json").to_vec(),
+        )
+        .expect("the checked-in mock must initialize the fixture server config");
+        config.fill_deadline = Duration::from_millis(1);
+        let state = AppState::try_new(config).expect("the fixture config must initialize");
+        let pdf = stacked_lines_pdf(2000);
+        let form = br#"{"fields":[{"id":"note","label":"Note"}]}"#;
+        assert_error(
+            post_fill(&state, &[("pdf", &pdf), ("form", form)], &[]).await,
+            StatusCode::GATEWAY_TIMEOUT,
+            "fill_deadline_exceeded",
+        )
+        .await;
+        assert_eq!(state.jobs.available_permits(), 1);
+    }
+
+    #[test]
+    fn fill_limit_errors_map_to_statuses() {
+        for (failure, status) in [
+            (
+                fill::FillError::LayoutLimitExceeded,
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ),
+            (
+                fill::FillError::BudgetExceeded,
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ),
+            (
+                fill::FillError::DeadlineExceeded,
+                StatusCode::GATEWAY_TIMEOUT,
+            ),
+        ] {
+            let response = fill_error(failure);
+            assert_eq!(response.status(), status, "{}", failure.code());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_panicking_fill_worker_answers_worker_failed_and_frees_the_slot() {
+        let state = state();
         let permit = state
             .jobs
             .clone()
             .try_acquire_owned()
             .expect("the idle server must have an available job permit");
+        let response = run_fill_job(permit, || -> Response {
+            panic!("synthetic fill worker panic")
+        })
+        .await;
+        assert_error(response, StatusCode::INTERNAL_SERVER_ERROR, "worker_failed").await;
+        assert!(
+            !state
+                .admission
+                .lock()
+                .expect("the admission state must not have been poisoned in this test")
+                .paused
+        );
+        assert_slot_reusable(&state).await;
+    }
+
+    // Holding the cache lock is how the test keeps the extraction inside its worker.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn fill_is_busy_while_an_extraction_runs() {
+        let (state, reuse) = reuse_state(60_000);
+        let held = locked(&reuse.cache);
+        // The job clones the cache handle just before it blocks on the lock held here.
+        let waiting = Arc::strong_count(&reuse.cache) + 1;
+        let extraction = tokio::spawn({
+            let state = state.clone();
+            async move { extract_pdf(&state, &text_pdf("ALPHA42"), "{}").await }
+        });
+        until(|| Arc::strong_count(&reuse.cache) >= waiting).await;
+        let pdf = text_pdf("Ref: AB12");
         let response = post_fill(&state, &[("pdf", &pdf), ("form", FORM)], &[]).await;
         assert_eq!(response.headers()[header::RETRY_AFTER], "2");
         assert_error(response, StatusCode::TOO_MANY_REQUESTS, "server_busy").await;
         assert_eq!(state.jobs.available_permits(), 0);
-        drop(permit);
-        assert_filled(post_fill(&state, &[("pdf", &pdf), ("form", FORM)], &[]).await).await;
+        drop(held);
+        let response = extraction
+            .await
+            .expect("the extraction request task must complete");
+        assert_eq!(response.status(), StatusCode::OK);
+        let report = json_body(response).await;
+        assert_eq!(report["evaluation_only"], true);
+        until(|| state.jobs.available_permits() == 1).await;
+        assert_slot_reusable(&state).await;
+    }
+
+    #[tokio::test]
+    async fn extraction_is_busy_while_a_fill_runs() {
+        let state = busy_state(30_000);
+        let pdf = text_pdf("Ref: AB12");
+        let body = multipart(&[("pdf", &pdf), ("form", FORM)]);
+        let (first, rest) = body.split_at(body.len() / 2);
+        let stream = busy_server(&state).await;
+        let head = upload_head(body.len()).replace("/v1/extract", "/v1/fill");
+        write_all(&stream, head.as_bytes())
+            .await
+            .expect("write the fill upload headers to the local server");
+        write_all(&stream, first)
+            .await
+            .expect("write the first half of the fill upload to the local server");
+        // The fill holds the slot from admission until its worker ends.
+        until(|| state.jobs.available_permits() == 0).await;
+        let response = extract_pdf(&state, &text_pdf("ALPHA42"), "{}").await;
+        assert_eq!(response.headers()[header::RETRY_AFTER], "2");
+        assert_error(response, StatusCode::TOO_MANY_REQUESTS, "server_busy").await;
+        write_all(&stream, rest)
+            .await
+            .expect("write the rest of the fill upload to the local server");
+        let response = response_head(&stream).await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        until(|| state.jobs.available_permits() == 1).await;
+        let response = extract_pdf(&state, &text_pdf("ALPHA42"), "{}").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(state.jobs.available_permits(), 1);
+    }
+
+    const SCHEMA: &[u8] = include_bytes!("../../../examples/legacy/text-form.json");
+
+    #[tokio::test]
+    async fn extract_requires_the_configured_bearer_key_and_browser_authentication() {
+        let pdf = text_pdf("ALPHA42");
+        let parts: Parts = &[("pdf", &pdf), ("schema", SCHEMA)];
+        let state = state();
+        assert_error(
+            post_extract(&state, parts, &[(header::ORIGIN, "https://app.example")]).await,
+            StatusCode::FORBIDDEN,
+            "browser_authentication_required",
+        )
+        .await;
+        assert_eq!(state.jobs.available_permits(), 1);
+
+        let mut config = ServerConfig::fixture(
+            include_bytes!("../../../examples/legacy/text-mock.json").to_vec(),
+        )
+        .expect("the checked-in mock must initialize the fixture server config");
+        config.api_key = Some(
+            Secret::new("synthetic-server-key".into())
+                .expect("the synthetic server key must be a valid bearer value"),
+        );
+        let state = AppState::try_new(config).expect("the keyed config must initialize app state");
+        for headers in [
+            &[][..],
+            &[(header::AUTHORIZATION, "Bearer synthetic-server-kex")][..],
+            &[(
+                header::AUTHORIZATION,
+                "Bearer synthetic-server-key-and-more",
+            )][..],
+            &[(header::AUTHORIZATION, "synthetic-server-key")][..],
+        ] {
+            assert_error(
+                post_extract(&state, parts, headers).await,
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+            )
+            .await;
+            assert_eq!(state.jobs.available_permits(), 1);
+        }
+        let response = post_extract(
+            &state,
+            parts,
+            &[
+                (header::AUTHORIZATION, "Bearer synthetic-server-key"),
+                (header::ORIGIN, "https://app.example"),
+            ],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["evaluation_only"], true);
+    }
+
+    #[tokio::test]
+    async fn extract_rejects_missing_unknown_duplicate_and_oversized_parts() {
+        let state = state();
+        let pdf = text_pdf("ALPHA42");
+        let schema = vec![b' '; schema::MAX_SCHEMA_BYTES + 1];
+        let options = vec![b' '; 64 * 1024 + 1];
+        let cases: [(Parts, StatusCode, &str); 8] = [
+            (
+                &[("pdf", &pdf)],
+                StatusCode::BAD_REQUEST,
+                "missing_pdf_or_schema",
+            ),
+            (
+                &[("schema", SCHEMA), ("options", b"{}")],
+                StatusCode::BAD_REQUEST,
+                "missing_pdf_or_schema",
+            ),
+            (
+                &[("pdf", &pdf), ("form", FORM)],
+                StatusCode::BAD_REQUEST,
+                "unknown_or_duplicate_part",
+            ),
+            (
+                &[("pdf", &pdf), ("pdf", &pdf), ("schema", SCHEMA)],
+                StatusCode::BAD_REQUEST,
+                "unknown_or_duplicate_part",
+            ),
+            (
+                &[
+                    ("pdf", &pdf),
+                    ("schema", SCHEMA),
+                    ("options", b"{}"),
+                    ("options", b"{}"),
+                ],
+                StatusCode::BAD_REQUEST,
+                "unknown_or_duplicate_part",
+            ),
+            (
+                &[("pdf", &pdf), ("schema", &schema)],
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "part_too_large",
+            ),
+            (
+                &[("pdf", &pdf), ("schema", SCHEMA), ("options", &options)],
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "part_too_large",
+            ),
+            (
+                &[("pdf", &pdf), ("schema", b"{")],
+                StatusCode::BAD_REQUEST,
+                "invalid_schema",
+            ),
+        ];
+        for (parts, status, code) in cases {
+            assert_error(post_extract(&state, parts, &[]).await, status, code).await;
+            assert_eq!(state.jobs.available_permits(), 1, "{code}");
+        }
+        let mut config = ServerConfig::fixture(
+            include_bytes!("../../../examples/legacy/text-mock.json").to_vec(),
+        )
+        .expect("the checked-in mock must initialize the fixture server config");
+        config.resources.pdf.max_bytes = pdf.len() - 1;
+        let small = AppState::try_new(config).expect("the lowered PDF limit must initialize");
+        assert_error(
+            post_extract(&small, &[("pdf", &pdf), ("schema", SCHEMA)], &[]).await,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "part_too_large",
+        )
+        .await;
+        assert_eq!(small.jobs.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn upload_endpoints_reject_malformed_and_oversized_multipart() {
+        let mut config = ServerConfig::fixture(
+            include_bytes!("../../../examples/legacy/text-mock.json").to_vec(),
+        )
+        .expect("the checked-in mock must initialize the fixture server config");
+        config.resources.pdf.max_bytes = 1024;
+        let state = AppState::try_new(config).expect("the lowered PDF limit must initialize");
+        // A preamble before the first boundary counts toward the whole-upload limit
+        // although no part exceeds its own.
+        let mut oversized = vec![b'x'; upload_limit(&state) + 1];
+        oversized.extend(multipart(&[("pdf", b"%PDF")]));
+        for path in ["/v1/extract", "/v1/fill"] {
+            let response = router(state.clone())
+                .oneshot(
+                    Request::post(path)
+                        .body(Body::from("{}"))
+                        .expect("construct the local non-multipart request"),
+                )
+                .await
+                .expect("the router must return a response to the request");
+            assert_error(response, StatusCode::BAD_REQUEST, "invalid_multipart").await;
+            let truncated =
+                b"--b\r\nContent-Disposition: form-data; name=\"pdf\"\r\n\r\n%PDF".to_vec();
+            for (body, status) in [
+                (truncated, StatusCode::BAD_REQUEST),
+                (oversized.clone(), StatusCode::PAYLOAD_TOO_LARGE),
+            ] {
+                assert_error(
+                    post_raw(&state, path, body, &[]).await,
+                    status,
+                    "invalid_or_oversized_upload",
+                )
+                .await;
+                assert_eq!(state.jobs.available_permits(), 1, "{path}");
+            }
+        }
     }
 
     #[tokio::test]

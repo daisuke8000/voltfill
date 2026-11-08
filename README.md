@@ -109,6 +109,8 @@ voltfill fill input.pdf examples/forms/invoice.json -o result.json
 
 上限を超えた場合は部分的な結果を返さず、`{"error":"layout_limit_exceeded"}` または `{"error":"fill_budget_exceeded"}` を出して終了コード4で終わります。CLIの `voltfill fill` は、コマンドの開始から30秒の期限を既定で設け、`--deadline-ms`（1〜600000）で変えられます。`--remote` の有無にかかわらず使え、期限を過ぎると `{"error":"fill_deadline_exceeded"}`（終了コード4）です。PDFの読み込みと解析（inspect）は `PdfLimits` の上限で止まり、期限では中断しません（その時間も期限に含めます）。期限が制限するのはJevへの送信より前のオフラインの処理だけで、上限や期限を超えた場合は結果を書かず、何も送りません。送信は `--execution-config` の `total_deadline_ms` などで制限します。ライブラリの既定（`vf_core::fill::FillLimits::default()`）は候補50,000件・200,000,000単位・期限なしで、`vf_core::fill::fill_with_limits` で上限と期限を指定できます。期限はレイアウト解析と照合の間、4,096単位ごと・項目ごと・長い原文を読む前に確認します。上限を指定しない `fill` は、超過時に全項目を `limit_exceeded` として返します。
 
+テキスト片の数が資源制限の `max_items_per_page`（既定10,000）を超えるページは、PDFの解析で読み飛ばし、エラーにはしません。そのページにしかない項目は `not_found`、使えるテキストが1つも残らなければ全項目が `no_text` になります。読み飛ばしたページは `voltfill inspect` の `pages[].reason_codes` に `item_limit_exceeded` として出ます。[HTTPの `/v1/fill`](#http-server) も同じです。
+
 区切り記号のない値・真下の値・表や一覧・複数行の値・複数のランに分かれた可能性のある値は、値を入れずに `hold` 付きの候補として返し、AcroForm・縦書き・区切り記号のない1つの片の中の「ラベル 値」（`発行日 2026年11月8日`）は候補にもなりません。対応していないレイアウトは誤った値ではなく候補か空欄になる、というのが確定方針の狙いですが、確かめたのは合成の評価セットだけで、実文書で誤入力がないことは保証しません。既知の限界として、`ラベル：` の同じ行の4em以内の右に区切り記号のない別のラベルがある記入前の様式（`氏名：` のすぐ右の `生年月日` で、フォームに `生年月日` がない場合）は、そのラベルを値として埋めます（4emより離れていれば位置だけの候補です）。また、続きの行が上記の位置から外れる値（例: 値の推定開始位置より大きく右から続く行）は1行の値として扱います。スキャンPDFのOCRは行いません。結果は評価専用です。
 
 <a id="fill-remote"></a>
@@ -236,7 +238,7 @@ curl --fail-with-body --silent --show-error http://127.0.0.1:3000/v1/extract \
   --form 'schema=@examples/legacy/text-form.json;type=application/json'
 ```
 
-`POST /v1/fill` は[フォーム入力](#fill)のHTTP版で、multipartの `pdf` と `form`（`voltfill fill` と同じフォーム項目のJSON）を受け取り、`voltfill fill` と同じ形の結果JSONを `200` で返します。Jevには送信せず、描画もしないため、`--mock` / `--remote` のどちらで起動しても同じ動作です。
+`POST /v1/fill` は[フォーム入力](#fill)のHTTP版（`--remote` なしの `voltfill fill`）で、multipartの `pdf` と `form`（`voltfill fill` と同じフォーム項目のJSON）を受け取り、`voltfill fill` と同じ形の結果JSONを `200` で返します。Jevには送信せず、描画もしないため、`--mock` / `--remote` のどちらで起動しても同じ動作です。
 
 ```sh
 curl --fail-with-body --silent --show-error http://127.0.0.1:3000/v1/fill \
@@ -244,7 +246,28 @@ curl --fail-with-body --silent --show-error http://127.0.0.1:3000/v1/fill \
   --form 'form=@examples/forms/invoice.json;type=application/json'
 ```
 
-エラーは `{"error": "<code>", "jev_responses": []}` で返します。`form` が不正なら `400 invalid_form`、PDFを解析できなければ `400 pdf_inspection_failed`、ページ数が上限を超えれば `413 input_too_large`、part不足は `400 missing_pdf_or_form`、未知・重複partは `400 unknown_or_duplicate_part`、partの上限超過（`pdf` は資源制限の `max_bytes`、`form` は1 MiB）は `413 part_too_large`、アップロードの時間切れは `408 upload_timeout` です。
+処理量の上限は `voltfill fill` と同じ（候補50,000件・作業量200,000,000単位）です。期限は、アップロードの読み込みとフォームの検証が終わって処理を始めてから30秒で、変更できません。PDFの解析は期限で中断しませんが、その時間も期限に含めます。上限や期限を超えた場合は部分的な結果を返しません。`max_items_per_page` を超えるページは読み飛ばし、そのページの項目は `not_found` か `no_text` になります（[フォーム入力](#fill)と同じ）。
+
+エラーは `{"error": "<code>", "jev_responses": []}` で返します。表はおおよそ確認する順です。
+
+| HTTP | `error` | 条件 |
+|---|---|---|
+| 401 | `unauthorized` | APIキーを設定していて、`Authorization: Bearer <key>` がないか一致しない |
+| 403 | `browser_authentication_required` | APIキーが未設定で、`Origin` 付きの要求 |
+| 429 | `server_busy` | 抽出かフォーム入力を実行中（`Retry-After: 2`） |
+| 400 | `invalid_multipart` | multipartでない（`Content-Type` が違う、boundaryがない） |
+| 400・413・500 | `invalid_or_oversized_upload` | multipartを読めない。400は形式の誤り、413は本文全体がアップロード上限（PDFの `max_bytes` ＋1 MiB＋128 KiB）を超えた場合、500はそのほかの読み込みの失敗 |
+| 400 | `unknown_or_duplicate_part` | `pdf`・`form` 以外のpart、または同じpartが2つある |
+| 413 | `part_too_large` | partが上限を超えた（`pdf` は資源制限の `max_bytes`、`form` は1 MiB） |
+| 408 | `upload_timeout` | アップロードが `--upload-timeout-ms`（既定30000）内に終わらない |
+| 400 | `missing_pdf_or_form` | `pdf` か `form` がない |
+| 400 | `invalid_form` | フォームのJSONが不正 |
+| 400 | `pdf_inspection_failed` | PDFを解析できない（暗号化・ページツリーの不正を含む） |
+| 413 | `input_too_large` | ページ数が資源制限の `max_pages` を超えた |
+| 413 | `layout_limit_exceeded` | ラベル・値の候補が50,000件を超えた |
+| 413 | `fill_budget_exceeded` | レイアウト解析と照合の作業量が上限を超えた |
+| 504 | `fill_deadline_exceeded` | 処理の開始から30秒を過ぎた |
+| 500 | `worker_failed` | 処理中の内部エラー。Jevには送信していないため、受付は止めません |
 
 認証は `VOLTFILL_SERVER_API_KEY` / `VOLTFILL_SERVER_API_KEY_FILE` の一方を設定し、`Authorization: Bearer <key>` を送ります。未設定のループバックでは任意、非ループバック待ち受け・`Origin` 付き要求では必須です（`/v1/extract`・`/v1/fill` 共通）。VOLTFILLはHTTPのため、別マシンからはTLSプロキシを使います。
 
