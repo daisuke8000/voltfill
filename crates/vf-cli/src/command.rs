@@ -15,7 +15,7 @@ use vf_legacy::jev::transport::{ExecutionConfig, Secret};
 use vf_legacy::model::{JevResponse, Strategy};
 use vf_legacy::{pdf, schema};
 
-const HELP: &str = "VOLTFILL — PDF extraction\n\nvoltfill run --config voltfill.yaml (or voltfill.toml / voltfill.json)\nvoltfill serve --config voltfill.yaml\nvoltfill serve --help\nvoltfill run INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --mock ANSWERS.json\nvoltfill inspect INPUT.pdf\nvoltfill fill INPUT.pdf FORM.json (offline: match form labels to PDF text)\nvoltfill fill INPUT.pdf FORM.json --remote (Jev chooses among ambiguous fields' source candidates)\nvoltfill validate SCHEMA.json\n\n--strategy text|vision|hybrid (default: text)\n--model ID (default: jev-1.14.0); images require a pinned version >= 1.14.0.\n--renderer pdfium|hayro selects an enabled renderer; no automatic fallback.\n--pdfium-lib PATH or VOLTFILL_PDFIUM_LIB_PATH selects PDFium when --renderer is omitted\n--pixels-per-point NUMBER sets render scale (default: 1.5).\n--config FILE (or -c FILE, default VOLTFILL_CONFIG) loads YAML/TOML launch settings or legacy JSON execution limits.\nPrecedence: CLI > selected file > environment > defaults.\n--resource-config FILE (or VOLTFILL_RESOURCE_CONFIG) lowers PDF/render ceilings.\nVOLTFILL_EXECUTION_CONFIG selects execution JSON when no execution section/file is supplied.\nVOLTFILL_MODEL, VOLTFILL_STRATEGY, VOLTFILL_RENDERER, VOLTFILL_PIXELS_PER_POINT\nand VOLTFILL_LOG_LEVEL provide startup defaults.\n--max-concurrency N (default: 2, at least 1); rate limits may reduce concurrency.\n--max-attempts 1|2|3 includes the first attempt (default: 3).\n--log-level off|error|warn|info|debug (default: off) enables JSON Lines logs.\nLogs use stderr with JSON on stdout; with --output FILE (or -o FILE),\nlogs use stdout and results go to the file. Debug logs cover VOLTFILL only.\n--dry-run inspects the input without sending requests.\n--evaluation-profile synthetic enables confidence filtering for local synthetic examples.\nBy default, resolved values are returned without a confidence cutoff.\n\nRemote mode requires VOLTFILL_JEV_ENDPOINT (trusted HTTPS, no URL fallback) and\nVOLTFILL_JEV_API_KEY or VOLTFILL_JEV_API_KEY_FILE (one explicit credential file). Vision/Hybrid select image input;\nno additional image permission flag is required. Reports retain original\nresponse bodies regardless of log level and remain evaluation-only.\nLong-form --pdf, --schema, --allow-remote and --execution-config are also supported.\n\nfill --remote sends only fields left ambiguous, as choices among their own source\ncandidates (label and value text, no images); values still come from the PDF.\nIt accepts --model, --max-attempts and --execution-config FILE (not --config);\nbatches are sent one at a time. Without --remote, fill reads no credentials.\n";
+const HELP: &str = "VOLTFILL — PDF extraction\n\nvoltfill run --config voltfill.yaml (or voltfill.toml / voltfill.json)\nvoltfill serve --config voltfill.yaml\nvoltfill serve --help\nvoltfill run INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --mock ANSWERS.json\nvoltfill inspect INPUT.pdf\nvoltfill fill INPUT.pdf FORM.json (offline: match form labels to PDF text)\nvoltfill fill INPUT.pdf FORM.json --remote (Jev chooses among ambiguous fields' source candidates)\nvoltfill validate SCHEMA.json\n\n--strategy text|vision|hybrid (default: text)\n--model ID (default: jev-1.14.0); images require a pinned version >= 1.14.0.\n--renderer pdfium|hayro selects an enabled renderer; no automatic fallback.\n--pdfium-lib PATH or VOLTFILL_PDFIUM_LIB_PATH selects PDFium when --renderer is omitted\n--pixels-per-point NUMBER sets render scale (default: 1.5).\n--config FILE (or -c FILE, default VOLTFILL_CONFIG) loads YAML/TOML launch settings or legacy JSON execution limits.\nPrecedence: CLI > selected file > environment > defaults.\n--resource-config FILE (or VOLTFILL_RESOURCE_CONFIG) lowers PDF/render ceilings.\nVOLTFILL_EXECUTION_CONFIG selects execution JSON when no execution section/file is supplied.\nVOLTFILL_MODEL, VOLTFILL_STRATEGY, VOLTFILL_RENDERER, VOLTFILL_PIXELS_PER_POINT\nand VOLTFILL_LOG_LEVEL provide startup defaults.\n--max-concurrency N (default: 2, at least 1); rate limits may reduce concurrency.\n--max-attempts 1|2|3 includes the first attempt (default: 3).\n--log-level off|error|warn|info|debug (default: off) enables JSON Lines logs.\nLogs use stderr with JSON on stdout; with --output FILE (or -o FILE),\nlogs use stdout and results go to the file. Debug logs cover VOLTFILL only.\n--dry-run inspects the input without sending requests.\n--evaluation-profile synthetic enables confidence filtering for local synthetic examples.\nBy default, resolved values are returned without a confidence cutoff.\n\nRemote mode requires VOLTFILL_JEV_ENDPOINT (trusted HTTPS, no URL fallback) and\nVOLTFILL_JEV_API_KEY or VOLTFILL_JEV_API_KEY_FILE (one explicit credential file). Vision/Hybrid select image input;\nno additional image permission flag is required. Reports retain original\nresponse bodies regardless of log level and remain evaluation-only.\nLong-form --pdf, --schema, --allow-remote and --execution-config are also supported.\n\nfill --remote sends only fields left ambiguous, as choices among their own source\ncandidates (label and value text, no images); values still come from the PDF.\nIt accepts --model, --max-attempts and --execution-config FILE (not --config);\nbatches are sent one at a time. If every sent field fails, the full result is\nstill written and the exit code is 4. Without --remote, fill reads no credentials.\n";
 
 struct Args {
     command: String,
@@ -222,41 +222,54 @@ fn read(path: &str, limit: usize) -> Result<Vec<u8>, (u8, &'static str)> {
     }
     Ok(bytes)
 }
+/// Refuse a symlink output or one that would overwrite an input, a launch,
+/// execution or resource file, a native library or the API key file.
+/// `run_with` checks this before reading any input or credential and before
+/// any request, so a refused target never discards received bodies;
+/// [`output`] checks again in case the target changed during the run.
+fn check_output_target(args: &Args) -> Result<(), (u8, &'static str)> {
+    let Some(path) = args.values.get("--output") else {
+        return Ok(());
+    };
+    let target = Path::new(path);
+    if fs::symlink_metadata(target).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err((5, "symlink_output_refused"));
+    }
+    let canonical = target.canonicalize().ok();
+    if [
+        "--pdf",
+        "--schema",
+        "--form",
+        "--mock",
+        "--execution-config",
+        "--resource-config",
+    ]
+    .into_iter()
+    .filter_map(|key| args.values.get(key).map(Path::new))
+    .chain(args.library_path.as_deref())
+    .chain(args.launch_path.as_deref())
+    .any(|input| canonical.is_some() && input.canonicalize().ok() == canonical)
+    {
+        return Err((5, "input_overwrite_refused"));
+    }
+    // Only the key file's path is compared; its contents are not read here.
+    if args.flag("--allow-remote")
+        && !args.flag("--dry-run")
+        && std::env::var_os("VOLTFILL_JEV_API_KEY_FILE").is_some_and(|path| {
+            canonical.is_some() && Path::new(&path).canonicalize().ok() == canonical
+        })
+    {
+        return Err((5, "input_overwrite_refused"));
+    }
+    Ok(())
+}
 fn output(args: &Args, value: &impl serde::Serialize) -> Result<(), (u8, &'static str)> {
     let mut bytes =
         serde_json::to_vec_pretty(value).map_err(|_| (5, "output_serialization_failed"))?;
     bytes.push(b'\n');
     if let Some(path) = args.values.get("--output") {
-        let target = Path::new(path);
-        if fs::symlink_metadata(target).is_ok_and(|m| m.file_type().is_symlink()) {
-            return Err((5, "symlink_output_refused"));
-        }
-        let canonical = target.canonicalize().ok();
-        if [
-            "--pdf",
-            "--schema",
-            "--form",
-            "--mock",
-            "--execution-config",
-            "--resource-config",
-        ]
-        .into_iter()
-        .filter_map(|key| args.values.get(key).map(Path::new))
-        .chain(args.library_path.as_deref())
-        .chain(args.launch_path.as_deref())
-        .any(|input| canonical.is_some() && input.canonicalize().ok() == canonical)
-        {
-            return Err((5, "input_overwrite_refused"));
-        }
-        if args.flag("--allow-remote")
-            && !args.flag("--dry-run")
-            && std::env::var_os("VOLTFILL_JEV_API_KEY_FILE").is_some_and(|path| {
-                canonical.is_some() && Path::new(&path).canonicalize().ok() == canonical
-            })
-        {
-            return Err((5, "input_overwrite_refused"));
-        }
-        write_atomic(target, &bytes).map_err(|_| (5, "output_write_failed"))?;
+        check_output_target(args)?;
+        write_atomic(Path::new(path), &bytes).map_err(|_| (5, "output_write_failed"))?;
     } else {
         io::stdout()
             .lock()
@@ -468,6 +481,7 @@ fn run_with<E: Evaluator, T: assist::Transport, C: assist::Clock>(
     let level = log_level(&args)?;
     let execution = execution_config(&args)?;
     initialize_logger(level, args.values.contains_key("--output"))?;
+    check_output_target(&args)?;
     if args.command == "validate" {
         let form = schema::parse(&read(args.value("--schema")?, schema::MAX_SCHEMA_BYTES)?)
             .map_err(|_| (2, "invalid_schema"))?;
@@ -516,7 +530,14 @@ fn run_with<E: Evaluator, T: assist::Transport, C: assist::Clock>(
         let assisted = assist::assist(result, &form, &options, &secret, &mut transport, &mut clock)
             .map_err(|_| (4, "fill_assist_failed"))?;
         output(&args, &assisted)?;
-        log::info!(target: "vf_cli", "{}", json!({"event":"fill_assist_completed","questions":assisted.assist.len(),"attempts":assisted.usage.attempts,"responses":assisted.jev_responses.len()}));
+        // The full result with every received body is written first; a run in
+        // which every sent field failed then exits like a failed extraction.
+        let all_failed =
+            !assisted.assist.is_empty() && assisted.assist.values().all(|a| a.outcome.is_failure());
+        log::info!(target: "vf_cli", "{}", json!({"event":"fill_assist_completed","questions":assisted.assist.len(),"attempts":assisted.usage.attempts,"responses":assisted.jev_responses.len(),"exit_code":if all_failed { 4 } else { 0 }}));
+        if all_failed {
+            return Err((4, "fill_assist_all_failed"));
+        }
         return Ok(0);
     }
     let bytes = read(args.value("--pdf")?, args.resources.pdf.max_bytes)?;
@@ -1061,5 +1082,146 @@ mod tests {
         )
         .expect("the success body is the original JSON");
         assert_eq!(body["answers"]["q0"]["confidence"], 0.8);
+    }
+
+    /// Counts sends and answers every attempt with 503.
+    #[derive(Clone)]
+    struct Unavailable(Arc<AtomicU32>);
+    impl Transport for Unavailable {
+        fn send(&mut self, _: HttpRequest<'_>) -> Result<HttpResponse, TransportError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(HttpResponse {
+                status: 503,
+                body: b"private_unavailable_canary".to_vec(),
+                body_error: None,
+                retry_after_ms: None,
+            })
+        }
+    }
+
+    fn fill_inputs(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("voltfill-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("the temp dir must be writable");
+        let pdf = dir.join("input.pdf");
+        fs::write(
+            &pdf,
+            text_pdf(&["Invoice No: INV-7", "Subtotal: 100", "Total: 120"]),
+        )
+        .expect("the PDF must be writable");
+        let form = dir.join("form.json");
+        fs::write(&form, br#"{"fields":[{"id":"no","label":"Invoice No"},{"id":"amount","label":"Amount","type":"amount","hints":["Subtotal","Total"]}]}"#)
+            .expect("the form must be writable");
+        (dir, pdf, form)
+    }
+
+    fn arg(p: &Path) -> String {
+        p.to_str().expect("temp paths are UTF-8").to_owned()
+    }
+
+    #[test]
+    fn fill_remote_refuses_the_output_target_before_credentials_or_sends() {
+        let (dir, pdf, form) = fill_inputs("fill-remote-preflight");
+        let config = dir.join("execution.json");
+        fs::write(&config, b"{}").expect("the config must be writable");
+        let link = dir.join("link.json");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.join("elsewhere.json"), &link)
+            .expect("the symlink must be creatable");
+        let mut cases = vec![
+            (form.clone(), Vec::new(), "input_overwrite_refused"),
+            (pdf.clone(), Vec::new(), "input_overwrite_refused"),
+            (
+                config.clone(),
+                vec!["--execution-config".to_owned(), arg(&config)],
+                "input_overwrite_refused",
+            ),
+        ];
+        if cfg!(unix) {
+            cases.push((link.clone(), Vec::new(), "symlink_output_refused"));
+        }
+        let originals: Vec<Vec<u8>> = [&form, &pdf, &config]
+            .iter()
+            .map(|p| fs::read(p).expect("the input is readable"))
+            .collect();
+        for (target, extra, reason) in cases {
+            let sends = Arc::new(AtomicU32::new(0));
+            let secret_loads = std::cell::Cell::new(0);
+            let transports = std::cell::Cell::new(0);
+            let mut arguments = vec![
+                "fill".to_owned(),
+                arg(&pdf),
+                arg(&form),
+                "--remote".into(),
+                "-o".into(),
+                arg(&target),
+            ];
+            arguments.extend(extra);
+            let result = run_with::<FixtureEvaluator, _, _>(
+                arguments,
+                |_, _| Ok(()),
+                || {
+                    secret_loads.set(secret_loads.get() + 1);
+                    Ok(Secret::try_new("synthetic_secret_canary".into())
+                        .expect("the synthetic bearer is valid"))
+                },
+                |_, _, _| Err((9, "legacy_evaluator_unexpected")),
+                || {
+                    transports.set(transports.get() + 1);
+                    Ok((Unavailable(sends.clone()), FakeClock::default()))
+                },
+            );
+            assert_eq!(result, Err((5, reason)), "{target:?}");
+            assert_eq!(sends.load(Ordering::SeqCst), 0, "{target:?}");
+            assert_eq!(secret_loads.get(), 0, "{target:?}");
+            assert_eq!(transports.get(), 0, "{target:?}");
+        }
+        for (path, original) in [&form, &pdf, &config].into_iter().zip(originals) {
+            assert_eq!(fs::read(path).expect("the input is readable"), original);
+        }
+        assert!(!dir.join("elsewhere.json").exists());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fill_remote_writes_every_body_then_exits_4_when_every_sent_field_fails() {
+        let (dir, pdf, form) = fill_inputs("fill-remote-all-failed");
+        let output = dir.join("result.json");
+        let sends = Arc::new(AtomicU32::new(0));
+        let result = run_with::<FixtureEvaluator, _, _>(
+            [
+                "fill".into(),
+                arg(&pdf),
+                arg(&form),
+                "--remote".into(),
+                "--max-attempts".into(),
+                "2".into(),
+                "-o".into(),
+                arg(&output),
+            ],
+            |_, _| Ok(()),
+            || {
+                Ok(Secret::try_new("synthetic_secret_canary".into())
+                    .expect("the synthetic bearer is valid"))
+            },
+            |_, _, _| Err((9, "legacy_evaluator_unexpected")),
+            || Ok((Unavailable(sends.clone()), FakeClock::default())),
+        );
+        assert_eq!(result, Err((4, "fill_assist_all_failed")));
+        assert_eq!(sends.load(Ordering::SeqCst), 2);
+        let written: Value =
+            serde_json::from_slice(&fs::read(&output).expect("the result is still written"))
+                .expect("the result is JSON");
+        fs::remove_dir_all(&dir).ok();
+        assert_eq!(written["assist"]["amount"]["outcome"], "request_failed");
+        assert_eq!(written["fields"]["amount"]["status"], "ambiguous");
+        assert_eq!(written["fields"]["no"]["status"], "filled");
+        let responses = written["jev_responses"].as_array().expect("responses");
+        assert_eq!(responses.len(), 2);
+        assert!(
+            responses
+                .iter()
+                .all(|r| r["http_status"] == 503 && r["body"] == "private_unavailable_canary")
+        );
     }
 }

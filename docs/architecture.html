@@ -154,7 +154,7 @@ footer{border-top:1px solid var(--rule);padding:20px 0;font-size:12px;color:var(
       <defs><marker id="arr3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#4f5d75"/></marker></defs>
       <g class="node"><rect x="40" y="30" width="200" height="70" rx="8"/><text class="node-tag" x="56" y="50">FRONT END · バイナリ voltfill</text><text class="node-title" x="56" y="72">vf-cli</text><text class="node-sub" x="56" y="90">設定・ログ・serve</text></g>
       <g class="node"><rect x="300" y="30" width="200" height="70" rx="8"/><text class="node-tag" x="316" y="50">LIBRARY</text><text class="node-title" x="316" y="72">vf-server</text><text class="node-sub" x="316" y="90">HTTP ルーター</text></g>
-      <g class="node wip"><rect x="40" y="160" width="260" height="90" rx="8"/><text class="node-tag" x="56" y="182">CORE · 実装中</text><text class="node-title" x="56" y="206">vf-core</text><text class="node-sub" x="56" y="228">fill：ラベル照合・正規化・根拠</text></g>
+      <g class="node wip"><rect x="40" y="160" width="260" height="104" rx="8"/><text class="node-tag" x="56" y="182">CORE · 実装中</text><text class="node-title" x="56" y="206">vf-core</text><text class="node-sub" x="56" y="228">fill：ラベル照合・正規化・根拠</text><text class="node-sub" x="56" y="248">assist：曖昧な項目をJevが選択</text></g>
       <rect class="boundary" x="340" y="140" width="620" height="130" rx="10"/><text class="zone-label" x="356" y="160">vf-legacy · 旧方式（比較後に crate ごと削除）</text>
       <g class="node"><rect x="356" y="172" width="138" height="80" rx="8"/><text class="node-title" x="370" y="206">schema</text><text class="node-sub" x="370" y="228">旧スキーマ定義</text></g>
       <g class="node"><rect x="506" y="172" width="138" height="80" rx="8"/><text class="node-title" x="520" y="206">engine</text><text class="node-sub" x="520" y="228">Text/Vision/Hybrid</text></g>
@@ -168,14 +168,15 @@ footer{border-top:1px solid var(--rule);padding:20px 0;font-size:12px;color:var(
       <path class="edge" d="M200,100 C250,125 320,118 360,140" marker-end="url(#arr3)"/>
       <path class="edge" d="M450,100 V140" marker-end="url(#arr3)"/><text class="edge-text" x="458" y="124">/v1/extract</text>
       <path class="edge planned" d="M330,100 C310,125 295,140 285,160" marker-end="url(#arr3)"/><text class="edge-text" x="338" y="122">/v1/fill（計画）</text>
-      <path class="edge" d="M170,250 V330" marker-end="url(#arr3)"/>
+      <path class="edge" d="M170,264 V330" marker-end="url(#arr3)"/>
+      <path class="edge" d="M270,264 C270,300 290,300 330,300 H700 C720,300 730,310 730,330" marker-end="url(#arr3)"/><text class="edge-text" x="520" y="294">assist（--remote）</text>
       <path class="edge" d="M380,270 C360,300 310,310 290,330" marker-end="url(#arr3)"/>
       <path class="edge" d="M490,270 V330" marker-end="url(#arr3)"/>
       <path class="edge" d="M820,270 V330" marker-end="url(#arr3)"/>
       <path class="edge" d="M360,385 H300" marker-end="url(#arr3)"/>
     </svg></div>
     <div class="notes">
-      <div class="note"><h3>依存の約束</h3><ul><li>vf-source・vf-render は抽出スキーマ・Evidenceを必要としない</li><li>vf-client は PDF crate と vf-core・vf-legacy に依存しない</li><li>基盤crateは vf-core・vf-legacy に依存しない</li><li>vf-core は vf-legacy に依存しない</li></ul></div>
+      <div class="note"><h3>依存の約束</h3><ul><li>vf-source・vf-render は抽出スキーマ・Evidenceを必要としない</li><li>vf-client は PDF crate と vf-core・vf-legacy に依存しない</li><li>基盤crateは vf-core・vf-legacy に依存しない</li><li>vf-core は vf-legacy に依存しない</li><li>vf-core は Jev への送信に vf-client だけを使う（assist）</li></ul></div>
       <div class="note"><h3>外部crate</h3><p>PDF解析は <span class="mono">pdf-inspector</span> と <span class="mono">lopdf</span>、HTTPは <span class="mono">reqwest</span>（rustls）、サーバーは <span class="mono">axum</span> / <span class="mono">tokio</span>。描画の <span class="mono">hayro</span>・PDFium は既定オフです。</p></div>
       <div class="note"><h3>移行の方針</h3><p>新しいL2〜L4（vf-core）は旧方式（vf-legacy）と並べて作り、同じPDFでの比較（誤入力率→空欄率→トークン→時間の順）で方式を決めてから vf-legacy を削除します。</p></div>
     </div>
@@ -186,7 +187,7 @@ footer{border-top:1px solid var(--rule);padding:20px 0;font-size:12px;color:var(
     <h2>Jevへの問い合わせ</h2>
     <p class="sub">Jevは文字列を返さず、選択（choice）・有無（noul）・位置（box）だけを答えます。値は必ずPDFの原文から取ります。</p>
     <div class="notes">
-      <div class="note"><h3>候補から選ぶ <span class="chip done">実装済み</span></h3><p>原文の候補を <span class="mono">choice</span> の選択肢として渡し、どれかを選ばせます（該当なしも選択肢に含む）。<span class="mono">fill --remote</span> は曖昧な項目だけを、項目のラベル・型・別名と候補のページ・原文のラベルと値として送ります（前後の行・画像は送りません）。選ばれた候補が確率の単独最大のときだけ、その候補の原文とEvidenceで埋めます。模擬応答で試験済みで、実APIでは未測定です。</p></div>
+      <div class="note"><h3>候補から選ぶ <span class="chip done">実装済み</span></h3><p>原文の候補を <span class="mono">choice</span> の選択肢として渡し、どれかを選ばせます（該当なしも選択肢に含む）。<span class="mono">fill --remote</span> は曖昧な項目だけを、項目のラベル・型・別名と候補のページ・原文のラベルと値として送ります（前後の行・画像は送りません）。選ばれた候補が確率の単独最大で確率の合計が1のときだけ、その候補の原文とEvidenceで埋めます。模擬応答で試験済みで、実APIでは未測定です。</p></div>
       <div class="note"><h3>位置を指す <span class="chip done">実装済み</span></h3><p>ページ画像を渡して <span class="mono">box</span> で値の位置を答えさせ、座標をPDFに戻して範囲内の原文片を値にします（Vision）。片の一部だけを囲む場合はL2の分割で対応します。</p></div>
       <div class="note"><h3>送らないもの</h3><p>認証情報・HTTPヘッダー・本文はログに出しません。送信には明示的な <span class="mono">--remote</span> が必要で、送信回数・トークン・費用・期限の上限を全試行に適用します。</p></div>
     </div>

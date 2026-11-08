@@ -174,3 +174,59 @@ fn remote_fill_checks_its_settings_before_sending() {
         assert!(!String::from_utf8_lossy(&out.stderr).contains("synthetic_secret_canary"));
     }
 }
+
+#[test]
+fn a_refused_output_target_fails_before_credentials_are_read() {
+    let temp = Temp::new();
+    let (pdf, form) = inputs(&temp);
+    let key_file = temp.file("key", b"synthetic_secret_canary\n");
+    let link = temp.0.join("link.json");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(temp.0.join("elsewhere.json"), &link)
+        .expect("create the output symlink");
+    let link = path(&link);
+    let originals: Vec<Vec<u8>> = [&pdf, &form, &key_file]
+        .iter()
+        .map(|p| std::fs::read(p).expect("read the synthetic input"))
+        .collect();
+    let key_env = [("VOLTFILL_JEV_API_KEY_FILE", key_file.as_str())];
+    // Without the preflight these would fail later with api_key_required or
+    // jev_endpoint_required, after reading the inputs and the key.
+    type Env<'a> = &'a [(&'a str, &'a str)];
+    let mut cases: Vec<(Vec<&str>, Env, &str)> = vec![
+        (
+            vec!["fill", &pdf, &form, "--remote", "-o", &form],
+            &[],
+            "input_overwrite_refused",
+        ),
+        (
+            vec!["fill", &pdf, &form, "--remote", "-o", &key_file],
+            &key_env,
+            "input_overwrite_refused",
+        ),
+        // The legacy run/extract command shares the same preflight.
+        (
+            vec!["run", &pdf, &form, "--remote", "-o", &form],
+            &[],
+            "input_overwrite_refused",
+        ),
+    ];
+    if cfg!(unix) {
+        cases.push((
+            vec!["fill", &pdf, &form, "--remote", "-o", &link],
+            &[],
+            "symlink_output_refused",
+        ));
+    }
+    for (args, env, reason) in cases {
+        let out = cli(&args, &temp, env);
+        assert_eq!(out.status.code(), Some(5), "{args:?}");
+        assert!(out.stdout.is_empty());
+        assert_eq!(error(&out), reason, "{args:?}");
+        assert!(!String::from_utf8_lossy(&out.stderr).contains("synthetic_secret_canary"));
+    }
+    for (p, original) in [&pdf, &form, &key_file].into_iter().zip(originals) {
+        assert_eq!(std::fs::read(p).expect("read the input again"), original);
+    }
+    assert!(!temp.0.join("elsewhere.json").exists());
+}
