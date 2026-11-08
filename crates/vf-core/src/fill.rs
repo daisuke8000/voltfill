@@ -24,7 +24,9 @@
 //! - (c) One value: the value is a single line ([`Hold::MultiLine`]
 //!   otherwise; a multi-line value ends before a line that reads as one of
 //!   the form's labels). A text value holds no second value
-//!   ([`Hold::SeveralValues`], see [`several_values`]).
+//!   ([`Hold::SeveralValues`]: two phone numbers; two dates or amounts not
+//!   joined by a range mark; or a phone number, date or amount right after
+//!   a word that follows other text, as in `山田 太郎 生年月日 1990年1月1日`).
 //! - (d) Type: date, amount and number values match the type's grammar as a
 //!   whole (otherwise the field is `invalid`). Amounts and numbers are not
 //!   normalized when the label states a scale unit (`売上高（千円）`) or
@@ -235,7 +237,9 @@ pub enum Hold {
     GeometricOnly,
     /// The value spans more than one line.
     MultiLine,
-    /// A text value holds more than one value (see [`several_values`]).
+    /// A text value holds more than one value: two phone numbers, two dates
+    /// or amounts not joined by a range mark, or a phone number, date or
+    /// amount after a word that follows other text (a second label).
     SeveralValues,
 }
 
