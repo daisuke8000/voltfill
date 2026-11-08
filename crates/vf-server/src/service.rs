@@ -464,7 +464,7 @@ async fn extract(State(state): State<AppState>, request: Request) -> Response {
     }
     let cancelled = Arc::new(AtomicBool::new(false));
     let _cancellation = CancelOnDrop(cancelled.clone());
-    log::info!(target:"voltfill_server","{}",json!({"event":"extraction_started","pdf_bytes":pdf.len(),"fields":form.fields.len()}));
+    log::info!(target:"vf_server","{}",json!({"event":"extraction_started","pdf_bytes":pdf.len(),"fields":form.fields.len()}));
     let job_state = state.clone();
     let joined = tokio::task::spawn_blocking(move || {
         let _permit = permit;
@@ -528,7 +528,7 @@ async fn extract(State(state): State<AppState>, request: Request) -> Response {
         }
         match result {
             Ok(report) => {
-                log::info!(target:"voltfill_server","{}",json!({"event":"extraction_completed","fields":report.fields.len(),"attempts":report.usage.attempts}));
+                log::info!(target:"vf_server","{}",json!({"event":"extraction_completed","fields":report.fields.len(),"attempts":report.usage.attempts}));
                 Json(report).into_response()
             }
             Err(error) => extraction_error(error),

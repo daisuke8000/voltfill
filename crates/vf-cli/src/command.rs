@@ -279,7 +279,7 @@ fn execute<E: Evaluator>(
     options: &ExtractOptions,
     mut evaluator: E,
 ) -> Result<u8, (u8, &'static str)> {
-    log::info!(target: "voltfill_cli", "{}", json!({"event":"extraction_started"}));
+    log::info!(target: "vf_cli", "{}", json!({"event":"extraction_started"}));
     let report = match engine::extract(pdf, form, options, &mut evaluator) {
         Ok(report) => report,
         Err(error) => {
@@ -305,7 +305,7 @@ fn execute<E: Evaluator>(
         3
     };
     output(args, &report)?;
-    log::info!(target: "voltfill_cli", "{}", json!({"event":"extraction_completed","fields":form.fields.len(),"exit_code":code}));
+    log::info!(target: "vf_cli", "{}", json!({"event":"extraction_completed","fields":form.fields.len(),"exit_code":code}));
     Ok(code)
 }
 fn configure_rendering(
@@ -513,7 +513,7 @@ fn run_with<E: Evaluator>(
             .validate()
             .map_err(|_| (2, "invalid_render_config"))?;
     }
-    log::debug!(target: "voltfill_cli", "{}", json!({"event":"extraction_config","config":execution}));
+    log::debug!(target: "vf_cli", "{}", json!({"event":"extraction_config","config":execution}));
     if args.flag("--dry-run") {
         let snapshot =
             pdf::inspect(&bytes, options.pdf_limits).map_err(|_| (4, "pdf_inspection_failed"))?;
@@ -612,7 +612,7 @@ pub(crate) fn main() {
         Ok(code) => code,
         Err((code, reason)) => {
             if log::max_level() != log::LevelFilter::Off {
-                log::error!(target: "voltfill_cli", "{}", json!({"event":reason}));
+                log::error!(target: "vf_cli", "{}", json!({"event":reason}));
             } else {
                 eprintln!("{}", json!({"error":reason}));
             }
@@ -635,11 +635,11 @@ mod tests {
     fn logger_limits_levels_to_our_targets() {
         let logger = logger(log::LevelFilter::Info, false);
         for (target, level, enabled) in [
-            ("voltfill_cli", log::Level::Info, true),
-            ("voltfill_core::jev", log::Level::Error, true),
-            ("voltfill_server", log::Level::Debug, false),
+            ("vf_cli", log::Level::Info, true),
+            ("vf_client", log::Level::Error, true),
+            ("vf_server", log::Level::Debug, false),
             ("reqwest::connect", log::Level::Error, false),
-            ("voltfill_core_extra", log::Level::Error, false),
+            ("vf_client_extra", log::Level::Error, false),
         ] {
             assert_eq!(
                 log::Log::enabled(

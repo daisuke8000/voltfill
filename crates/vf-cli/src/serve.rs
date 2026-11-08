@@ -238,7 +238,7 @@ fn run(
         .map_err(|_| "runtime_setup_failed")?;
     let result=runtime.block_on(async {
         let listener=tokio::net::TcpListener::bind(address).await.map_err(|_|"listen_failed")?;
-        log::info!(target:"voltfill_server","{}",json!({"event":"server_started","address":listener.local_addr().ok().map(|a|a.to_string())}));
+        log::info!(target:"vf_server","{}",json!({"event":"server_started","address":listener.local_addr().ok().map(|a|a.to_string())}));
         axum::serve(listener,vf_server::router(state.clone())).with_graceful_shutdown(async {let _=tokio::signal::ctrl_c().await;}).await.map_err(|_|"server_failed")
     });
     drop(state);
@@ -264,7 +264,7 @@ pub(crate) fn entry_with_resources(
     }
     if let Err(code) = run(arguments, execution, resources) {
         if log::max_level() != log::LevelFilter::Off {
-            log::error!(target:"voltfill_server","{}",json!({"event":code}));
+            log::error!(target:"vf_server","{}",json!({"event":code}));
         } else {
             eprintln!("{}", json!({"error":code}));
         }

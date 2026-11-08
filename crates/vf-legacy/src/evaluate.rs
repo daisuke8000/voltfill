@@ -389,7 +389,7 @@ impl<O: transport::AttemptObserver> transport::AttemptObserver for UsageObserver
             ..Default::default()
         }) {
             budget.stop();
-            log::error!(target:"voltfill_core::jev","{}",json!({"event":"usage_totals_overflowed","lower_bound":true}));
+            log::error!(target:"vf_legacy","{}",json!({"event":"usage_totals_overflowed","lower_bound":true}));
             return Err(transport::Failure::Budget);
         }
         self.inner.before_send(body, budget, timeout, context)
@@ -412,7 +412,7 @@ impl<O: transport::AttemptObserver> transport::AttemptObserver for UsageObserver
         let observed = self.inner.after_send(attempt, response, budget, context);
         if !valid {
             budget.stop();
-            log::error!(target:"voltfill_core::jev","{}",json!({"event":"usage_totals_overflowed","lower_bound":true}));
+            log::error!(target:"vf_legacy","{}",json!({"event":"usage_totals_overflowed","lower_bound":true}));
             return Err(transport::Failure::Budget);
         }
         observed
@@ -538,7 +538,7 @@ impl<T: transport::Transport, C: Clock, O: transport::AttemptObserver> Evaluator
         for outcome in &outcomes {
             if !self.usage.add(&outcome.usage) {
                 self.budget.stop();
-                log::error!(target:"voltfill_core::jev","{}",json!({"event":"usage_totals_overflowed","lower_bound":true}));
+                log::error!(target:"vf_legacy","{}",json!({"event":"usage_totals_overflowed","lower_bound":true}));
             }
         }
 
