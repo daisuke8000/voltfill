@@ -3,10 +3,10 @@ use serde_json::{Value, json};
 #[test]
 fn server_logs_are_opt_in_and_disabled_errors_remain_available() {
     for level in [None, Some("off"), Some("info")] {
-        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_voltfill-server"));
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_voltfill"));
         command
             .env_clear()
-            .args(["--mock", "missing-fixture-for-logging-test.json"]);
+            .args(["serve", "--mock", "missing-fixture-for-logging-test.json"]);
         if let Some(level) = level {
             command.args(["--log-level", level]);
         }
@@ -37,9 +37,9 @@ fn server_logs_are_opt_in_and_disabled_errors_remain_available() {
 
 #[test]
 fn remote_alias_does_not_require_an_exclusive_organization_flag() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_voltfill-server"))
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_voltfill"))
         .env_clear()
-        .args(["--remote", "--allow-images"])
+        .args(["serve", "--remote", "--allow-images"])
         .output()
         .expect("Cargo-built server must launch");
     assert_eq!(output.status.code(), Some(2));

@@ -1,12 +1,12 @@
 //! Server command parsing and startup.
-use super::settings;
-use crate::{AppState, ServerConfig};
+use crate::settings;
+use vf_server::{AppState, ServerConfig};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use vf_legacy::jev::transport::ExecutionConfig;
 
-const HELP: &str = "voltfill serve --config voltfill.yaml (or voltfill.toml / voltfill.json)\nvoltfill serve --mock FIXTURE.json | --remote\nvoltfill-server remains supported.\n  [--listen 127.0.0.1:3000] [--config CONFIG.json]\n  [--allow-images] [--renderer pdfium|hayro] (no automatic fallback)\n  [--pdfium-lib ABSOLUTE_PATH or VOLTFILL_PDFIUM_LIB_PATH] (selects PDFium when renderer omitted)\n  [--pixels-per-point NUMBER] (default: 1.5)\n  [--log-level off|error|warn|info|debug] (default: off)\n  [--model ID] [--upload-timeout-ms 1..3600000] (default: 30000)\n  [--reuse-document] keeps the last PDF's text and page images in memory for reuse by an identical next request (default: off)\n  [--reuse-document-ttl-ms 1..3600000] drops that copy after this idle time (default: 60000)\n  [--resource-config FILE] lowers PDF/render resource ceilings.\nPrecedence: CLI > selected launch file > environment > defaults.\nVOLTFILL_LISTEN, VOLTFILL_UPLOAD_TIMEOUT_MS, VOLTFILL_REUSE_DOCUMENT_TTL_MS, VOLTFILL_MODEL, VOLTFILL_RENDERER,\nVOLTFILL_PIXELS_PER_POINT and VOLTFILL_LOG_LEVEL provide startup defaults.\nVOLTFILL_EXECUTION_CONFIG and VOLTFILL_RESOURCE_CONFIG select JSON files when\nno corresponding file/section was selected. VOLTFILL_CONFIG selects a launch\nfile for voltfill serve; standalone voltfill-server accepts execution JSON.\n\nPOST /v1/extract: multipart fields pdf, schema, optional options JSON.\noptions.model overrides the startup model (default jev-1.14.0); image strategies require a pinned version >= 1.14.0.\noptions.evaluation_profile optionally enables confidence filtering; omitted by default.\nGET /health: health check. Remote mode requires VOLTFILL_JEV_ENDPOINT (trusted HTTPS)\nand VOLTFILL_JEV_API_KEY or VOLTFILL_JEV_API_KEY_FILE.\nVOLTFILL_SERVER_API_KEY or VOLTFILL_SERVER_API_KEY_FILE enables Bearer authentication and is required\nfor non-loopback binding. Logs are JSONL; responses contain originals.\n";
+const HELP: &str = "voltfill serve --config voltfill.yaml (or voltfill.toml / voltfill.json)\nvoltfill serve --mock FIXTURE.json | --remote\n  [--listen 127.0.0.1:3000] [--config CONFIG.json]\n  [--allow-images] [--renderer pdfium|hayro] (no automatic fallback)\n  [--pdfium-lib ABSOLUTE_PATH or VOLTFILL_PDFIUM_LIB_PATH] (selects PDFium when renderer omitted)\n  [--pixels-per-point NUMBER] (default: 1.5)\n  [--log-level off|error|warn|info|debug] (default: off)\n  [--model ID] [--upload-timeout-ms 1..3600000] (default: 30000)\n  [--reuse-document] keeps the last PDF's text and page images in memory for reuse by an identical next request (default: off)\n  [--reuse-document-ttl-ms 1..3600000] drops that copy after this idle time (default: 60000)\n  [--resource-config FILE] lowers PDF/render resource ceilings.\nPrecedence: CLI > selected launch file > environment > defaults.\nVOLTFILL_LISTEN, VOLTFILL_UPLOAD_TIMEOUT_MS, VOLTFILL_REUSE_DOCUMENT_TTL_MS, VOLTFILL_MODEL, VOLTFILL_RENDERER,\nVOLTFILL_PIXELS_PER_POINT and VOLTFILL_LOG_LEVEL provide startup defaults.\nVOLTFILL_EXECUTION_CONFIG and VOLTFILL_RESOURCE_CONFIG select JSON files when\nno corresponding file/section was selected. VOLTFILL_CONFIG selects a launch\nfile for voltfill serve.\n\nPOST /v1/extract: multipart fields pdf, schema, optional options JSON.\noptions.model overrides the startup model (default jev-1.14.0); image strategies require a pinned version >= 1.14.0.\noptions.evaluation_profile optionally enables confidence filtering; omitted by default.\nGET /health: health check. Remote mode requires VOLTFILL_JEV_ENDPOINT (trusted HTTPS)\nand VOLTFILL_JEV_API_KEY or VOLTFILL_JEV_API_KEY_FILE.\nVOLTFILL_SERVER_API_KEY or VOLTFILL_SERVER_API_KEY_FILE enables Bearer authentication and is required\nfor non-loopback binding. Logs are JSONL; responses contain originals.\n";
 
 fn read(path: &str, limit: usize) -> Result<Vec<u8>, &'static str> {
     use std::io::Read;
@@ -167,7 +167,7 @@ fn run(
         _ => return Err("invalid_log_level"),
     };
     if level != log::LevelFilter::Off {
-        vf_legacy::logging::JsonLogger::new("voltfill-server", level, std::io::stdout())
+        crate::logging::JsonLogger::new("voltfill-server", level, std::io::stdout())
             .try_init()
             .map_err(|_| "logging_setup_failed")?;
     }
@@ -239,21 +239,21 @@ fn run(
     let result=runtime.block_on(async {
         let listener=tokio::net::TcpListener::bind(address).await.map_err(|_|"listen_failed")?;
         log::info!(target:"voltfill_server","{}",json!({"event":"server_started","address":listener.local_addr().ok().map(|a|a.to_string())}));
-        axum::serve(listener,crate::router(state.clone())).with_graceful_shutdown(async {let _=tokio::signal::ctrl_c().await;}).await.map_err(|_|"server_failed")
+        axum::serve(listener,vf_server::router(state.clone())).with_graceful_shutdown(async {let _=tokio::signal::ctrl_c().await;}).await.map_err(|_|"server_failed")
     });
     drop(state);
     result
 }
-/// Launch the same HTTP server used by `voltfill serve` and the compatibility binary.
+/// Launch the HTTP server for `voltfill serve`.
 /// Credentials are read only by the remote backend at runtime.
 #[must_use]
-pub fn entry(arguments: Vec<String>, execution: Option<ExecutionConfig>) -> u8 {
+pub(crate) fn entry(arguments: Vec<String>, execution: Option<ExecutionConfig>) -> u8 {
     entry_with_resources(arguments, execution, None)
 }
 
 /// Launch with resources already decoded from a selected launch file.
 #[must_use]
-pub fn entry_with_resources(
+pub(crate) fn entry_with_resources(
     arguments: Vec<String>,
     execution: Option<ExecutionConfig>,
     resources: Option<vf_legacy::resources::ResourceLimits>,
@@ -278,7 +278,7 @@ mod tests {
     use super::*;
 
     fn fixture() -> ServerConfig {
-        ServerConfig::fixture(include_bytes!("../../../../examples/text-mock.json").to_vec())
+        ServerConfig::fixture(include_bytes!("../../../examples/text-mock.json").to_vec())
             .expect("the checked-in mock must initialize a fixture server config")
     }
     fn values(entries: &[(&str, &str)]) -> BTreeMap<String, String> {

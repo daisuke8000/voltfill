@@ -12,7 +12,7 @@ use vf_legacy::evaluate::{Evaluator, FixtureEvaluator, RemoteEvaluator};
 use vf_legacy::jev::transport::{ExecutionConfig, Secret};
 use vf_legacy::model::{JevResponse, Strategy};
 use vf_legacy::{pdf, schema};
-use vf_server::cli::settings;
+use crate::settings;
 
 const HELP: &str = "VOLTFILL — PDF extraction\n\nvoltfill run --config voltfill.yaml (or voltfill.toml / voltfill.json)\nvoltfill serve --config voltfill.yaml\nvoltfill serve --help\nvoltfill run INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --mock ANSWERS.json\nvoltfill inspect INPUT.pdf\nvoltfill fill INPUT.pdf FORM.json (offline: match form labels to PDF text)\nvoltfill validate SCHEMA.json\n\n--strategy text|vision|hybrid (default: text)\n--model ID (default: jev-1.14.0); images require a pinned version >= 1.14.0.\n--renderer pdfium|hayro selects an enabled renderer; no automatic fallback.\n--pdfium-lib PATH or VOLTFILL_PDFIUM_LIB_PATH selects PDFium when --renderer is omitted\n--pixels-per-point NUMBER sets render scale (default: 1.5).\n--config FILE (or -c FILE, default VOLTFILL_CONFIG) loads YAML/TOML launch settings or legacy JSON execution limits.\nPrecedence: CLI > selected file > environment > defaults.\n--resource-config FILE (or VOLTFILL_RESOURCE_CONFIG) lowers PDF/render ceilings.\nVOLTFILL_EXECUTION_CONFIG selects execution JSON when no execution section/file is supplied.\nVOLTFILL_MODEL, VOLTFILL_STRATEGY, VOLTFILL_RENDERER, VOLTFILL_PIXELS_PER_POINT\nand VOLTFILL_LOG_LEVEL provide startup defaults.\n--max-concurrency N (default: 2, at least 1); rate limits may reduce concurrency.\n--max-attempts 1|2|3 includes the first attempt (default: 3).\n--log-level off|error|warn|info|debug (default: off) enables JSON Lines logs.\nLogs use stderr with JSON on stdout; with --output FILE (or -o FILE),\nlogs use stdout and results go to the file. Debug logs cover VOLTFILL only.\n--dry-run inspects the input without sending requests.\n--evaluation-profile synthetic enables confidence filtering for local synthetic examples.\nBy default, resolved values are returned without a confidence cutoff.\n\nRemote mode requires VOLTFILL_JEV_ENDPOINT (trusted HTTPS, no URL fallback) and\nVOLTFILL_JEV_API_KEY or VOLTFILL_JEV_API_KEY_FILE (one explicit credential file). Vision/Hybrid select image input;\nno additional image permission flag is required. Reports retain original\nresponse bodies regardless of log level and remain evaluation-only.\nLong-form --pdf, --schema, --allow-remote and --execution-config are also supported.\n";
 
@@ -413,13 +413,13 @@ fn execution_config(args: &Args) -> Result<ExecutionConfig, (u8, &'static str)> 
         .map_err(|_| (2, "invalid_execution_config"))?;
     Ok(config)
 }
-fn logger(level: log::LevelFilter, output_file: bool) -> vf_legacy::logging::JsonLogger {
+fn logger(level: log::LevelFilter, output_file: bool) -> crate::logging::JsonLogger {
     let writer: Box<dyn Write + Send> = if output_file {
         Box::new(io::stdout())
     } else {
         Box::new(io::stderr())
     };
-    vf_legacy::logging::JsonLogger::new("voltfill-cli", level, writer)
+    crate::logging::JsonLogger::new("voltfill-cli", level, writer)
 }
 fn run_with<E: Evaluator>(
     arguments: impl IntoIterator<Item = String>,
@@ -588,10 +588,10 @@ pub(crate) fn main() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.first().is_some_and(|s| s == "serve") {
         let code = if arguments.iter().any(|s| s == "--help" || s == "-h") {
-            vf_server::cli::entry(vec!["--help".into()], None)
+            crate::serve::entry(vec!["--help".into()], None)
         } else {
             match config::expand(arguments) {
-                Ok(invocation) => vf_server::cli::entry_with_resources(
+                Ok(invocation) => crate::serve::entry_with_resources(
                     invocation.arguments.into_iter().skip(1).collect(),
                     invocation.execution,
                     invocation.resources,
@@ -727,7 +727,7 @@ mod tests {
             owner: std::thread::current().id(),
         };
         let built =
-            vf_legacy::logging::JsonLogger::new("voltfill-cli", log::LevelFilter::Debug, writer);
+            crate::logging::JsonLogger::new("voltfill-cli", log::LevelFilter::Debug, writer);
         log::set_boxed_logger(Box::new(built))
             .expect("this test binary must install the log capture once");
         let request=vf_legacy::jev::parse_request(br#"{"model":"jev-1.14.0","state":"private_source_canary","questions":{"q":{"type":"choice","instructions":"pick","criteria":{"a":"ALPHA42","b":"other"}}}}"#,vf_legacy::jev::Limits::default()).expect("the synthetic choice request satisfies the wire contract");

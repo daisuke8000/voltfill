@@ -6,11 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-[[bin]]
-# Kept until `voltfill serve` becomes the only entry point.
-name = "voltfill-server"
-path = "src/main.rs"
-
 [dependencies]
 vf-legacy.workspace = true
 axum.workspace = true

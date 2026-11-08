@@ -5,7 +5,6 @@ pub mod engine;
 pub mod evaluate;
 pub use vf_source::geometry;
 pub mod jev;
-pub mod logging;
 pub mod model;
 pub mod pdf;
 #[cfg(any(feature = "pdfium", feature = "hayro"))]

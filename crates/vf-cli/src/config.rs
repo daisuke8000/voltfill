@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use vf_legacy::jev::transport::ExecutionConfig;
 use vf_legacy::resources::ResourceLimits;
-use vf_server::cli::settings;
+use crate::settings;
 
 pub struct Invocation {
     pub arguments: Vec<String>,
