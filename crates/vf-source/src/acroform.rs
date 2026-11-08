@@ -39,7 +39,11 @@
 //! `/V`. Text field values stored as streams are not decoded. A password text
 //! field must not store its value; any `/V` or `/DV` found on one is withheld.
 //! An entry that cannot be decoded exactly yields `None` plus a
-//! [`FieldIssue`], never a partial or repaired string.
+//! [`FieldIssue`], never a partial or repaired string. A text or choice `/V`
+//! read as PDFDocEncoding (no byte order mark) with any byte at or above
+//! `0x80` is still reported, with [`FieldIssue::PdfDocHighBytes`]: such bytes
+//! may be text in another encoding (for example Shift_JIS) that
+//! PDFDocEncoding misreads.
 //!
 //! # Text-string decoding
 //!
@@ -289,6 +293,11 @@ pub enum FieldIssue {
     InvalidMaxLen,
     /// A partial name contains `.`, so the qualified name is ambiguous.
     PeriodInPartialName,
+    /// The text or choice `/V` is a PDFDocEncoding string (no byte order
+    /// mark) with a byte at or above `0x80`. The decoded value is still
+    /// reported, but the bytes may be text in another encoding (for example
+    /// Shift_JIS) that PDFDocEncoding misreads.
+    PdfDocHighBytes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -782,6 +791,11 @@ impl<'a> Walker<'a> {
                     None
                 }
             };
+            if matches!(value, Some(FieldValue::Text(_) | FieldValue::Choice(_)))
+                && self.pdf_doc_high_bytes(scope.v)
+            {
+                issues.push(FieldIssue::PdfDocHighBytes);
+            }
             let default_value = match self.value(kind, scope.dv, opt)? {
                 Outcome::Absent => None,
                 Outcome::Value(value) => Some(value),
@@ -1021,6 +1035,25 @@ impl<'a> Walker<'a> {
                 issues.push(WidgetIssue::AmbiguousOnState);
                 Ok(None)
             }
+        }
+    }
+
+    /// Whether a decoded text or choice `/V` holds a PDFDocEncoding string
+    /// with a byte at or above `0x80` ([`FieldIssue::PdfDocHighBytes`]).
+    fn pdf_doc_high_bytes(&self, raw: Option<&'a Object>) -> bool {
+        let high = |object: &Object| {
+            matches!(
+                resolve(self.doc, object),
+                Some(Object::String(bytes, _))
+                    if !bytes.starts_with(b"\xFE\xFF")
+                        && !bytes.starts_with(b"\xEF\xBB\xBF")
+                        && bytes.iter().any(|byte| *byte >= 0x80)
+            )
+        };
+        match raw.and_then(|raw| resolve(self.doc, raw)) {
+            Some(Object::Array(items)) => items.iter().any(high),
+            Some(value) => high(value),
+            None => false,
         }
     }
 

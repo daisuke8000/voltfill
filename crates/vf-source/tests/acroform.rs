@@ -233,7 +233,10 @@ fn text_values_decode_pdf_doc_encoding_and_utf8_and_reject_inexact_bytes() {
     let form = extract(&pdf.finish(Some(form(&fields))));
 
     assert_eq!(field(&form, "pdfdoc").value, text("Total • ‰ café"));
+    // High PDFDocEncoding bytes may be another encoding (Shift_JIS) misread.
+    assert_eq!(field(&form, "pdfdoc").issues, [FieldIssue::PdfDocHighBytes]);
     assert_eq!(field(&form, "utf8").value, text("値"));
+    assert!(field(&form, "utf8").issues.is_empty());
     for (name, issue) in [
         ("undefined_byte", ValueIssue::Undecodable),
         ("odd_utf16", ValueIssue::Undecodable),

@@ -11,4 +11,6 @@ mod source;
 pub use source::{Orientation, PageDiagnostic, Quality, SourceFragment};
 
 mod inspection;
-pub use inspection::{DocumentSnapshot, InspectionTimings, PdfError, PdfLimits, inspect};
+pub use inspection::{
+    DocumentSnapshot, InspectionTimings, PdfError, PdfLimits, inspect, inspect_with_acroform,
+};

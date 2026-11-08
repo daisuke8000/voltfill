@@ -541,6 +541,7 @@ impl<'a> Tables<'a> {
             text,
             bbox: span.bbox,
             precision: span.precision,
+            acroform_field: None,
         }))
     }
 }
