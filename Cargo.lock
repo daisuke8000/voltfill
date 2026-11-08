@@ -2452,28 +2452,12 @@ dependencies = [
  "serde-saphyr",
  "serde_json",
  "toml",
- "voltfill-core",
- "voltfill-server",
+ "voltfill-domain",
+ "voltfill-http",
 ]
 
 [[package]]
-name = "voltfill-core"
-version = "0.1.0"
-dependencies = [
- "log",
- "lopdf 0.46.0",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
- "unicode-normalization",
- "voltfill-jev",
- "voltfill-pdf",
- "voltfill-render",
-]
-
-[[package]]
-name = "voltfill-jev"
+name = "voltfill-client"
 version = "0.1.0"
 dependencies = [
  "bytes",
@@ -2487,14 +2471,32 @@ dependencies = [
 ]
 
 [[package]]
-name = "voltfill-pdf"
+name = "voltfill-domain"
 version = "0.1.0"
 dependencies = [
+ "log",
  "lopdf 0.46.0",
- "pdf-inspector",
  "serde",
+ "serde_json",
  "sha2",
  "thiserror",
+ "unicode-normalization",
+ "voltfill-client",
+ "voltfill-render",
+ "voltfill-source",
+]
+
+[[package]]
+name = "voltfill-http"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "log",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "voltfill-domain",
 ]
 
 [[package]]
@@ -2505,20 +2507,18 @@ dependencies = [
  "hayro",
  "png",
  "thiserror",
- "voltfill-pdf",
+ "voltfill-source",
 ]
 
 [[package]]
-name = "voltfill-server"
+name = "voltfill-source"
 version = "0.1.0"
 dependencies = [
- "axum",
- "log",
+ "lopdf 0.46.0",
+ "pdf-inspector",
  "serde",
- "serde_json",
- "tokio",
- "tower",
- "voltfill-core",
+ "sha2",
+ "thiserror",
 ]
 
 [[package]]

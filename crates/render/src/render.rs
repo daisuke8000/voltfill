@@ -6,10 +6,10 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use thiserror::Error;
-use voltfill_pdf::geometry::{
+use voltfill_source::geometry::{
     AffineTransform, ImageTransform, Padding, PageGeometry, Point, Rect, Rotation,
 };
-use voltfill_pdf::metadata;
+use voltfill_source::metadata;
 
 /// Explicit renderer choice; PDFium requires a caller-supplied absolute library path.
 #[derive(Debug, Clone)]

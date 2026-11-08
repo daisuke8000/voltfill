@@ -7,7 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-voltfill-pdf = { path = "../pdf" }
+voltfill-source = { path = "../source" }
 thiserror.workspace = true
 firecrawl-pdfium = { version = "=0.1.0", optional = true }
 png = { version = "0.18", optional = true }

@@ -96,10 +96,10 @@ footer{border-top:1px solid var(--rule);padding:20px 0;font-size:12px;color:var(
     <h2>処理の流れ</h2>
     <p class="sub">入力はPDFとフォーム項目の一覧（id・ラベル・型・別名）。出力は項目ごとの値・根拠・状態です。原則は「誤って埋めるより空欄」です。</p>
     <div class="layers">
-      <div class="layer"><div class="tag">L1 読む<small>voltfill-pdf</small></div><p>テキスト片と座標、ページごとのテキスト有無と品質を取得します。フォント非埋め込みなどで文字化けした片は <b>suspect</b> として除外します。</p><span class="chip done">実装済み</span></div>
-      <div class="layer core"><div class="tag">L2 構造化<small>voltfill-pdf</small></div><p>片を<b>行</b>にまとめ、<b>ラベルと値の候補</b>を作ります（1つの片の中の「ラベル：値」、同じ行の右、真下、同じ列の複数行）。値は既存の片のバイト範囲で、片の一部の座標は推定値として明示します。表・AcroFormは対象外です。</p><span class="chip wip">実装中</span></div>
-      <div class="layer"><div class="tag">L3 当てる<small>voltfill-core</small></div><p>フォームのラベル・別名・型で候補を採点し、1つに決まれば確定します。決めきれない項目だけ、Jevに候補から選ばせます（ページ画像を送るかは評価で決定）。ラベル・型による照合は <span class="mono">voltfill fill</span> で利用でき、Jevによる補助は未実装です。</p><span class="chip wip">実装中</span></div>
-      <div class="layer"><div class="tag">L4 返す<small>voltfill-core</small></div><p>原文・正規化値（日付・金額など）・根拠（ページ・座標・精度）・状態（filled / ambiguous / not_found / no_text / invalid）を返します。Evidenceと受信本文の保存は既存の仕組みを引き継ぎます。</p><span class="chip wip">実装中</span></div>
+      <div class="layer"><div class="tag">L1 読む<small>voltfill-source</small></div><p>テキスト片と座標、ページごとのテキスト有無と品質を取得します。フォント非埋め込みなどで文字化けした片は <b>suspect</b> として除外します。</p><span class="chip done">実装済み</span></div>
+      <div class="layer core"><div class="tag">L2 構造化<small>voltfill-source</small></div><p>片を<b>行</b>にまとめ、<b>ラベルと値の候補</b>を作ります（1つの片の中の「ラベル：値」、同じ行の右、真下、同じ列の複数行）。値は既存の片のバイト範囲で、片の一部の座標は推定値として明示します。表・AcroFormは対象外です。</p><span class="chip wip">実装中</span></div>
+      <div class="layer"><div class="tag">L3 当てる<small>voltfill-domain</small></div><p>フォームのラベル・別名・型で候補を採点し、1つに決まれば確定します。決めきれない項目だけ、Jevに候補から選ばせます（ページ画像を送るかは評価で決定）。ラベル・型による照合は <span class="mono">voltfill fill</span> で利用でき、Jevによる補助は未実装です。</p><span class="chip wip">実装中</span></div>
+      <div class="layer"><div class="tag">L4 返す<small>voltfill-domain</small></div><p>原文・正規化値（日付・金額など）・根拠（ページ・座標・精度）・状態（filled / ambiguous / not_found / no_text / invalid）を返します。Evidenceと受信本文の保存は既存の仕組みを引き継ぎます。</p><span class="chip wip">実装中</span></div>
     </div>
   </section>
 
@@ -132,8 +132,8 @@ footer{border-top:1px solid var(--rule);padding:20px 0;font-size:12px;color:var(
       <g class="node external"><rect x="20" y="70" width="180" height="80" rx="8"/><text class="node-tag" x="34" y="92">CALLER</text><text class="node-title" x="34" y="116">CLI利用者</text><text class="node-sub" x="34" y="136">開発・一括処理</text></g>
       <g class="node planned"><rect x="20" y="250" width="180" height="80" rx="8"/><text class="node-tag" x="34" y="272">CALLER · 計画</text><text class="node-title" x="34" y="296">Webアプリ</text><text class="node-sub" x="34" y="316">バックエンドから呼出</text></g>
       <g class="node"><rect x="260" y="60" width="220" height="110" rx="8"/><text class="node-tag" x="276" y="82">CONTAINER · Rust CLI</text><text class="node-title" x="276" y="106">voltfill-cli</text><text class="node-sub" x="276" y="128">inspect / validate / run / extract</text><text class="node-sub" x="276" y="148">serve（サーバー起動）· fill（Jevなし）</text></g>
-      <g class="node"><rect x="260" y="240" width="220" height="110" rx="8"/><text class="node-tag" x="276" y="262">CONTAINER · Axum HTTP</text><text class="node-title" x="276" y="286">voltfill-server</text><text class="node-sub" x="276" y="308">POST /v1/extract · GET /health</text><text class="node-sub" x="276" y="328">/v1/fill は計画 · 同時1件</text></g>
-      <g class="node accent"><rect x="530" y="150" width="200" height="110" rx="8"/><text class="node-tag" x="546" y="172">LIBRARY</text><text class="node-title" x="546" y="196">voltfill-core</text><text class="node-sub" x="546" y="218">抽出・Evidence・結果</text><text class="node-sub" x="546" y="238">上限・予算・本文保存</text></g>
+      <g class="node"><rect x="260" y="240" width="220" height="110" rx="8"/><text class="node-tag" x="276" y="262">CONTAINER · Axum HTTP</text><text class="node-title" x="276" y="286">voltfill-http</text><text class="node-sub" x="276" y="308">POST /v1/extract · GET /health</text><text class="node-sub" x="276" y="328">/v1/fill は計画 · 同時1件</text></g>
+      <g class="node accent"><rect x="530" y="150" width="200" height="110" rx="8"/><text class="node-tag" x="546" y="172">LIBRARY</text><text class="node-title" x="546" y="196">voltfill-domain</text><text class="node-sub" x="546" y="218">抽出・Evidence・結果</text><text class="node-sub" x="546" y="238">上限・予算・本文保存</text></g>
       <g class="node external"><rect x="790" y="80" width="190" height="80" rx="8"/><text class="node-tag" x="804" y="102">EXTERNAL</text><text class="node-title" x="804" y="126">Jev API</text><text class="node-sub" x="804" y="146">HTTPS（信頼済み）</text></g>
       <g class="node optional"><rect x="790" y="260" width="190" height="80" rx="8"/><text class="node-tag" x="804" y="282">OPTIONAL · 利用者指定</text><text class="node-title" x="804" y="306">PDFium</text><text class="node-sub" x="804" y="326">ネイティブ描画（任意）</text></g>
       <path class="edge" d="M200,110 H260" marker-end="url(#arr2)"/>
@@ -149,20 +149,20 @@ footer{border-top:1px solid var(--rule);padding:20px 0;font-size:12px;color:var(
   <section id="components">
     <div class="eyebrow">04 · C4 Level 3</div>
     <h2>Components（crate）</h2>
-    <p class="sub">基盤crateは抽出スキーマやEvidenceに依存せず、coreに依存しません。PDF処理とJev通信は互いに独立しています。</p>
+    <p class="sub">基盤crateは抽出スキーマやEvidenceに依存せず、voltfill-domainに依存しません。PDF処理とJev通信は互いに独立しています。</p>
     <div class="canvas"><svg viewBox="0 0 1000 470" role="img" aria-label="Component diagram">
       <defs><marker id="arr3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#4f5d75"/></marker></defs>
       <g class="node"><rect x="40" y="30" width="200" height="70" rx="8"/><text class="node-tag" x="56" y="52">FRONT END</text><text class="node-title" x="56" y="76">voltfill-cli</text></g>
-      <g class="node"><rect x="300" y="30" width="200" height="70" rx="8"/><text class="node-tag" x="316" y="52">FRONT END</text><text class="node-title" x="316" y="76">voltfill-server</text></g>
-      <rect class="boundary" x="40" y="140" width="920" height="130" rx="10"/><text class="zone-label" x="56" y="160">voltfill-core</text>
+      <g class="node"><rect x="300" y="30" width="200" height="70" rx="8"/><text class="node-tag" x="316" y="52">FRONT END</text><text class="node-title" x="316" y="76">voltfill-http</text></g>
+      <rect class="boundary" x="40" y="140" width="920" height="130" rx="10"/><text class="zone-label" x="56" y="160">voltfill-domain</text>
       <g class="node"><rect x="60" y="172" width="160" height="80" rx="8"/><text class="node-tag" x="74" y="192">実装済み</text><text class="node-title" x="74" y="214">schema</text><text class="node-sub" x="74" y="234">旧スキーマ定義</text></g>
       <g class="node"><rect x="236" y="172" width="160" height="80" rx="8"/><text class="node-tag" x="250" y="192">実装済み</text><text class="node-title" x="250" y="214">engine / evaluate</text><text class="node-sub" x="250" y="234">Text/Vision/Hybrid</text></g>
       <g class="node"><rect x="412" y="172" width="160" height="80" rx="8"/><text class="node-tag" x="426" y="192">実装済み</text><text class="node-title" x="426" y="214">candidates</text><text class="node-sub" x="426" y="234">候補・in_box照合</text></g>
       <g class="node"><rect x="588" y="172" width="160" height="80" rx="8"/><text class="node-tag" x="602" y="192">実装済み</text><text class="node-title" x="602" y="214">model / logging</text><text class="node-sub" x="602" y="234">Evidence・JSON Lines</text></g>
       <g class="node wip"><rect x="764" y="172" width="180" height="80" rx="8"/><text class="node-tag" x="778" y="192">実装中</text><text class="node-title" x="778" y="214">fill（L3・L4）</text><text class="node-sub" x="778" y="234">ラベル照合・正規化</text></g>
-      <g class="node wip"><rect x="40" y="330" width="260" height="110" rx="8"/><text class="node-tag" x="56" y="352">FOUNDATION</text><text class="node-title" x="56" y="376">voltfill-pdf</text><text class="node-sub" x="56" y="398">inspect · geometry · metadata</text><text class="node-sub" x="56" y="418">layout（L2）は実装中</text></g>
+      <g class="node wip"><rect x="40" y="330" width="260" height="110" rx="8"/><text class="node-tag" x="56" y="352">FOUNDATION</text><text class="node-title" x="56" y="376">voltfill-source</text><text class="node-sub" x="56" y="398">inspect · geometry · metadata</text><text class="node-sub" x="56" y="418">layout（L2）は実装中</text></g>
       <g class="node optional"><rect x="360" y="330" width="260" height="110" rx="8"/><text class="node-tag" x="376" y="352">FOUNDATION · 任意機能</text><text class="node-title" x="376" y="376">voltfill-render</text><text class="node-sub" x="376" y="398">hayro / pdfium（既定オフ）</text><text class="node-sub" x="376" y="418">ページ画像と座標変換</text></g>
-      <g class="node"><rect x="680" y="330" width="280" height="110" rx="8"/><text class="node-tag" x="696" y="352">FOUNDATION</text><text class="node-title" x="696" y="376">voltfill-jev</text><text class="node-sub" x="696" y="398">protocol · transport · 上限/予算</text><text class="node-sub" x="696" y="418">全試行の受信本文を記録</text></g>
+      <g class="node"><rect x="680" y="330" width="280" height="110" rx="8"/><text class="node-tag" x="696" y="352">FOUNDATION</text><text class="node-title" x="696" y="376">voltfill-client</text><text class="node-sub" x="696" y="398">protocol · transport · 上限/予算</text><text class="node-sub" x="696" y="418">全試行の受信本文を記録</text></g>
       <path class="edge" d="M240,65 H300" marker-end="url(#arr3)"/><text class="edge-text" x="246" y="58">settings</text>
       <path class="edge" d="M140,100 V140" marker-end="url(#arr3)"/>
       <path class="edge" d="M400,100 V140" marker-end="url(#arr3)"/>
@@ -172,7 +172,7 @@ footer{border-top:1px solid var(--rule);padding:20px 0;font-size:12px;color:var(
       <path class="edge" d="M360,385 H300" marker-end="url(#arr3)"/>
     </svg></div>
     <div class="notes">
-      <div class="note"><h3>依存の約束</h3><ul><li>voltfill-pdf・voltfill-render は抽出スキーマ・Evidenceを必要としない</li><li>voltfill-jev は PDF crate と core に依存しない</li><li>基盤crateは core に依存しない</li></ul></div>
+      <div class="note"><h3>依存の約束</h3><ul><li>voltfill-source・voltfill-render は抽出スキーマ・Evidenceを必要としない</li><li>voltfill-client は PDF crate と voltfill-domain に依存しない</li><li>基盤crateは voltfill-domain に依存しない</li></ul></div>
       <div class="note"><h3>外部crate</h3><p>PDF解析は <span class="mono">pdf-inspector</span> と <span class="mono">lopdf</span>、HTTPは <span class="mono">reqwest</span>（rustls）、サーバーは <span class="mono">axum</span> / <span class="mono">tokio</span>。描画の <span class="mono">hayro</span>・PDFium は既定オフです。</p></div>
       <div class="note"><h3>移行の方針</h3><p>新しいL2〜L4は旧来の抽出と並べて作り、同じPDFでの比較（誤入力率→空欄率→トークン→時間の順）で方式を決めてから旧来部分を整理します。</p></div>
     </div>
