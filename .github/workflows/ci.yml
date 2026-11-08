@@ -190,7 +190,7 @@ jobs:
         run: '"$RUNNER_TEMP/security-bin/gitleaks" git --redact=100 --no-banner --log-opts="--all" .'
   deploy-pages:
     name: Deploy architecture to GitHub Pages
-    needs: [rust, workflows, audit, secrets]
+    needs: [rust, workflows, audit, osv, deny, secrets]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     concurrency:
       group: pages
