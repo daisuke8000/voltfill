@@ -84,7 +84,7 @@ voltfill fill input.pdf examples/forms/invoice.json -o result.json
 | `invalid` | 最上位の候補の値がどれも型の書式に合わない。`raw` と `candidates` を返す |
 | `limit_exceeded` | 処理量の上限を超えたため評価していない（ライブラリの `fill` のみ。CLIはエラーで終了） |
 
-`evidence` はページ・原文片のIDとバイト範囲・座標（PDFポイント、左上原点）です。1つの片を「ラベル：値」で分けた場合の座標は文字幅からの推定で、`precision: "estimated"` と示します。`candidates` は得点順（空白だけで分けた候補はほかの候補の後）に最大5件で、それぞれ文書のラベル・原文・正規化値・得点・配置（`inline` / `right` / `below` / `column`、AcroFormの値は `widget`）・`hold`・`holds`・`evidence` を持ちます。
+`evidence` はページ・原文片のIDとバイト範囲・座標（PDFポイント、左上原点）です。1つの片を「ラベル：値」で分けた場合の座標は文字幅からの推定で、`precision: "estimated"` と示します。`candidates` は得点順（空白だけで分けた候補はほかの候補の後）に最大5件（[AcroForm](#fill-acroform)の候補はその前に加わります）で、それぞれ文書のラベル・原文・正規化値・得点・配置（`inline` / `right` / `below` / `column`、AcroFormの値は `widget`）・`hold`・`holds`・`evidence` を持ちます。
 
 | 型 | 受け付ける書式（全角は半角に正規化） |
 |---|---|
