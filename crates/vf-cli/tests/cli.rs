@@ -98,7 +98,7 @@ fn retry_and_logging_help_and_validation_precede_input_or_credentials() {
 }
 
 #[test]
-fn fill_validates_the_form_and_rejects_remote_flags() {
+fn fill_validates_the_form_and_its_remote_flags() {
     let dir = std::env::temp_dir().join(format!("voltfill-fill-cli-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir must be writable");
     let bad = dir.join("bad-form.json");
@@ -110,8 +110,30 @@ fn fill_validates_the_form_and_rejects_remote_flags() {
     let out = cli(&["fill", "missing.pdf", "missing-form.json"]);
     assert_eq!(out.status.code(), Some(2));
     assert_error_response(&out.stderr, "input_read_failed");
+    // `--remote` is accepted for fill; the form is still validated before credentials.
     let out = cli(&["fill", "missing.pdf", bad, "--remote"]);
     assert_eq!(out.status.code(), Some(2));
-    assert_error_response(&out.stderr, "invalid_arguments");
+    assert_error_response(&out.stderr, "invalid_form");
+    for args in [
+        &["fill", "missing.pdf", bad, "--remote", "--dry-run"][..],
+        &["fill", "missing.pdf", bad, "--remote", "--mock", bad],
+        &[
+            "fill",
+            "missing.pdf",
+            bad,
+            "--remote",
+            "--max-concurrency",
+            "2",
+        ],
+        &["fill", "missing.pdf", bad, "--model", "jev-1.14.0"],
+        &["fill", "missing.pdf", bad, "--max-attempts", "1"],
+        &["fill", "missing.pdf", bad, "--execution-config", bad],
+        &["inspect", "missing.pdf", "--remote"],
+        &["validate", bad, "--remote"],
+    ] {
+        let out = cli(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert_error_response(&out.stderr, "invalid_arguments");
+    }
     std::fs::remove_dir_all(&dir).ok();
 }
