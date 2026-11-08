@@ -1,0 +1,35 @@
+{
+  "description": "値引き（△100）と返品（−1、−¥300）の負の金額・数量の行を明細行として読み、合計の行で閉じる",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "品名"},
+    {"x": 300, "y": 100, "text": "数量"},
+    {"x": 380, "y": 100, "text": "単価"},
+    {"right": 520, "y": 100, "text": "金額"},
+    {"x": 60, "y": 118, "text": "りんご"},
+    {"x": 300, "y": 118, "text": "3"},
+    {"x": 380, "y": 118, "text": "100"},
+    {"right": 520, "y": 118, "text": "¥300"},
+    {"x": 60, "y": 136, "text": "値引き"},
+    {"right": 520, "y": 136, "text": "△100"},
+    {"x": 60, "y": 154, "text": "返品"},
+    {"x": 300, "y": 154, "text": "−1"},
+    {"right": 520, "y": 154, "text": "−¥300"},
+    {"x": 380, "y": 172, "text": "合計"},
+    {"right": 520, "y": 172, "text": "−¥100"}
+  ],
+  "form": {"fields": [
+    {"id": "items", "label": "明細", "type": "table", "columns": [
+      {"id": "name", "label": "品名"},
+      {"id": "qty", "label": "数量", "type": "number"},
+      {"id": "amount", "label": "金額", "type": "amount"}
+    ]}
+  ]},
+  "expect": {
+    "items": {"rows": [
+      {"name": {"raw": "りんご"}, "qty": {"raw": "3", "value": 3}, "amount": {"raw": "¥300", "value": 300}},
+      {"name": {"raw": "値引き"}, "qty": null, "amount": {"raw": "△100", "value": -100}},
+      {"name": {"raw": "返品"}, "qty": {"raw": "−1", "value": -1}, "amount": {"raw": "−¥300", "value": -300}}
+    ]}
+  }
+}

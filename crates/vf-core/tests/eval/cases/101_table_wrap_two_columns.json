@@ -1,0 +1,31 @@
+{
+  "description": "品名と摘要の2列が同時に折り返し、続きの行（特選品 / のし付き）が行の間隔より詰まって続く。行の間隔の3/4未満の行は折り返しの続きとみなし表を確定しない（irregular_table）",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "品名"},
+    {"x": 220, "y": 100, "text": "摘要"},
+    {"x": 380, "y": 100, "text": "数量"},
+    {"right": 520, "y": 100, "text": "金額"},
+    {"x": 60, "y": 118, "text": "りんご 青森産"},
+    {"x": 220, "y": 118, "text": "贈答用"},
+    {"x": 380, "y": 118, "text": "3"},
+    {"right": 520, "y": 118, "text": "¥300"},
+    {"x": 60, "y": 130, "text": "特選品"},
+    {"x": 220, "y": 130, "text": "のし付き"},
+    {"x": 60, "y": 148, "text": "みかん"},
+    {"x": 220, "y": 148, "text": "家庭用"},
+    {"x": 380, "y": 148, "text": "2"},
+    {"right": 520, "y": 148, "text": "¥500"}
+  ],
+  "form": {"fields": [
+    {"id": "items", "label": "明細", "type": "table", "columns": [
+      {"id": "name", "label": "品名"},
+      {"id": "note", "label": "摘要"},
+      {"id": "qty", "label": "数量", "type": "number"},
+      {"id": "amount", "label": "金額", "type": "amount"}
+    ]}
+  ]},
+  "expect": {
+    "items": {"abstain": "ambiguous", "hold": "irregular_table"}
+  }
+}

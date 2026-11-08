@@ -1,0 +1,31 @@
+{
+  "description": "明細表の2行目の数量が空欄。空欄のセルは推測で埋めず null として返し、ほかのセルは確定する",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "品名"},
+    {"x": 300, "y": 100, "text": "数量"},
+    {"x": 440, "y": 100, "text": "金額"},
+    {"x": 60, "y": 118, "text": "りんご"},
+    {"x": 300, "y": 118, "text": "3"},
+    {"x": 440, "y": 118, "text": "¥300"},
+    {"x": 60, "y": 136, "text": "送料"},
+    {"x": 440, "y": 136, "text": "¥500"},
+    {"x": 60, "y": 154, "text": "みかん"},
+    {"x": 300, "y": 154, "text": "2個"},
+    {"x": 440, "y": 154, "text": "¥400"}
+  ],
+  "form": {"fields": [
+    {"id": "items", "label": "明細", "type": "table", "columns": [
+      {"id": "name", "label": "品名"},
+      {"id": "qty", "label": "数量", "type": "number"},
+      {"id": "amount", "label": "金額", "type": "amount"}
+    ]}
+  ]},
+  "expect": {
+    "items": {"rows": [
+      {"name": {"raw": "りんご"}, "qty": {"raw": "3", "value": 3}, "amount": {"raw": "¥300", "value": 300}},
+      {"name": {"raw": "送料"}, "qty": null, "amount": {"raw": "¥500", "value": 500}},
+      {"name": {"raw": "みかん"}, "qty": {"raw": "2個", "value": 2}, "amount": {"raw": "¥400", "value": 400}}
+    ]}
+  }
+}

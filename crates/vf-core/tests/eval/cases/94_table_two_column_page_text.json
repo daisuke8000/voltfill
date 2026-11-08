@@ -1,0 +1,29 @@
+{
+  "description": "段組みのページで、右段の本文の行（お取引条件について、）が明細行の間に入る。列にそろわない行の下に明細行があるため表を確定しない（irregular_table）",
+  "support": "supported",
+  "runs": [
+    {"x": 40, "y": 100, "text": "品名"},
+    {"x": 150, "y": 100, "text": "数量"},
+    {"right": 260, "y": 100, "text": "金額"},
+    {"x": 40, "y": 118, "text": "りんご"},
+    {"x": 150, "y": 118, "text": "3"},
+    {"right": 260, "y": 118, "text": "¥300"},
+    {"x": 330, "y": 127, "text": "お取引条件について、"},
+    {"x": 40, "y": 136, "text": "みかん"},
+    {"x": 150, "y": 136, "text": "2"},
+    {"right": 260, "y": 136, "text": "¥500"},
+    {"x": 40, "y": 154, "text": "ぶどう"},
+    {"x": 150, "y": 154, "text": "1"},
+    {"right": 260, "y": 154, "text": "¥900"}
+  ],
+  "form": {"fields": [
+    {"id": "items", "label": "明細", "type": "table", "columns": [
+      {"id": "name", "label": "品名"},
+      {"id": "qty", "label": "数量", "type": "number"},
+      {"id": "amount", "label": "金額", "type": "amount"}
+    ]}
+  ]},
+  "expect": {
+    "items": {"abstain": "ambiguous", "hold": "irregular_table"}
+  }
+}

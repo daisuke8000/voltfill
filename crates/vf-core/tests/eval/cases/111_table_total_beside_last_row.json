@@ -1,0 +1,30 @@
+{
+  "description": "最後の明細行（ぶどう 1 ¥900）と同じ行の、列の外の右側に合計と金額がある。合計系のラベルより左に列にそろった片が2つ以上あるため明細行かもしれず、合計の行として表を閉じない（2行だけを確定しない）",
+  "support": "supported",
+  "runs": [
+    {"x": 40, "y": 100, "text": "品名"},
+    {"x": 150, "y": 100, "text": "数量"},
+    {"right": 260, "y": 100, "text": "金額"},
+    {"x": 40, "y": 118, "text": "りんご"},
+    {"x": 150, "y": 118, "text": "3"},
+    {"right": 260, "y": 118, "text": "¥300"},
+    {"x": 40, "y": 136, "text": "みかん"},
+    {"x": 150, "y": 136, "text": "2"},
+    {"right": 260, "y": 136, "text": "¥500"},
+    {"x": 40, "y": 154, "text": "ぶどう"},
+    {"x": 150, "y": 154, "text": "1"},
+    {"right": 260, "y": 154, "text": "¥900"},
+    {"x": 380, "y": 154, "text": "合計"},
+    {"right": 560, "y": 154, "text": "¥1,700"}
+  ],
+  "form": {"fields": [
+    {"id": "items", "label": "明細", "type": "table", "columns": [
+      {"id": "name", "label": "品名"},
+      {"id": "qty", "label": "数量", "type": "number"},
+      {"id": "amount", "label": "金額", "type": "amount"}
+    ]}
+  ]},
+  "expect": {
+    "items": {"abstain": "ambiguous", "hold": "irregular_table"}
+  }
+}

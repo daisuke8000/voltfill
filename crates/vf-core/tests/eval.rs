@@ -18,6 +18,12 @@
 //! truth here only because the synthetic widths follow the estimator's
 //! half/full-width classes; real fonts differ.
 //!
+//! A table field expects `rows` instead of `raw`: one object per row keyed
+//! by every column id, with `null` for a blank cell and otherwise the
+//! cell's `raw` text (with `value` for typed columns and `source` naming its
+//! run when the text occurs more than once). A table field is one outcome:
+//! it is correct only when every row and cell matches.
+//!
 //! Run with `cargo test -p vf-core --test eval -- --nocapture` to see the table.
 #[path = "eval/pdf.rs"]
 mod pdf;
@@ -27,7 +33,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use vf_core::fill::{self, FieldFill, FieldType, FillStatus, FormField};
+use vf_core::fill::{self, FieldFill, FieldType, FillEvidence, FillStatus, FormField};
 use vf_source::geometry::Rect;
 use vf_source::layout::Precision;
 use vf_source::{DocumentSnapshot, PdfLimits, Quality, SourceFragment, inspect};
@@ -99,6 +105,21 @@ struct Expect {
     /// The exact wrong fill the current code produces for this field.
     #[serde(default)]
     known_wrong: Option<KnownWrong>,
+    /// Table fields: the rows the field must hold, keyed by column id.
+    #[serde(default)]
+    rows: Option<Vec<BTreeMap<String, Option<ExpectCell>>>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExpectCell {
+    raw: String,
+    /// Normalized value; defaults to `raw` for text columns.
+    #[serde(default)]
+    value: Option<Value>,
+    /// Run `id` the cell must come from, when its text occurs more than once.
+    #[serde(default)]
+    source: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -167,9 +188,14 @@ struct Source {
     offset: usize,
 }
 
+/// Expected table rows: per column id, a blank cell or an output with its source.
+type Rows = Vec<BTreeMap<String, Option<(Output, Source)>>>;
+
 enum Want {
     /// Filled with this output, each line from its source.
     Value(Output, Vec<Source>),
+    /// A table field filled with these rows.
+    Rows(Rows),
     Empty(Abstain),
 }
 
@@ -217,7 +243,7 @@ impl Counts {
     fn add(&mut self, want: &Want, outcome: Outcome) {
         self.fields += 1;
         match want {
-            Want::Value(..) => self.values += 1,
+            Want::Value(..) | Want::Rows(_) => self.values += 1,
             Want::Empty(_) => self.empties += 1,
         }
         match outcome {
@@ -287,17 +313,73 @@ fn load_cases() -> Vec<(String, Case)> {
 /// count as outcomes.
 fn resolve<'a>(at: &str, case: &'a Case, field: &FormField) -> Check<'a> {
     let expect = &case.expect[&field.id];
-    let output = |raw: &str, value: &Option<Value>| {
-        let value = match (value, field.field_type) {
+    let output_of = |field_type: FieldType, raw: &str, value: &Option<Value>| {
+        let value = match (value, field_type) {
             (Some(value), _) => value.clone(),
             (None, FieldType::Text) => Value::from(raw),
-            (None, _) => panic!("{at}: typed fields need a normalized value"),
+            (None, _) => panic!("{at}: typed fields and columns need a normalized value"),
         };
         Output {
             raw: raw.to_owned(),
             value,
         }
     };
+    let output = |raw: &str, value: &Option<Value>| output_of(field.field_type, raw, value);
+    if field.field_type == FieldType::Table {
+        assert!(
+            expect.raw.is_none()
+                && expect.value.is_none()
+                && expect.source.is_none()
+                && expect.candidate.is_none()
+                && expect.holds.is_none()
+                && expect.known_wrong.is_none()
+                && !expect.currently_correct,
+            "{at}: table fields expect rows or abstain (with hold) only"
+        );
+        let want = match (&expect.rows, expect.abstain) {
+            (Some(rows), None) => Want::Rows(
+                rows.iter()
+                    .map(|row| {
+                        let ids: Vec<&str> = field.columns.iter().map(|c| c.id.as_str()).collect();
+                        assert!(
+                            row.keys()
+                                .map(String::as_str)
+                                .eq(ids.iter().copied().collect::<BTreeSet<_>>()),
+                            "{at}: every row lists exactly the column ids {ids:?}"
+                        );
+                        field
+                            .columns
+                            .iter()
+                            .map(|column| {
+                                let cell = row[&column.id].as_ref().map(|cell| {
+                                    let source = cell_source(at, &case.runs, cell);
+                                    (
+                                        output_of(column.column_type, &cell.raw, &cell.value),
+                                        source,
+                                    )
+                                });
+                                (column.id.clone(), cell)
+                            })
+                            .collect()
+                    })
+                    .collect(),
+            ),
+            (None, Some(abstain)) => Want::Empty(abstain),
+            _ => panic!("{at}: set either rows or abstain"),
+        };
+        return Check {
+            want,
+            known: None,
+            currently_correct: false,
+            hold: expect.hold.as_deref(),
+            holds: None,
+            candidate: None,
+        };
+    }
+    assert!(
+        expect.rows.is_none(),
+        "{at}: rows are for table fields only"
+    );
     let want = match (&expect.raw, expect.abstain) {
         (Some(raw), None) => Want::Value(
             output(raw, &expect.value),
@@ -384,6 +466,27 @@ fn sources(at: &str, runs: &[Run], raw: &str, named: Option<&[String]>) -> Vec<S
             }
         })
         .collect()
+}
+
+/// Where a cell was placed: the run named by `source`, else the only run
+/// whose whole text is the cell, else the only occurrence in all runs.
+fn cell_source(at: &str, runs: &[Run], cell: &ExpectCell) -> Source {
+    if cell.source.is_none() {
+        let whole: Vec<usize> = (0..runs.len())
+            .filter(|&run| runs[run].text == cell.raw)
+            .collect();
+        match whole[..] {
+            [run] => return Source { run, offset: 0 },
+            [] => {}
+            _ => panic!(
+                "{at}: cell {:?} is the text of {} runs; name its run with source",
+                cell.raw,
+                whole.len()
+            ),
+        }
+    }
+    let named = cell.source.as_ref().map(|s| vec![s.clone()]);
+    sources(at, runs, &cell.raw, named.as_deref())[0]
 }
 
 /// A byte range of a fragment's text that came from one run.
@@ -476,26 +579,41 @@ fn close(a: Rect, b: Rect) -> bool {
 /// expected runs.
 fn check_evidence(
     at: &str,
-    got: &FieldFill,
+    raw: Option<&str>,
+    evidence: &[FillEvidence],
     snapshot: &DocumentSnapshot,
     runs: &[Run],
     expected: Option<&[Source]>,
     problems: &mut Vec<String>,
 ) {
-    let joined: Vec<&str> = got.evidence.iter().map(|e| e.text.as_str()).collect();
-    if got.evidence.is_empty() || got.raw.as_deref() != Some(joined.join("\n").as_str()) {
+    let joined: Vec<&str> = evidence.iter().map(|e| e.text.as_str()).collect();
+    if evidence.is_empty() || raw != Some(joined.join("\n").as_str()) {
         problems.push(format!("{at}: raw does not equal its evidence text"));
     }
+    check_spans(at, evidence, snapshot, runs, expected, problems);
+}
+
+/// Each span must be an exact slice of its fragment, with `run` precision
+/// exactly for a whole fragment, placed where the builder put the text and,
+/// when `expected` is given, coming from the expected runs.
+fn check_spans(
+    at: &str,
+    spans: &[FillEvidence],
+    snapshot: &DocumentSnapshot,
+    runs: &[Run],
+    expected: Option<&[Source]>,
+    problems: &mut Vec<String>,
+) {
     if let Some(expected) = expected
-        && expected.len() != got.evidence.len()
+        && expected.len() != spans.len()
     {
         problems.push(format!(
             "{at}: {} evidence spans, expected {}",
-            got.evidence.len(),
+            spans.len(),
             expected.len()
         ));
     }
-    for (n, evidence) in got.evidence.iter().enumerate() {
+    for (n, evidence) in spans.iter().enumerate() {
         let Some(fragment) = snapshot
             .fragments
             .iter()
@@ -556,14 +674,37 @@ fn check_evidence(
     }
 }
 
-/// The `hold` reason of the field's first candidate (`"none"` without one;
-/// `None` without candidates).
+/// The `hold` reason of the field's first candidate, scalar or table
+/// (`"none"` without one; `None` without candidates).
 fn first_hold(got: &FieldFill) -> Option<String> {
-    got.candidates.first().map(|c| {
-        serde_json::to_value(c.hold)
-            .ok()
-            .and_then(|v| v.as_str().map(str::to_owned))
-            .unwrap_or_else(|| "none".into())
+    got.candidates
+        .first()
+        .map(|c| c.hold)
+        .or_else(|| got.table_candidates.first().map(|c| c.hold))
+        .map(|hold| {
+            serde_json::to_value(hold)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_else(|| "none".into())
+        })
+}
+
+/// A filled table's rows as outputs, per column id.
+fn got_rows(got: &FieldFill) -> Option<Vec<BTreeMap<String, Option<Output>>>> {
+    got.rows.as_ref().map(|rows| {
+        rows.iter()
+            .map(|row| {
+                row.iter()
+                    .map(|(id, cell)| {
+                        let cell = cell.as_ref().map(|c| Output {
+                            raw: c.raw.clone(),
+                            value: c.value.clone().unwrap_or(Value::Null),
+                        });
+                        (id.clone(), cell)
+                    })
+                    .collect()
+            })
+            .collect()
     })
 }
 
@@ -578,12 +719,45 @@ fn first_holds(got: &FieldFill) -> Option<Vec<String>> {
     })
 }
 
+fn rows_text<'a, T: 'a>(
+    rows: impl Iterator<Item = &'a BTreeMap<String, Option<T>>>,
+    output: impl Fn(&T) -> &Output,
+) -> String {
+    let rows: Vec<String> = rows
+        .map(|row| {
+            let cells: Vec<String> = row
+                .iter()
+                .map(|(id, cell)| match cell {
+                    Some(cell) => format!("{id}: {}", output(cell)),
+                    None => format!("{id}: null"),
+                })
+                .collect();
+            format!("{{{}}}", cells.join(", "))
+        })
+        .collect();
+    format!("[{}]", rows.join(", "))
+}
+
 /// Unfilled fields carry no value; only `invalid` may keep the raw text, and
 /// then with its evidence.
-fn check_shape(at: &str, got: &FieldFill, problems: &mut Vec<String>) {
-    let ok = match got.status {
-        FillStatus::Filled => got.raw.is_some() && got.value.is_some() && !got.evidence.is_empty(),
-        FillStatus::Invalid => got.value.is_none() && got.raw.is_some() == !got.evidence.is_empty(),
+fn check_shape(at: &str, table: bool, got: &FieldFill, problems: &mut Vec<String>) {
+    let ok = match (table, got.status) {
+        (false, _) if got.rows.is_some() || !got.table_candidates.is_empty() => false,
+        (true, _) if !got.candidates.is_empty() || got.raw.is_some() || got.value.is_some() => {
+            false
+        }
+        (true, FillStatus::Filled) => {
+            got.rows.as_ref().is_some_and(|rows| !rows.is_empty())
+                && !got.evidence.is_empty()
+                && got.table_candidates.is_empty()
+        }
+        (true, _) => got.rows.is_none() && got.evidence.is_empty(),
+        (false, FillStatus::Filled) => {
+            got.raw.is_some() && got.value.is_some() && !got.evidence.is_empty()
+        }
+        (false, FillStatus::Invalid) => {
+            got.value.is_none() && got.raw.is_some() == !got.evidence.is_empty()
+        }
         _ => got.value.is_none() && got.raw.is_none() && got.evidence.is_empty(),
     };
     if !ok {
@@ -611,6 +785,9 @@ fn record(got: &FieldFill) -> String {
     if let Some(value) = &got.value {
         let _ = write!(out, ", \"value\": {value}");
     }
+    if let Some(rows) = got_rows(got) {
+        let _ = write!(out, ", \"rows\": {}", rows_text(rows.iter(), |o| o));
+    }
     out.push('}');
     out
 }
@@ -618,6 +795,7 @@ fn record(got: &FieldFill) -> String {
 fn wanted(want: &Want) -> String {
     match want {
         Want::Value(output, _) => output.to_string(),
+        Want::Rows(rows) => format!("rows {}", rows_text(rows.iter(), |(o, _)| o)),
         Want::Empty(abstain) => format!("empty ({abstain:?})"),
     }
 }
@@ -759,12 +937,14 @@ fn evaluation_set_has_no_unexpected_wrong_fills() {
             let at = format!("{name}.{}", field.id);
             let check = resolve(&at, case, field);
             let got = &result.fields[&field.id];
-            check_shape(&at, got, &mut problems);
+            let table = field.field_type == FieldType::Table;
+            check_shape(&at, table, got, &mut problems);
             let status = status_name(got.status);
-            let output = (got.status == FillStatus::Filled).then(|| Output {
+            let output = (got.status == FillStatus::Filled && !table).then(|| Output {
                 raw: got.raw.clone().unwrap_or_default(),
                 value: got.value.clone().unwrap_or(Value::Null),
             });
+            let filled = got.status == FillStatus::Filled;
             let outcome = match (&check.want, &output) {
                 (_, Some(out)) if check.known.as_ref().is_some_and(|(k, _)| k == out) => {
                     Outcome::Known
@@ -772,18 +952,74 @@ fn evaluation_set_has_no_unexpected_wrong_fills() {
                 (Want::Value(right, _), Some(out)) if out == right => Outcome::Correct,
                 (Want::Value(..), Some(_)) => Outcome::Wrong,
                 (Want::Value(..), None) => Outcome::Empty,
-                (Want::Empty(_), Some(_)) => Outcome::Unexpected,
-                (Want::Empty(_), None) => Outcome::Abstained,
+                (Want::Rows(rows), _) if filled => {
+                    let expected: Vec<BTreeMap<String, Option<Output>>> = rows
+                        .iter()
+                        .map(|row| {
+                            row.iter()
+                                .map(|(id, cell)| {
+                                    (id.clone(), cell.as_ref().map(|(o, _)| o.clone()))
+                                })
+                                .collect()
+                        })
+                        .collect();
+                    if got_rows(got).as_ref() == Some(&expected) {
+                        Outcome::Correct
+                    } else {
+                        Outcome::Wrong
+                    }
+                }
+                (Want::Rows(_), _) => Outcome::Empty,
+                (Want::Empty(_), _) if filled => Outcome::Unexpected,
+                (Want::Empty(_), _) => Outcome::Abstained,
             };
             counts.add(&check.want, outcome);
-            if got.status == FillStatus::Filled
+            if table && filled {
+                // Header cells, then every cell from its expected run.
+                check_spans(
+                    &at,
+                    &got.evidence,
+                    &snapshot,
+                    &case.runs,
+                    None,
+                    &mut problems,
+                );
+                for (n, row) in got.rows.iter().flatten().enumerate() {
+                    for (id, cell) in row {
+                        let Some(cell) = cell else { continue };
+                        let expected = match (&check.want, outcome) {
+                            (Want::Rows(rows), Outcome::Correct) => rows[n][id]
+                                .as_ref()
+                                .map(|(_, source)| std::slice::from_ref(source)),
+                            _ => None,
+                        };
+                        check_evidence(
+                            &format!("{at}.rows[{n}].{id}"),
+                            Some(&cell.raw),
+                            &cell.evidence,
+                            &snapshot,
+                            &case.runs,
+                            expected,
+                            &mut problems,
+                        );
+                    }
+                }
+            } else if got.status == FillStatus::Filled
                 || got.status == FillStatus::Invalid && got.raw.is_some()
             {
                 let expected = match (&check.want, outcome) {
                     (Want::Value(_, sources), Outcome::Correct) => Some(sources.as_slice()),
                     _ => None,
                 };
-                check_evidence(&at, got, &snapshot, &case.runs, expected, &mut problems);
+                check_evidence(
+                    &at,
+                    got.raw.as_deref(),
+                    &got.evidence,
+                    &snapshot,
+                    &case.runs,
+                    expected,
+                    &mut problems,
+                );
             }
 
             let now = record(got);

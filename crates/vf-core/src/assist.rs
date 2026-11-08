@@ -1,7 +1,8 @@
 //! Optional model assistance (L3): let Jev choose among an ambiguous field's
 //! own source candidates.
 //!
-//! Only fields that the offline matcher left `ambiguous` are sent. Each one
+//! Only scalar fields that the offline matcher left `ambiguous` are sent;
+//! table fields are never sent. Each one
 //! becomes a `choice` question whose options are that field's offered
 //! candidates plus `none`. A candidate is offered only when choosing it
 //! gives one value of the field's type: every failed condition in its
@@ -263,7 +264,8 @@ pub fn assist<T: Transport, C: Clock>(
         .iter()
         .filter_map(|field| {
             let result = fill.fields.get(&field.id)?;
-            if result.status != FillStatus::Ambiguous {
+            // Table fields keep their table candidates and are never sent.
+            if field.field_type == FieldType::Table || result.status != FillStatus::Ambiguous {
                 return None;
             }
             question(field, &result.candidates).map(|built| (field, built))
@@ -462,6 +464,7 @@ fn question(
         FieldType::Date => "日付",
         FieldType::Amount => "金額",
         FieldType::Number => "数値",
+        FieldType::Table => "表",
     };
     let mut instructions = format!(
         "フォーム項目「{}」（{kind}）の値を、PDFの原文から作った候補（ページ ラベル: 値）から1つ選んでください。",
@@ -1160,6 +1163,53 @@ mod tests {
         assert!(fake.requests().is_empty());
         assert!(out.jev_responses.is_empty() && out.assist.is_empty());
         assert_eq!(out.usage, AssistUsage::default());
+        assert_eq!(
+            serde_json::to_value(&out.fill).expect("serializes"),
+            serde_json::to_value(&before).expect("serializes")
+        );
+    }
+
+    #[test]
+    fn table_fields_are_never_sent() {
+        // Two tables under the same header: the table field is ambiguous
+        // with table candidates, and is still not sent.
+        let mut fragments = Vec::new();
+        for (n, top) in [100.0, 300.0].into_iter().enumerate() {
+            for (row, y) in [top, top + 18.0, top + 36.0].into_iter().enumerate() {
+                let [name, amount] = if row == 0 {
+                    ["品名", "金額"]
+                } else {
+                    ["りんご", "¥300"]
+                };
+                fragments.push(frag(&format!("{n}{row}a"), name, [60.0, y, 90.0, y + 10.0]));
+                fragments.push(frag(
+                    &format!("{n}{row}b"),
+                    amount,
+                    [300.0, y, 340.0, y + 10.0],
+                ));
+            }
+        }
+        let form = form(
+            json!([{"id":"items","label":"明細","type":"table","columns":[
+                {"id":"name","label":"品名"},{"id":"amount","label":"金額","type":"amount"}
+            ]}]),
+        );
+        let before = fill::fill("doc", &fragments, &form);
+        assert_eq!(before.fields["items"].status, FillStatus::Ambiguous);
+        assert_eq!(before.fields["items"].table_candidates.len(), 2);
+        let time = Time::default();
+        let mut fake = Fake::new(Vec::new(), &time);
+        let secret = Secret::try_new(SECRET.into()).expect("synthetic bearer is valid");
+        let out = assist(
+            before.clone(),
+            &form,
+            &options(ExecutionConfig::default()),
+            &secret,
+            &mut fake,
+            &mut time.clone(),
+        )
+        .expect("valid options never fail after validation");
+        assert!(fake.requests().is_empty() && out.assist.is_empty());
         assert_eq!(
             serde_json::to_value(&out.fill).expect("serializes"),
             serde_json::to_value(&before).expect("serializes")

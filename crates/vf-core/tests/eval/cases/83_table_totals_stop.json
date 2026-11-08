@@ -1,0 +1,40 @@
+{
+  "description": "明細表の直後に小計・消費税・合計の行がある。左端のセルが合計系のラベルの行で明細は終わり、3行だけを確定する。単独の項目（ご請求額、別名「合計」）の値は「合計：」から4emより右にあるため位置だけの候補（geometric_only）にとどまり、確定しない",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "品名"},
+    {"x": 300, "y": 100, "text": "数量"},
+    {"right": 520, "y": 100, "text": "金額"},
+    {"x": 60, "y": 118, "text": "りんご"},
+    {"x": 300, "y": 118, "text": "3"},
+    {"right": 520, "y": 118, "text": "¥300"},
+    {"x": 60, "y": 136, "text": "みかん"},
+    {"x": 300, "y": 136, "text": "2"},
+    {"right": 520, "y": 136, "text": "¥400"},
+    {"x": 60, "y": 154, "text": "ぶどう"},
+    {"x": 300, "y": 154, "text": "1"},
+    {"right": 520, "y": 154, "text": "¥2,000"},
+    {"x": 300, "y": 172, "text": "小計："},
+    {"right": 520, "y": 172, "text": "¥2,700"},
+    {"x": 300, "y": 190, "text": "消費税（10%）："},
+    {"right": 520, "y": 190, "text": "¥270"},
+    {"x": 300, "y": 208, "text": "合計："},
+    {"right": 520, "y": 208, "text": "¥2,970"}
+  ],
+  "form": {"fields": [
+    {"id": "items", "label": "明細", "type": "table", "columns": [
+      {"id": "name", "label": "品名"},
+      {"id": "qty", "label": "数量", "type": "number"},
+      {"id": "amount", "label": "金額", "type": "amount"}
+    ]},
+    {"id": "total", "label": "ご請求額", "type": "amount", "hints": ["合計"]}
+  ]},
+  "expect": {
+    "items": {"rows": [
+      {"name": {"raw": "りんご"}, "qty": {"raw": "3", "value": 3}, "amount": {"raw": "¥300", "value": 300}},
+      {"name": {"raw": "みかん"}, "qty": {"raw": "2", "value": 2}, "amount": {"raw": "¥400", "value": 400}},
+      {"name": {"raw": "ぶどう"}, "qty": {"raw": "1", "value": 1}, "amount": {"raw": "¥2,000", "value": 2000}}
+    ]},
+    "total": {"abstain": "ambiguous", "hold": "geometric_only", "holds": ["geometric_only"], "candidate": "¥2,970"}
+  }
+}

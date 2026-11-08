@@ -32,10 +32,11 @@
 //!
 //! A value to the right (and an inline value) takes continuation lines in
 //! its column; a value with more than one line is still one pair, with one
-//! span per line. Not supported: values in multi-row tables and stacked
-//! lists (only flagged, see [`Placement::Column`]), AcroForm values and
-//! true vertical writing (vertical writing mode fonts, glyphs stacked one
-//! per run).
+//! span per line. Rows of multi-row tables and stacked lists are never one
+//! value (only flagged, see [`Placement::Column`]); a caller that knows a
+//! table's header line reads its rows with [`read_table`]. Not supported:
+//! AcroForm values and true vertical writing (vertical writing mode fonts,
+//! glyphs stacked one per run).
 //!
 //! Hypotheses are conservative ("a wrong value is worse than an empty one"):
 //! - A fragment with more than one `label：` delimiter (for example
@@ -100,6 +101,8 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 mod orient;
+mod table;
+pub use table::{MAX_TABLE_COLUMNS, MAX_TABLE_ROWS, Table, TableEnd, Totals, read_table};
 
 /// Most lines one value may span: its first line plus continuation lines.
 /// A value that would run longer is dropped, not truncated.
@@ -540,6 +543,14 @@ fn is_delimiter(text: &str, at: usize, c: char) -> bool {
     !(digit_before && digit_after || text[after..].starts_with("//"))
 }
 
+/// Whether a fragment has no label delimiter (`請求日：`, `品名：りんご`):
+/// it can be a table header cell or a cell. Times (`9:00`) and URL schemes
+/// are not delimiters. Reads the fragment's text once.
+#[must_use]
+pub fn is_plain(fragment: &SourceFragment) -> bool {
+    classify(fragment) == Kind::Plain
+}
+
 fn classify(f: &SourceFragment) -> Kind {
     let text = f.raw_text.as_str();
     let mut delimiters = text
@@ -638,6 +649,65 @@ impl Measure {
     }
 }
 
+/// The span of `fragment` (measured as `measure`) between two byte
+/// offsets, each with the estimated advance in em before it. Costs one unit
+/// plus the fragment id's length; the text is not read.
+fn span_of(
+    fragment: &SourceFragment,
+    measure: &Measure,
+    (start, em_start): (usize, f64),
+    (end, em_end): (usize, f64),
+    budget: &mut Budget,
+) -> Result<Span, BudgetError> {
+    budget.spend(1 + fragment.id.len() as u64)?;
+    if start == 0 && end == fragment.raw_text.len() {
+        return Ok(Span {
+            fragment_id: fragment.id.clone(),
+            start,
+            end,
+            bbox: fragment.bbox,
+            precision: Precision::Run,
+        });
+    }
+    let (left, right) = if measure.total > 0.0 {
+        let width = fragment.bbox.width();
+        (
+            fragment.bbox.left + width * em_start / measure.total,
+            fragment.bbox.left + width * em_end / measure.total,
+        )
+    } else {
+        (fragment.bbox.left, fragment.bbox.right)
+    };
+    Ok(Span {
+        fragment_id: fragment.id.clone(),
+        start,
+        end,
+        bbox: Rect {
+            left,
+            top: fragment.bbox.top,
+            right: right.max(left + f64::EPSILON),
+            bottom: fragment.bbox.bottom,
+        },
+        precision: Precision::Estimated,
+    })
+}
+
+/// The span of a fragment's whole text without surrounding whitespace, as
+/// a table cell or header. Costs two units per byte (the text is classified
+/// and measured) plus one and the fragment id's length.
+///
+/// # Errors
+/// As [`Budget::spend`].
+pub fn fragment_span(fragment: &SourceFragment, budget: &mut Budget) -> Result<Span, BudgetError> {
+    budget.spend(2 * u64::try_from(fragment.raw_text.len()).unwrap_or(u64::MAX / 2))?;
+    let measure = Measure::new(fragment);
+    let (start, end) = (
+        (measure.at[START], measure.em[START]),
+        (measure.at[END], measure.em[END]),
+    );
+    span_of(fragment, &measure, start, end, budget)
+}
+
 /// What a line holds in a column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Cell {
@@ -694,43 +764,11 @@ impl Page<'_> {
     fn part(
         &self,
         f: usize,
-        (start, em_start): (usize, f64),
-        (end, em_end): (usize, f64),
+        start: (usize, f64),
+        end: (usize, f64),
         budget: &mut Budget,
     ) -> Result<Span, BudgetError> {
-        let fragment = &self.fragments[f];
-        budget.spend(1 + fragment.id.len() as u64)?;
-        let measure = &self.measures[f];
-        if start == 0 && end == fragment.raw_text.len() {
-            return Ok(Span {
-                fragment_id: fragment.id.clone(),
-                start,
-                end,
-                bbox: fragment.bbox,
-                precision: Precision::Run,
-            });
-        }
-        let (left, right) = if measure.total > 0.0 {
-            let width = fragment.bbox.width();
-            (
-                fragment.bbox.left + width * em_start / measure.total,
-                fragment.bbox.left + width * em_end / measure.total,
-            )
-        } else {
-            (fragment.bbox.left, fragment.bbox.right)
-        };
-        Ok(Span {
-            fragment_id: fragment.id.clone(),
-            start,
-            end,
-            bbox: Rect {
-                left,
-                top: fragment.bbox.top,
-                right: right.max(left + f64::EPSILON),
-                bottom: fragment.bbox.bottom,
-            },
-            precision: Precision::Estimated,
-        })
+        span_of(&self.fragments[f], &self.measures[f], start, end, budget)
     }
 
     /// The value starting with `first` on line `line`, with follow-on lines.

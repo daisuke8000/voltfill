@@ -1,0 +1,34 @@
+{
+  "description": "小計の行の1列目に注記（※印は軽減税率対象）がある。注記も小計も表を閉じる語で、下に明細行がないため2行を確定する",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "品名"},
+    {"x": 300, "y": 100, "text": "数量"},
+    {"x": 380, "y": 100, "text": "単価"},
+    {"right": 520, "y": 100, "text": "金額"},
+    {"x": 60, "y": 118, "text": "りんご"},
+    {"x": 300, "y": 118, "text": "3"},
+    {"x": 380, "y": 118, "text": "100"},
+    {"right": 520, "y": 118, "text": "¥300"},
+    {"x": 60, "y": 136, "text": "みかん"},
+    {"x": 300, "y": 136, "text": "2"},
+    {"x": 380, "y": 136, "text": "250"},
+    {"right": 520, "y": 136, "text": "¥500"},
+    {"x": 60, "y": 154, "text": "※印は軽減税率対象"},
+    {"x": 380, "y": 154, "text": "小計"},
+    {"right": 520, "y": 154, "text": "¥800"}
+  ],
+  "form": {"fields": [
+    {"id": "items", "label": "明細", "type": "table", "columns": [
+      {"id": "name", "label": "品名"},
+      {"id": "qty", "label": "数量", "type": "number"},
+      {"id": "amount", "label": "金額", "type": "amount"}
+    ]}
+  ]},
+  "expect": {
+    "items": {"rows": [
+      {"name": {"raw": "りんご"}, "qty": {"raw": "3", "value": 3}, "amount": {"raw": "¥300", "value": 300}},
+      {"name": {"raw": "みかん"}, "qty": {"raw": "2", "value": 2}, "amount": {"raw": "¥500", "value": 500}}
+    ]}
+  }
+}

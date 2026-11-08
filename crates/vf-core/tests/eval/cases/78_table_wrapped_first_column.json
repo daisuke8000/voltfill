@@ -1,0 +1,26 @@
+{
+  "description": "明細表の1列目が折り返す（りんご（青森産 / 特選））。折り返しの行は1列だけにセルがあり、1行のセルか折り返しか区別できないため表を確定しない（irregular_table）",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "品名"},
+    {"x": 300, "y": 100, "text": "数量"},
+    {"x": 440, "y": 100, "text": "金額"},
+    {"x": 60, "y": 118, "text": "りんご（青森産"},
+    {"x": 300, "y": 118, "text": "3"},
+    {"x": 440, "y": 118, "text": "¥300"},
+    {"x": 60, "y": 136, "text": "特選）"},
+    {"x": 60, "y": 154, "text": "みかん"},
+    {"x": 300, "y": 154, "text": "2"},
+    {"x": 440, "y": 154, "text": "¥500"}
+  ],
+  "form": {"fields": [
+    {"id": "items", "label": "明細", "type": "table", "columns": [
+      {"id": "name", "label": "品名"},
+      {"id": "qty", "label": "数量", "type": "number"},
+      {"id": "amount", "label": "金額", "type": "amount"}
+    ]}
+  ]},
+  "expect": {
+    "items": {"abstain": "ambiguous", "hold": "irregular_table"}
+  }
+}

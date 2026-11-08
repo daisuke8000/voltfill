@@ -1,0 +1,30 @@
+{
+  "description": "明細の下の行の1列目に「今回御請求額」がある。語の途中の御（漢字の前のご・お）を除くと締めの合計（今回請求額）になり、その行で表を閉じて2行を確定する（請求額の行を明細行にしない）",
+  "support": "supported",
+  "runs": [
+    {"x": 40, "y": 100, "text": "品名"},
+    {"x": 150, "y": 100, "text": "数量"},
+    {"right": 260, "y": 100, "text": "金額"},
+    {"x": 40, "y": 118, "text": "りんご"},
+    {"x": 150, "y": 118, "text": "3"},
+    {"right": 260, "y": 118, "text": "¥300"},
+    {"x": 40, "y": 136, "text": "みかん"},
+    {"x": 150, "y": 136, "text": "2"},
+    {"right": 260, "y": 136, "text": "¥500"},
+    {"x": 40, "y": 154, "text": "今回御請求額"},
+    {"right": 260, "y": 154, "text": "¥880"}
+  ],
+  "form": {"fields": [
+    {"id": "items", "label": "明細", "type": "table", "columns": [
+      {"id": "name", "label": "品名"},
+      {"id": "qty", "label": "数量", "type": "number"},
+      {"id": "amount", "label": "金額", "type": "amount"}
+    ]}
+  ]},
+  "expect": {
+    "items": {"rows": [
+      {"name": {"raw": "りんご"}, "qty": {"raw": "3", "value": 3}, "amount": {"raw": "¥300", "value": 300}},
+      {"name": {"raw": "みかん"}, "qty": {"raw": "2", "value": 2}, "amount": {"raw": "¥500", "value": 500}}
+    ]}
+  }
+}
