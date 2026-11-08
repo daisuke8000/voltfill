@@ -27,16 +27,17 @@
 //!   row. A totals line is also irregular when the line as a whole reads as
 //!   an item row: two or more of its fragments are item cells, one of them
 //!   in a [`ColumnRole::Key`] column. An item cell is a plain fragment that
-//!   is not a totals label in a key or [`ColumnRole::Item`] column, or a
-//!   totals label in an item or [`ColumnRole::Amount`] column and in no key
-//!   column (it takes an item's place); a fragment counts once. Amounts in
-//!   amount columns, which a totals line carries, and totals labels in a key
-//!   column or outside every column, which name the line, are not item
-//!   cells. So `合計` in the left margin before `ぶどう 1 ¥900` and
-//!   `ぶどう 小計 ¥900` with `小計` in the `数量` column are irregular, while a
-//!   note in the first column beside `小計` in a column the caller does not
-//!   read ([`ColumnRole::Other`]) and `合計 5 ¥800` with `合計` in the first
-//!   column stay totals lines.
+//!   is not a totals label in a key or [`ColumnRole::Item`] column, or in a
+//!   column the caller does not read ([`ColumnRole::Other`]) and in no
+//!   [`ColumnRole::Amount`] column, or a totals label in an item or amount
+//!   column and in no key column (it takes an item's place); a fragment
+//!   counts once. Amounts in amount columns, which a totals line carries,
+//!   and totals labels in a key column, an unread column or outside every
+//!   column, which name the line, are not item cells. So `合計` in the left
+//!   margin before `ぶどう 1 ¥900` (also with `数量` unread) and `ぶどう 小計
+//!   ¥900` with `小計` in the `数量` column are irregular, while a note in
+//!   the first column beside `小計` in an unread column and `合計 5 ¥800`
+//!   with `合計` in the first column stay totals lines.
 //! - Otherwise a line is a row when each of its fragments is plain (no
 //!   `label：` delimiter) and in exactly one column, no column has two
 //!   fragments, and at least two columns have a cell. Blank cells are `None`.
@@ -418,21 +419,26 @@ impl Reader<'_> {
                 continue;
             }
             budget.spend(self.columns.len() as u64)?;
-            let (mut in_key, mut in_item, mut in_amount) = (false, false, false);
+            let (mut in_key, mut in_item, mut in_amount, mut in_other) =
+                (false, false, false, false);
             for (n, column) in self.columns.iter().enumerate() {
                 if in_column(*column, fragment.bbox) {
                     match self.roles.get(n).copied().unwrap_or(ColumnRole::Other) {
                         ColumnRole::Key => in_key = true,
                         ColumnRole::Item => in_item = true,
                         ColumnRole::Amount => in_amount = true,
-                        ColumnRole::Other => {}
+                        ColumnRole::Other => in_other = true,
                     }
                 }
             }
+            // An unread column of an item row holds item cells too (`数量`
+            // when the form reads only `品名` and `金額`); a totals label
+            // there names the line, and an amount in an amount column is
+            // one a totals line carries.
             let cell = if label {
                 !in_key && (in_item || in_amount)
             } else {
-                in_key || in_item
+                in_key || in_item || (in_other && !in_amount)
             };
             if cell {
                 cells += 1;
@@ -1017,7 +1023,8 @@ mod tests {
             read_roles(&fragments, &roles),
             (texts(&rows), TableEnd::Subtotal)
         );
-        // Without roles no column names an item: the line closes the rows.
+        // The quantity in a column the caller does not read is an item cell
+        // as well: the line holds the table.
         let mut fragments = table(&rows);
         fragments.extend([
             at("g", "合計", 10.0, 154.0),
@@ -1025,7 +1032,19 @@ mod tests {
             at("m2", "1", 300.0, 154.0),
             at("m3", "¥900", 440.0, 154.0),
         ]);
+        assert_eq!(read_roles(&fragments, &roles), held);
+        // Without roles every column is unread and none names an item (no
+        // key column): the line closes the rows.
         assert_eq!(read_roles(&fragments, &[]), closed);
+        // A count in an unread column beside a label in the first column is
+        // one item cell: `合計 5 ¥800` closes the rows.
+        let mut fragments = table(&rows);
+        fragments.extend([
+            at("g", "合計", 60.0, 154.0),
+            at("gq", "5", 300.0, 154.0),
+            at("gv", "¥800", 440.0, 154.0),
+        ]);
+        assert_eq!(read_roles(&fragments, &roles), closed);
     }
 
     #[test]

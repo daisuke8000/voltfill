@@ -21,11 +21,12 @@
 //!   `以下余白`, and subtotals such as `小計`, `消費税`. A line with an item
 //!   row left of its totals label (a totals block beside the last row), or
 //!   that reads as an item row as a whole, is irregular instead: two or
-//!   more cells in the header's first column, a requested text column or a
-//!   requested `number`/`date` column (amounts in requested `amount`
-//!   columns not counted), one of them in the first or a text column, where
-//!   a totals label counts only in a requested non-text column (`合計` in
-//!   the margin before `ぶどう 1 ¥900`, `ぶどう 小計 ¥900` with `小計` under
+//!   more cells in the header's first column, a requested text column, a
+//!   requested `number`/`date` column or a column the form does not request
+//!   (amounts in requested `amount` columns not counted), one of them in
+//!   the first or a text column, where a totals label counts only in a
+//!   requested non-text column (`合計` in the margin before `ぶどう 1 ¥900`,
+//!   also with `数量` not requested, `ぶどう 小計 ¥900` with `小計` under
 //!   `数量`).
 //! - Structure: the rows are regular, with no item row below the line where
 //!   they stopped, and each row is an item: a cell in a requested typed
