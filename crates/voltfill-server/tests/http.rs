@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 #[test]
-fn server_otlp_is_opt_in_and_disabled_errors_remain_available() {
+fn server_logs_are_opt_in_and_disabled_errors_remain_available() {
     for level in [None, Some("off"), Some("info")] {
         let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_voltfill-server"));
         command
@@ -14,14 +14,16 @@ fn server_otlp_is_opt_in_and_disabled_errors_remain_available() {
         assert_eq!(output.status.code(), Some(2));
         if level == Some("info") {
             assert!(output.stderr.is_empty());
-            let logs: Value = serde_json::from_slice(&output.stdout)
-                .expect("enabled logging must emit an OTLP JSON envelope");
-            assert!(logs["resourceLogs"].is_array());
-            assert!(
-                String::from_utf8(output.stdout)
-                    .expect("OTLP JSON output must be UTF-8")
-                    .contains("input_read_failed")
-            );
+            let logs = String::from_utf8(output.stdout).expect("log output must be UTF-8");
+            let events: Vec<Value> = logs
+                .lines()
+                .map(|line| {
+                    serde_json::from_str(line).expect("each log line must be a JSON object")
+                })
+                .collect();
+            assert!(!events.is_empty());
+            assert!(events.iter().all(|e| e["service"] == "voltfill-server"));
+            assert!(logs.contains("input_read_failed"));
         } else {
             assert!(output.stdout.is_empty());
             assert_eq!(

@@ -9,7 +9,6 @@ license.workspace = true
 pdf-probe = { path = "../pdf-probe" }
 pdf-render = { path = "../pdf-render" }
 jev-client = { path = "../jev-client" }
-otel-log = { path = "../otel-log" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -4,65 +4,90 @@
 
 # VOLTFILL
 
-English · [日本語](README.ja.md)
+PDFのテキスト層から、指定された項目に対応する原文の値を根拠（Evidence）付きで返すRust製CLI／HTTPサーバーです。PDFは変更しません。
 
-A Rust library, CLI and Axum server for extracting structured values from PDFs. Define fields and questions in JSON; receive values, source Evidence and original received API response bodies. The PDF stays unchanged.
+> 機能の範囲を絞り込み中です。Vision／Hybrid方式とスキーマ形式は今後変更されます。
 
-## Installation
+## インストール
 
-Requires Rust 1.99.1. From the repository root:
+Rust 1.99.1で、リポジトリのルートから実行します。
 
 ```sh
 cargo install --path crates/voltfill-cli --locked
 ```
 
-For Vision/Hybrid, [enable a renderer](docs/configuration.en.md#rendering).
+## 使い方
 
-## Basic usage
-
-Inspect locally without sending to Jev:
+Jevに送信せず、PDFのテキストと座標を確認します。
 
 ```sh
 voltfill inspect input.pdf
 ```
 
-For remote extraction, set your trusted Jev HTTPS URL in `VOLTFILL_JEV_ENDPOINT` and inject the key through `VOLTFILL_JEV_API_KEY` or `VOLTFILL_JEV_API_KEY_FILE`. Use your PDF as `input.pdf` and a JSON field/question definition as `schema.json`:
+接続先とキーを設定し（[実APIの利用](#environment)）、PDFと抽出定義を渡します。
 
 ```sh
-voltfill run input.pdf schema.json --remote -o result.json
+voltfill run input.pdf examples/text-form.json --remote -o result.json
 ```
 
-Text-first is the default; use `--strategy hybrid` for Hybrid. See `voltfill --help` for options.
+既定はText方式です。全オプションは `voltfill --help` を参照してください。
 
-## Extraction strategies
-
-| Strategy | Behavior | Schema |
+| 方式 | 動作 | スキーマ例 |
 |---|---|---|
-| `text` | Selects candidates from source text | [Text](examples/text-form.json) |
-| `vision` | Maps image Boxes to source text | [Vision](examples/vision-form.json) |
-| `hybrid` | Compares text candidates and Boxes | [Hybrid](examples/hybrid-form.json) |
+| `text` | 原文の候補から選択 | [Text](examples/text-form.json) |
+| `vision` | 画像のBoxを原文に対応付け | [Vision](examples/vision-form.json) |
+| `hybrid` | 文字候補とBoxを照合 | [Hybrid](examples/hybrid-form.json) |
 
-Default model: `jev-1.14.0`; override with `--model ID`. Vision/Hybrid require a versioned ID ≥ 1.14.0.
+既定モデルは `jev-1.14.0`（`--model ID` で変更）。Vision／Hybridは1.14.0以降のバージョン指定IDと[レンダラー](#rendering)が必要です。
 
 <a id="results"></a>
 
-## Results
+## 抽出結果
 
-Extraction reports include `fields`, `evidence`, `usage` and `jev_responses`. Partial or ambiguous results may contain values: check `status` and `reason_codes`. Received bodies from every attempt, including retries/errors, are retained; `body_complete: false` indicates no body or an incomplete body.
+結果は `fields`・`evidence`・`usage`・`jev_responses` です。部分失敗でも値を保持するため、`status`・`reason_codes` を確認してください。再試行・エラーの受信本文も残し、未受信・不完全なら `body_complete: false` です。
 
-By default, resolved values have no confidence cutoff; source, geometry, type and validators are checked. Reports have `evaluation_only: true`; confidence is not a calibrated correctness probability.
+原文・座標・型・validatorを検証し、既定ではconfidenceで足切りしません。結果は評価専用（`evaluation_only: true`）で、confidenceは校正済みの正答確率ではありません。
+
+## 設定
+
+```sh
+voltfill run --config examples/voltfill.yaml
+```
+
+[YAML例](examples/voltfill.yaml)は固定回答で無送信です。TOML・JSONも使えます。優先順位は **CLI → 指定ファイル → 環境変数 → 既定値**。`--config` 省略時は `VOLTFILL_CONFIG` を使います。相対パスの基準は、ファイル内なら設定ディレクトリ、それ以外は作業ディレクトリです。
+
+送信制限の[設定例](examples/execution-config.json)は既定値一覧ではありません。`--execution-config FILE` / `--resource-config FILE` は `execution` / `resources` 全体をJSONで置き換えます。資源制限はPDF解析を隔離せず、費用予約も入力の推定で請求上限ではありません。
+
+ログは既定オフ（`--log-level`）で、1行1件のJSONを出力します。CLIは標準エラー、`--output` 指定時とサーバーは標準出力です。本文・認証情報・HTTPヘッダーは出しません。
+
+<a id="environment"></a>
+
+### 実APIの利用
+
+接続先は `VOLTFILL_JEV_ENDPOINT`（信頼できるHTTPS）、キーは `VOLTFILL_JEV_API_KEY` / `VOLTFILL_JEV_API_KEY_FILE` の一方だけで指定します。設定ファイルにキーは書けず、`.env` も読みません。送信には `--remote` / `remote: true` が必須です。
+
+<a id="rendering"></a>
+
+### 描画
+
+Vision／Hybridはレンダラーのビルドと選択が必要です。自動切り替え・自動取得・OCRは行いません。
+
+```sh
+cargo install --path crates/voltfill-cli --locked --features hayro
+voltfill run input.pdf examples/vision-form.json --remote --strategy vision --renderer hayro
+```
+
+Hayroはネイティブライブラリ不要です。PDFiumは利用側で用意し、`--features pdfium`、`--renderer pdfium` と `--pdfium-lib` / `VOLTFILL_PDFIUM_LIB_PATH` の絶対パスで指定します。描画倍率は既定1.5ピクセル/PDF単位（`--pixels-per-point`）です。
 
 <a id="http-server"></a>
 
-## HTTP quick start
-
-Start a fixed-answer mock without Jev access:
+## HTTPサーバー
 
 ```sh
 voltfill serve --mock examples/text-mock.json --listen 127.0.0.1:3000
 ```
 
-From another terminal, upload your PDF and the example schema. The mock demonstrates output format, not extraction accuracy.
+`POST /v1/extract` はmultipartの `pdf`・`schema` と任意のJSON `options`（`strategy`・`model`）、`GET /health` はヘルスチェックです。モックは形式確認用で、精度評価には使えません。実APIでは `--remote` で起動し、Vision／Hybridは `--allow-images` とレンダラーを指定します。
 
 ```sh
 curl --fail-with-body --silent --show-error http://127.0.0.1:3000/v1/extract \
@@ -70,60 +95,21 @@ curl --fail-with-body --silent --show-error http://127.0.0.1:3000/v1/extract \
   --form 'schema=@examples/text-form.json;type=application/json'
 ```
 
-## Foundation crates
+認証は `VOLTFILL_SERVER_API_KEY` / `VOLTFILL_SERVER_API_KEY_FILE` の一方を設定し、`Authorization: Bearer <key>` を送ります。未設定のループバックでは任意、非ループバック待ち受け・`Origin` 付き抽出では必須です。VOLTFILLはHTTPのため、別マシンからはTLSプロキシを使います。
 
-The foundation crates work without an extraction schema or Evidence. Their supported public APIs are:
+抽出は同時1件で、実行・待機中は `Retry-After` 付き `429 server_busy`、送信停止中は `503 remote_paused_unknown_outcome` です。`--reuse-document`（既定オフ）は直前1件の文書をTTL（`--reuse-document-ttl-ms`、既定60000 ms）までメモリに保持して再利用します。内容が要求後も残るため単一テナント向けです。
 
-| Crate | Public API |
-|---|---|
-| `pdf-probe` | `inspect`, `DocumentSnapshot`, `PdfLimits`, `PdfError`, `InspectionTimings`, source `SourceFragment` / `PageDiagnostic` / `Quality`, `geometry` and `metadata` |
-| `pdf-render` | With `hayro` or `pdfium`: `render`, `RenderDocument` (open once, render several pages with the same checks and images), `RenderConfig`, `RenderBackend`, `RenderedImage`, `RenderError` |
-| `jev-client` | `build_request`, `parse_request`, `parse_response`, `RequestDraft`, `Request`, `Content`, `Question`, `Asset`, `Limits`, `Answer`, `Response`, `Error`, `PngImage`, `Endpoint`, `HttpTransport`, `Secret`, `Policy`, `ExecutionConfig`, `RecordingTransport`, `ResponseRecord`, `ResponseBody`; `transport` traits, shared budgets and `execute` / `execute_observed` / `execute_deferred`; `planning` and `multipart` |
-| `otel-log` | `TelemetryLogger` (local OTLP JSON logs for the `log` targets the caller names, or a supplied `SdkLoggerProvider`), `opentelemetry_sdk` |
+## 開発
 
-`voltfill-core` depends on all four; `pdf-render` also depends on `pdf-probe`. No foundation crate depends on core, and `jev-client` has no PDF dependency. Core owns Evidence, extraction fields/results, aggregate `Timings` / `UsageSummary` and field/page-associated `JevResponse`. PDF inspection returns its own `InspectionTimings`. Existing core paths (`pdf`, `geometry`, `render`, `jev`, `model`, `logging`) remain supported through reexports and compatibility adapters; field/page-scoped observer APIs remain in `voltfill_core::jev::transport`.
-
-Within one extraction, rendering opens a document only when a page needs an uncached image and reuses it across pages. Candidate lookups for a single page use a page index while preserving source order. Rendering budgets, geometry checks and Evidence remain unchanged.
-
-All default feature sets remain empty. Enable `pdf-render/hayro` for this example, or `pdf-render/pdfium` with an explicit caller-supplied library path. Core forwards both features; backend selection and native-library policy are unchanged. `PngImage::try_new` checks PNG sides against `multipart::IMAGE_SIDE_PX` (280–1568 pixels). Library callers can use `PngImage::with_sides` with the range accepted by their model; this does not change the CLI/server image limits or confirm server acceptance. This prepares a request without sending it:
-
-Use path dependencies on a source checkout from an independent project:
-
-```toml
-[dependencies]
-pdf-probe = { path = "/path/to/voltfill/crates/pdf-probe" }
-pdf-render = { path = "/path/to/voltfill/crates/pdf-render", features = ["hayro"] }
-jev-client = { path = "/path/to/voltfill/crates/jev-client" }
+```sh
+cargo fmt --all -- --check
+cargo check --workspace --all-targets --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
 ```
 
-```rust
-use std::collections::BTreeMap;
-use jev_client::{Asset, Content, Limits, PngImage, Question, RequestDraft};
+描画テストは `--features hayro` / `--features pdfium` を付けて構成ごとに順次実行し、検証後に `cargo clean` を実行します。[CI](.github/workflows/ci.yml)は上記に加え、cargo-audit・Gitleaks・actionlint・zizmorを実行します。PDFiumはコンパイルのみで、ライブラリは取得しません。
 
-fn prepare(pdf: &[u8]) -> Result<jev_client::multipart::Body, Box<dyn std::error::Error>> {
-    let doc = pdf_probe::inspect(pdf, pdf_probe::PdfLimits::default())?;
-    let image = pdf_render::render(pdf, doc.pages[0].page, &pdf_render::RenderConfig::hayro())?;
-    let png = PngImage::try_new("page".into(), image.png)?;
-    let request = jev_client::build_request(RequestDraft {
-        model: "jev-1.14.0".into(),
-        state: Content::Text("Inspect <page>".into()),
-        questions: BTreeMap::from([("visible".into(), Question::Noul {
-            instructions: Content::Text("Is a red image visible?".into()), criteria: None,
-        })]),
-        assets: BTreeMap::from([("<page>".into(), Asset { part: "page".into() })]),
-    }, Limits::default())?;
-    Ok(jev_client::multipart::encode(&request, &[png], "example-boundary")?)
-}
-```
+`pdf-inspector` の `ttf-parser 0.25.1` に[RUSTSEC-2026-0192](https://rustsec.org/advisories/RUSTSEC-2026-0192.html)の保守警告があります。脆弱性の発見を示すものではなく、正式修正は原文・座標・Evidenceの回帰検証後に採用します。
 
-For transmission, use `transport::execute` or `execute_observed` (or `execute_deferred`, which makes the page images only once an admitted slot is held and returns the slot unsent if they cannot be made) with explicit permission, a caller-injected `Secret`, validated limits and a `Clock`. Wrap the transport with `RecordingTransport::new(&mut transport, |record| records.push(record))` to retain received bodies and safe outcome metadata. The sink runs once per send, in completion order, before parsing and observer callbacks, including errors and incomplete bodies. Attach request context in the sink when sharing it across calls/workers. It receives no authentication data or HTTP headers. Logs retain the compatible `voltfill_core::jev` target and do not replace response data.
-
-Each attempt reserves estimated input tokens before sending. After completion, the per-second input-token limit holds reported usage for the completion gap, or the full reservation when usage is unavailable. The gap starts at 2 seconds by default. Jev HTTP 429 responses multiply it by `completion_gap_backoff` (default 2, range 1–16; 1 keeps it fixed), capped by `max_completion_gap_ms` (default 60 seconds). Responses within the previous backoff window increase it only once. `completion_gap_ms` must be at least 1 second and no greater than the cap; the cap may be raised to 600 seconds. Cost accounting, stop-on-over-reservation checks and deadlines still apply.
-
-## Documentation
-
-See [Development](docs/development.en.md) for CI checks, dependency audits, secret scanning and workflow security checks.
-
-[Configuration](docs/configuration.en.md) · [HTTP server](docs/server.en.md) · [Development](docs/development.en.md) · [Benchmarks](docs/benchmarks.en.md)
-
-[Architecture and C4](https://daisuke8000.github.io/voltfill/) · [MIT license](LICENSE)
+[MITライセンス](LICENSE)

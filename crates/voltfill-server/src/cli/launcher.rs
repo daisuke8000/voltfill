@@ -167,7 +167,7 @@ fn run(
         _ => return Err("invalid_log_level"),
     };
     if level != log::LevelFilter::Off {
-        voltfill_core::logging::TelemetryLogger::new("voltfill-server", level, std::io::stdout())
+        voltfill_core::logging::JsonLogger::new("voltfill-server", level, std::io::stdout())
             .try_init()
             .map_err(|_| "logging_setup_failed")?;
     }
