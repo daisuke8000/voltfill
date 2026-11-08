@@ -36,8 +36,8 @@
 //!   whole (otherwise the field is `invalid`). Amounts and numbers are not
 //!   normalized when the label states a scale unit (`売上高（千円）`) or
 //!   any text on any page of the document is a unit note (`（単位：千円）`,
-//!   `（単位は千円）`, `（千円単位）`): which tables or pages a note covers
-//!   cannot be told.
+//!   `（単位は千円）`, `（千円単位）`, `（単位：1,000円）`, `（単位：ドル）`):
+//!   which tables or pages a note covers cannot be told.
 //!
 //! Only the best-scoring candidates decide (an exact label over a partial
 //! one). The field is filled only when every one of them may be committed
@@ -369,8 +369,7 @@ pub fn fill_with_limits(
     // document: a note on an earlier page (or after a table) still applies.
     let mut scaled_document = false;
     for fragment in fragments {
-        // Whitespace removal and the note match each read the text once.
-        budget.spend(2 * u64::try_from(fragment.raw_text.len()).unwrap_or(u64::MAX / 2))?;
+        budget.spend(note_cost(&fragment.raw_text))?;
         if unit_note(&fragment.raw_text) {
             scaled_document = true;
             break;
@@ -957,18 +956,101 @@ fn label_score(a: &Label, b: &Label) -> Match {
 /// Scales of a unit note or a label unit.
 const NOTE_SCALES: [char; 6] = ['十', '百', '千', '万', '億', '兆'];
 
-/// A unit note (`（単位：千円）`, `単位：万円`, `単位 百万円`, `（単位は千円）`,
-/// `金額単位：千円`, `（千円単位）`, `単 位：千円`), whitespace ignored: `単位`
-/// followed by optional `:`, `：` or `は` and a scale (`十` `百` `千` `万`
-/// `億` `兆`), or `単位` preceded by a scale and an optional `円`. A note on
-/// any page leaves the document's amounts and numbers unnormalized.
+/// Units after `単位` that leave values as they are: plain yen and count
+/// units (`単位：円`, `単位：個`, `（単位：kg）`).
+const PLAIN_UNITS: [&str; 30] = [
+    "円",
+    "個",
+    "件",
+    "枚",
+    "本",
+    "台",
+    "人",
+    "名",
+    "回",
+    "冊",
+    "箱",
+    "点",
+    "式",
+    "組",
+    "袋",
+    "缶",
+    "セット",
+    "日",
+    "時間",
+    "分",
+    "月",
+    "年",
+    "kg",
+    "g",
+    "t",
+    "m",
+    "cm",
+    "mm",
+    "l",
+    "%",
+];
+
+/// A unit note, whitespace ignored and NFKC applied:
+/// - `単位` followed by optional `:`, `：` or `は` and a scale (`十` `百`
+///   `千` `万` `億` `兆`) or a number other than 1 (`（単位：千円）`,
+///   `単位 百万円`, `（単位は千円）`, `（単位：1,000円）`, `単位:1000`);
+/// - `単位` after `(` or followed by `:`, `：` or `は`, then anything but a
+///   plain unit ([`PLAIN_UNITS`]) and the end of the note (`）`, `)`, `、`
+///   or the end of the text): `（単位：ドル）`, `単位：千ドル`. A plain unit
+///   (`単位：円`, `（単位：個）`) and `単位` followed by other text
+///   (`単位当たり`, `数量単位`) are not notes;
+/// - `単位` preceded by a scale and an optional `円` (`（千円単位）`).
+///
+/// A note on any page leaves the document's amounts and numbers
+/// unnormalized: which tables or pages it covers cannot be told.
 fn unit_note(text: &str) -> bool {
-    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    let compact: String = text.nfkc().filter(|c| !c.is_whitespace()).collect();
     compact.match_indices("単位").any(|(at, unit)| {
-        let after = compact[at + unit.len()..].trim_start_matches([':', '：', 'は']);
+        let rest = &compact[at + unit.len()..];
+        let after = rest.trim_start_matches([':', '：', 'は']);
         let before = &compact[..at];
+        let opened = before.ends_with('(');
         let before = before.strip_suffix('円').unwrap_or(before);
-        after.starts_with(NOTE_SCALES) || before.ends_with(NOTE_SCALES)
+        let marked = opened || after.len() < rest.len();
+        // `単位：1円` is plain yen.
+        let unit = after
+            .strip_prefix('1')
+            .filter(|u| !u.starts_with(|c: char| c.is_ascii_digit() || c == ','))
+            .unwrap_or(after);
+        after.starts_with(NOTE_SCALES)
+            || scale_number(after)
+            || before.ends_with(NOTE_SCALES)
+            || (marked && !unit.is_empty() && !plain_unit(unit))
+    })
+}
+
+/// Work units for one [`unit_note`] match: whitespace removal, NFKC and the
+/// match each read the text once.
+fn note_cost(text: &str) -> u64 {
+    3 * u64::try_from(text.len()).unwrap_or(u64::MAX / 3)
+}
+
+/// Whether `text` starts with a number other than 1 (`1,000円`, `1000`).
+fn scale_number(text: &str) -> bool {
+    let digits: String = text
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == ',')
+        .filter(char::is_ascii_digit)
+        .collect();
+    !digits.is_empty() && digits.trim_start_matches('0') != "1"
+}
+
+/// Whether `text` is a plain unit ([`PLAIN_UNITS`]) up to the end of the
+/// note.
+fn plain_unit(text: &str) -> bool {
+    PLAIN_UNITS.iter().any(|unit| {
+        text.get(..unit.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(unit))
+            && text[unit.len()..]
+                .chars()
+                .next()
+                .is_none_or(|c| matches!(c, ')' | '、' | ',' | '/'))
     })
 }
 
@@ -2006,6 +2088,15 @@ mod tests {
             "単 位 : 百万円",
             "百万円単位",
             "（千単位）",
+            // Before: not notes (only a kanji scale after 単位), so
+            // `売上高：1,234` was normalized to 1234.
+            "（単位：1,000円）",
+            "（単位：1000円）",
+            "単位：1,000",
+            "（単位：１，０００円）",
+            "（単位：ドル）",
+            "(単位:千ドル)",
+            "単位は USD",
         ] {
             assert!(unit_note(&text.nfkc().collect::<String>()), "{text}");
             assert!(unit_note(text), "{text}");
@@ -2017,6 +2108,11 @@ mod tests {
             "100円単位",
             "数量単位",
             "単位当たり",
+            "単位：1円",
+            "（単位：個）",
+            "単位：kg",
+            "（単位：式）",
+            "単位：円、個",
         ] {
             assert!(!unit_note(text), "{text}");
         }
@@ -2425,6 +2521,9 @@ mod tests {
             "金額（単位は千円）",
             "売上高（千円単位）",
             "売上高 単位：千円",
+            // Before: numeric multipliers were not scales.
+            "売上高（単位：1,000円）",
+            "売上高（単位：1000円）",
         ] {
             assert!(states_scale(&normalize_label(label)), "{label}");
         }
