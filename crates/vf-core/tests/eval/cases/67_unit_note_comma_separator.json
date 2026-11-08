@@ -1,0 +1,20 @@
+{
+  "description": "単位の注記で、数量の単位と倍率を読点ではなくカンマ（全角「，」・半角「,」）で区切ったもの（「（単位：個，千円）」「単位 円,千円」）。以前はカンマで区切らず、「個，千円」全体を数の単位とみなして注記と判定せず、「売上高：1,234」を1234に変換していた。数字にはさまれていないカンマで区切り、倍率の部分があれば注記。注記のある文書の金額・数値は変換しない（invalid）",
+  "support": "supported",
+  "runs": [
+    {"x": 400, "y": 80, "text": "（単位：個，千円）"},
+    {"x": 60, "y": 100, "text": "売上高：1,234"},
+    {"x": 400, "y": 300, "text": "単位 円,千円"},
+    {"x": 60, "y": 320, "text": "出荷数：56"}
+  ],
+  "form": {"fields": [
+    {"id": "sales", "label": "売上高", "type": "amount"},
+    {"id": "shipped", "label": "出荷数", "type": "number"},
+    {"id": "sales_text", "label": "売上高"}
+  ]},
+  "expect": {
+    "sales": {"abstain": "invalid", "candidate": "1,234"},
+    "shipped": {"abstain": "invalid", "candidate": "56"},
+    "sales_text": {"raw": "1,234"}
+  }
+}

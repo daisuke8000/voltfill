@@ -1010,21 +1010,24 @@ const PLAIN_UNITS: [&str; 30] = [
 /// A unit note, whitespace ignored and NFKC applied:
 /// - `単位` preceded by a scale and an optional `円` (`（千円単位）`);
 /// - `単位` followed by optional `:`, `：` or `は` and a note body up to `)`,
-///   `。` or the end of the text, split into parts at `、`, `/` and `・`,
-///   where one part is a note:
+///   `。` or the end of the text, split into parts ([`note_parts`]) at `、`,
+///   `/`, `・`, `(` and at a `,` (also `，`) that is not between two digits
+///   (`1,000` stays one part), where one part is a note:
 ///   - a part starting with a scale (`十` `百` `千` `万` `億` `兆`):
 ///     `（単位：千円）`, `単位 百万円`, `（単位は千円）`,
-///     `（単位：個、千円）`, `単位：個／千円`;
+///     `（単位：個、千円）`, `単位：個／千円`, `（単位：個，千円）`;
 ///   - a part starting with a number other than 1 (`（単位：1,000円）`,
 ///     `単位:1000`, `（単位：1,000個）`), except a quantity: a number and a
-///     count unit after a word that names the unit (`発注単位：100個`,
-///     `最小単位：10枚`);
+///     count unit when `単位` follows a word, any letter, kana or kanji, that
+///     names what is counted (`発注単位：100個`, `最小単位：10枚`);
 ///   - when `単位` follows `(` or is followed by `:`, `：` or `は`, a part
-///     that is not a plain unit ([`PLAIN_UNITS`], optionally after the
-///     number 1): `（単位：ドル）`, `単位：千ドル`.
+///     that is not plain ([`plain_unit`]: a unit of [`PLAIN_UNITS`],
+///     optionally after the number 1, or a tax qualifier of
+///     [`TAX_QUALIFIERS`]): `（単位：ドル）`, `単位：千ドル`.
 ///
-/// A plain unit (`単位：円`, `（単位：個）`, `単位：1円`) and `単位` followed
-/// by other text (`単位当たり`, `数量単位`) are not notes.
+/// A plain unit (`単位：円`, `（単位：個）`, `単位：1円`, `（単位：円、税込）`)
+/// and `単位` followed by other text (`単位当たり`, `数量単位`) are not
+/// notes.
 ///
 /// A note on any page leaves the document's amounts and numbers
 /// unnormalized: which tables or pages it covers cannot be told.
@@ -1043,8 +1046,35 @@ fn unit_note(text: &str) -> bool {
             return true;
         }
         let body = &after[..after.find([')', '。']).unwrap_or(after.len())];
-        body.split(['、', '/', '・'])
-            .any(|part| note_part(part, marked, named))
+        note_parts(body).any(|part| note_part(part, marked, named))
+    })
+}
+
+/// The parts of a unit note body ([`unit_note`]): split at `、`, `/`, `・`,
+/// `(` and at a `,` that is not between two digits (`個,千円` is two parts,
+/// `1,000円` one).
+fn note_parts(body: &str) -> impl Iterator<Item = &str> {
+    let mut start = 0;
+    let mut previous = None;
+    let mut chars = body.char_indices().peekable();
+    std::iter::from_fn(move || {
+        while let Some((at, c)) = chars.next() {
+            let next = chars.peek().map(|&(_, c)| c);
+            let digit_comma = c == ','
+                && previous.is_some_and(|p: char| p.is_ascii_digit())
+                && next.is_some_and(|n| n.is_ascii_digit());
+            previous = Some(c);
+            if matches!(c, '、' | '/' | '・' | '(') || (c == ',' && !digit_comma) {
+                let part = &body[start..at];
+                start = at + c.len_utf8();
+                return Some(part);
+            }
+        }
+        (start <= body.len()).then(|| {
+            let part = &body[start..];
+            start = body.len() + 1;
+            part
+        })
     })
 }
 
@@ -1114,17 +1144,38 @@ fn split_unit_note(
     Ok(false)
 }
 
-/// Whether `text` is a plain unit ([`PLAIN_UNITS`]) up to the end of the
-/// note.
+/// Tax qualifiers that leave a unit plain (`（単位：円、税込）`,
+/// `単位：円（税抜）`), also with `み` or `き` (`税込み`, `税抜き`).
+const TAX_QUALIFIERS: [&str; 8] = [
+    "税込",
+    "税抜",
+    "税別",
+    "消費税込",
+    "消費税抜",
+    "消費税別",
+    "内税",
+    "外税",
+];
+
+/// Whether `text` is a whole tax qualifier ([`TAX_QUALIFIERS`]).
+fn tax_qualifier(text: &str) -> bool {
+    TAX_QUALIFIERS.contains(&text.strip_suffix(['み', 'き']).unwrap_or(text))
+}
+
+/// Whether one note part `text` is plain: a tax qualifier
+/// ([`tax_qualifier`]) or a unit of [`PLAIN_UNITS`] followed by the end of
+/// the part, a tax qualifier or `)`, `、`, `。`, `,` or `/`.
 fn plain_unit(text: &str) -> bool {
-    PLAIN_UNITS.iter().any(|unit| {
-        text.get(..unit.len())
-            .is_some_and(|head| head.eq_ignore_ascii_case(unit))
-            && text[unit.len()..]
-                .chars()
-                .next()
-                .is_none_or(|c| matches!(c, ')' | '、' | '。' | ',' | '/'))
-    })
+    tax_qualifier(text)
+        || PLAIN_UNITS.iter().any(|unit| {
+            text.get(..unit.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(unit))
+                && (tax_qualifier(&text[unit.len()..])
+                    || text[unit.len()..]
+                        .chars()
+                        .next()
+                        .is_none_or(|c| matches!(c, ')' | '、' | '。' | ',' | '/')))
+        })
 }
 
 /// Scale units that make a label's amounts and numbers multiples
@@ -2166,6 +2217,22 @@ mod tests {
     }
 
     #[test]
+    fn note_parts_split_at_commas_outside_numbers() {
+        fn parts(body: &str) -> Vec<&str> {
+            note_parts(body).collect()
+        }
+        assert_eq!(parts("個,千円"), ["個", "千円"]);
+        assert_eq!(parts("1,000円"), ["1,000円"]);
+        assert_eq!(parts("1,000個,千円"), ["1,000個", "千円"]);
+        assert_eq!(parts("円、税込"), ["円", "税込"]);
+        assert_eq!(parts("円(税抜"), ["円", "税抜"]);
+        assert_eq!(parts("個/千円・ドル"), ["個", "千円", "ドル"]);
+        assert_eq!(parts(",1"), ["", "1"]);
+        assert_eq!(parts("1,"), ["1", ""]);
+        assert_eq!(parts(""), [""]);
+    }
+
+    #[test]
     fn unit_notes_anywhere_leave_amounts_unnormalized() {
         let page = |page: u32, text: &str, top: f64| SourceFragment {
             page,
@@ -2245,6 +2312,21 @@ mod tests {
             "（単位：1,000人）",
             // No word names what is counted, so this may scale amounts.
             "単位：12本",
+            "（単位：12本）",
+            // Before: not notes (a comma, ASCII or fullwidth, did not split
+            // the body), so `売上高：1,234` was 1234.
+            "（単位：個，千円）",
+            "（単位：個,千円）",
+            "（単位：円，千円）",
+            "単位 個,千円",
+            "単位 円,千円",
+            "（単位：円,1,000個）",
+            "（単位：１，０００円、個）",
+            // A tax qualifier does not hide a scale.
+            "（単位：千円、税込）",
+            "（単位：千円（税抜））",
+            "単位：税込千円",
+            "（単位：ドル、税込）",
         ] {
             assert!(unit_note(&text.nfkc().collect::<String>()), "{text}");
             assert!(unit_note(text), "{text}");
@@ -2261,6 +2343,21 @@ mod tests {
             "単位：kg",
             "（単位：式）",
             "単位：円、個",
+            "単位：円,個",
+            // Tax qualifiers are plain (before: notes, so the document's
+            // amounts were invalid).
+            "（単位：円、税込）",
+            "単位：円、税込",
+            "単位：円,税込",
+            "（単位：円・税抜）",
+            "（単位：円（税込））",
+            "（単位：円 税別）",
+            "単位：円/消費税込み",
+            "（単位：個、内税）",
+            "（単位：1円、外税）",
+            "単位：円（税抜）",
+            // Any word before 単位 names what is counted.
+            "金額単位：1,000個",
             "単位：円。",
             // Quantities, not scales.
             "発注単位：100個",
