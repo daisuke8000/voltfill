@@ -102,7 +102,9 @@ use std::time::Instant;
 
 mod orient;
 mod table;
-pub use table::{MAX_TABLE_COLUMNS, MAX_TABLE_ROWS, Table, TableEnd, Totals, read_table};
+pub use table::{
+    ColumnRole, MAX_TABLE_COLUMNS, MAX_TABLE_ROWS, Table, TableEnd, Totals, read_table,
+};
 
 /// Most lines one value may span: its first line plus continuation lines.
 /// A value that would run longer is dropped, not truncated.

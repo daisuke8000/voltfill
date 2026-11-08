@@ -19,8 +19,15 @@
 //!   lines below a stop are read). A line with a totals label ends the
 //!   rows: closing totals such as `合計`, `請求金額`, `今回御請求額`,
 //!   `以下余白`, and subtotals such as `小計`, `消費税`. A line with an item
-//!   row left of its totals label (a totals block beside the last row) is
-//!   irregular instead.
+//!   row left of its totals label (a totals block beside the last row), or
+//!   that reads as an item row as a whole, is irregular instead: two or
+//!   more cells in the header's first column, a requested text column, a
+//!   requested `number`/`date` column or a column the form does not request
+//!   (amounts in requested `amount` columns not counted), one of them in
+//!   the first or a text column, where a totals label counts only in a
+//!   requested non-text column (`合計` in the margin before `ぶどう 1 ¥900`,
+//!   also with `数量` not requested, `ぶどう 小計 ¥900` with `小計` under
+//!   `数量`).
 //! - Structure: the rows are regular, with no item row below the line where
 //!   they stopped, and each row is an item: a cell in a requested typed
 //!   column (when the field has one) and a cell in the header's first column
@@ -58,7 +65,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use vf_source::SourceFragment;
 use vf_source::budget::{Budget, BudgetError};
-use vf_source::layout::{self, Line, Span, TableEnd, Totals};
+use vf_source::layout::{self, ColumnRole, Line, Span, TableEnd, Totals};
 
 /// Most columns of one table field.
 pub const MAX_COLUMNS: usize = 16;
@@ -392,7 +399,23 @@ impl<'a> Tables<'a> {
             let span = layout::fragment_span(fragment, budget)?;
             evidence.extend(self.evidence(header.page, &span, budget)?);
         }
-        let table = layout::read_table(self.fragments, self.lines, line, budget, |f| {
+        // Column roles for telling an item row from a totals line: the
+        // header's first column and requested text columns name an item,
+        // requested amount columns carry totals as well.
+        let mut roles = vec![ColumnRole::Other; header.fragments.len()];
+        for (column, position) in field.columns.iter().zip(&positions) {
+            if let Some(role) = position.and_then(|p| roles.get_mut(p)) {
+                *role = match column.column_type {
+                    FieldType::Amount => ColumnRole::Amount,
+                    FieldType::Text => ColumnRole::Key,
+                    _ => ColumnRole::Item,
+                };
+            }
+        }
+        if let Some(first) = roles.first_mut() {
+            *first = ColumnRole::Key;
+        }
+        let table = layout::read_table(self.fragments, self.lines, line, &roles, budget, |f| {
             totals(&f.raw_text)
         })?;
         // A row is an item row only with a cell in a requested typed column
