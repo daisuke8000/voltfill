@@ -349,8 +349,17 @@ fn normalize_value(field_type: FieldType, raw: &str) -> Option<Value> {
     }
 }
 
-/// `2026年11月8日`, `2026/11/08`, `2026-11-8`, `2026.11.08` → `2026-11-08`.
+/// `2026年11月8日`, `2026/11/08`, `2026-11-8`, `2026.11.08` → `2026-11-08`;
+/// Japanese era dates via [`parse_era_name_date`] and [`parse_era_letter_date`].
 fn parse_date(text: &str) -> Option<String> {
+    let text = text.trim();
+    if ERA_NAMES.iter().any(|name| text.contains(name)) {
+        // Never digit-scan mixed notations such as `2026年(令和8年)11月8日`.
+        return parse_era_name_date(text);
+    }
+    if let Some(date) = parse_era_letter_date(text) {
+        return Some(date);
+    }
     let digits: Vec<u32> = text
         .split(|c: char| !c.is_ascii_digit())
         .filter(|s| !s.is_empty())
@@ -363,14 +372,117 @@ fn parse_date(text: &str) -> Option<String> {
         || text.contains('/')
         || text.contains('-')
         || text.contains('.');
+    separators_ok
+        .then(|| calendar_date(year, month, day))
+        .flatten()
+}
+
+/// A Japanese era with its abbreviation and first and last day (inclusive).
+struct Era {
+    name: &'static str,
+    letter: Option<char>,
+    first: (u32, u32, u32),
+    last: Option<(u32, u32, u32)>,
+}
+
+const ERAS: [Era; 4] = [
+    Era {
+        name: "令和",
+        letter: Some('R'),
+        first: (2019, 5, 1),
+        last: None,
+    },
+    Era {
+        name: "平成",
+        letter: Some('H'),
+        first: (1989, 1, 8),
+        last: Some((2019, 4, 30)),
+    },
+    Era {
+        name: "昭和",
+        letter: Some('S'),
+        first: (1926, 12, 25),
+        last: Some((1989, 1, 7)),
+    },
+    Era {
+        name: "大正",
+        letter: None,
+        first: (1912, 7, 30),
+        last: Some((1926, 12, 24)),
+    },
+];
+
+/// Era names that take a text out of the Gregorian digit scan (明治 is unsupported).
+const ERA_NAMES: [&str; 5] = ["令和", "平成", "昭和", "大正", "明治"];
+
+/// `令和8年11月8日`, `令和元年5月1日`, `平成 31年 4月 30日`: the era name first,
+/// then year, month and day; trailing text without digits (a weekday) is allowed.
+fn parse_era_name_date(text: &str) -> Option<String> {
+    let era = ERAS.iter().find(|era| text.starts_with(era.name))?;
+    let rest = text[era.name.len()..].trim_start();
+    let (year, rest) = match rest.strip_prefix('元') {
+        Some(rest) => (1, rest),
+        None => leading_number(rest)?,
+    };
+    let rest = rest.trim_start().strip_prefix('年')?;
+    let (month, rest) = leading_number(rest.trim_start())?;
+    let rest = rest.trim_start().strip_prefix('月')?;
+    let (day, rest) = leading_number(rest.trim_start())?;
+    let rest = rest.trim_start().strip_prefix('日')?;
+    if rest.contains(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    era_date(era, year, month, day)
+}
+
+/// `R8.11.8`, `H31/4/30`, `S55.3.1`: the whole text, one separator kind.
+fn parse_era_letter_date(text: &str) -> Option<String> {
+    let mut chars = text.chars();
+    let letter = chars.next()?;
+    let era = ERAS.iter().find(|era| era.letter == Some(letter))?;
+    let (year, rest) = leading_number(chars.as_str())?;
+    let separator = rest.chars().next().filter(|c| matches!(c, '.' | '/'))?;
+    let (month, rest) = leading_number(rest.strip_prefix(separator)?)?;
+    let (day, rest) = leading_number(rest.strip_prefix(separator)?)?;
+    if !rest.is_empty() {
+        return None;
+    }
+    era_date(era, year, month, day)
+}
+
+/// One or two leading ASCII digits and the rest of the text.
+fn leading_number(text: &str) -> Option<(u32, &str)> {
+    let len = text
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(text.len());
+    if !(1..=2).contains(&len) {
+        return None;
+    }
+    Some((text[..len].parse().ok()?, &text[len..]))
+}
+
+/// The Gregorian date of an era date, only when it falls inside that era.
+fn era_date(era: &Era, year: u32, month: u32, day: u32) -> Option<String> {
+    if year == 0 {
+        return None;
+    }
+    let date = (era.first.0 + year - 1, month, day);
+    let in_era = date >= era.first && era.last.is_none_or(|last| date <= last);
+    in_era.then(|| calendar_date(date.0, month, day)).flatten()
+}
+
+/// `YYYY-MM-DD` for a valid calendar date with a four-digit year.
+fn calendar_date(year: u32, month: u32, day: u32) -> Option<String> {
     let days = match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
-        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) => {
+            29
+        }
         2 => 28,
         _ => return None,
     };
-    ((1000..=9999).contains(&year) && (1..=days).contains(&day) && separators_ok)
+    ((1000..=9999).contains(&year) && (1..=days).contains(&day))
         .then(|| format!("{year:04}-{month:02}-{day:02}"))
 }
 
@@ -572,7 +684,7 @@ mod tests {
     fn values_normalize_deterministically() {
         assert_eq!(parse_date("2026/12/01"), Some("2026-12-01".into()));
         assert_eq!(parse_date("2026-2-30"), None);
-        assert_eq!(parse_date("令和8年11月8日"), None);
+        assert_eq!(parse_date("令和8年11月8日"), Some("2026-11-08".into()));
         let amount = |s| normalize_value(FieldType::Amount, s);
         assert_eq!(amount("¥12,100（税込）"), Some(json!(12100)));
         assert_eq!(amount("１２，１００円"), Some(json!(12100)));
@@ -583,6 +695,66 @@ mod tests {
             normalize_value(FieldType::Number, "3.5 kg"),
             Some(json!(3.5))
         );
+    }
+
+    #[test]
+    fn era_dates_convert_within_era_bounds() {
+        let date = |s: &str| normalize_value(FieldType::Date, s);
+        for (text, iso) in [
+            ("令和8年11月8日", "2026-11-08"),
+            ("令和８年１１月８日", "2026-11-08"),
+            ("令和 8年 11月 8日（日）", "2026-11-08"),
+            ("㋿8年11月8日", "2026-11-08"),
+            ("令和元年5月1日", "2019-05-01"),
+            ("令和1年5月1日", "2019-05-01"),
+            ("令和6年2月29日", "2024-02-29"),
+            ("平成31年4月30日", "2019-04-30"),
+            ("㍻元年1月8日", "1989-01-08"),
+            ("昭和64年1月7日", "1989-01-07"),
+            ("昭和元年12月25日", "1926-12-25"),
+            ("大正15年12月24日", "1926-12-24"),
+            ("大正元年7月30日", "1912-07-30"),
+            ("R8.11.8", "2026-11-08"),
+            ("Ｒ０８．１１．０８", "2026-11-08"),
+            ("H31.4.30", "2019-04-30"),
+            ("H31/4/30", "2019-04-30"),
+            ("S55.3.1", "1980-03-01"),
+        ] {
+            assert_eq!(date(text), Some(json!(iso)), "{text}");
+        }
+        for text in [
+            // Outside the era: each boundary is checked on both sides.
+            "令和元年4月30日",
+            "平成31年5月1日",
+            "平成元年1月7日",
+            "昭和64年1月8日",
+            "昭和元年12月24日",
+            "大正15年12月25日",
+            "大正元年7月29日",
+            "H31.5.1",
+            "R1.4.30",
+            "S1.2.3",
+            // Not a calendar date, unsupported or not a single date.
+            "令和0年1月1日",
+            "令和8年2月29日",
+            "令和8年13月1日",
+            "明治45年7月29日",
+            "令和8年11月",
+            "令和100年1月1日",
+            "令和8年11月8日〜令和8年12月8日",
+            "発行日 令和8年11月8日",
+            // Mixed notations are not digit-scanned.
+            "2026年(令和8年)11月8日",
+            "2026年11月8日(令和8年)",
+            // Abbreviations need the whole text, one separator kind and a known letter.
+            "R8.11/8",
+            "R8.11.8(日)",
+            "T2.3.4",
+            "r8.11.8",
+            "R123.1.1",
+        ] {
+            assert_eq!(date(text), None, "{text}");
+        }
     }
 
     #[test]
