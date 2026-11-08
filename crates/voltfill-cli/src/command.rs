@@ -14,7 +14,7 @@ use voltfill_core::model::{JevResponse, Strategy};
 use voltfill_core::{pdf, schema};
 use voltfill_server::cli::settings;
 
-const HELP: &str = "VOLTFILL — PDF extraction\n\nvoltfill run --config voltfill.yaml (or voltfill.toml / voltfill.json)\nvoltfill serve --config voltfill.yaml\nvoltfill serve --help\nvoltfill run INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --mock ANSWERS.json\nvoltfill inspect INPUT.pdf\nvoltfill validate SCHEMA.json\n\n--strategy text|vision|hybrid (default: text)\n--model ID (default: jev-1.14.0); images require a pinned version >= 1.14.0.\n--renderer pdfium|hayro selects an enabled renderer; no automatic fallback.\n--pdfium-lib PATH or VOLTFILL_PDFIUM_LIB_PATH selects PDFium when --renderer is omitted\n--pixels-per-point NUMBER sets render scale (default: 1.5).\n--config FILE (or -c FILE, default VOLTFILL_CONFIG) loads YAML/TOML launch settings or legacy JSON execution limits.\nPrecedence: CLI > selected file > environment > defaults.\n--resource-config FILE (or VOLTFILL_RESOURCE_CONFIG) lowers PDF/render ceilings.\nVOLTFILL_EXECUTION_CONFIG selects execution JSON when no execution section/file is supplied.\nVOLTFILL_MODEL, VOLTFILL_STRATEGY, VOLTFILL_RENDERER, VOLTFILL_PIXELS_PER_POINT\nand VOLTFILL_LOG_LEVEL provide startup defaults.\n--max-concurrency N (default: 2, at least 1); rate limits may reduce concurrency.\n--max-attempts 1|2|3 includes the first attempt (default: 3).\n--log-level off|error|warn|info|debug (default: off) enables local OTLP JSON logs.\nLogs use stderr with JSON on stdout; with --output FILE (or -o FILE),\nlogs use stdout and results go to the file. Debug logs cover VOLTFILL only.\n--dry-run inspects the input without sending requests.\n--evaluation-profile synthetic enables confidence filtering for local synthetic examples.\nBy default, resolved values are returned without a confidence cutoff.\n\nRemote mode requires VOLTFILL_JEV_ENDPOINT (trusted HTTPS, no URL fallback) and\nVOLTFILL_JEV_API_KEY or VOLTFILL_JEV_API_KEY_FILE (one explicit credential file). Vision/Hybrid select image input;\nno additional image permission flag is required. Reports retain original\nresponse bodies regardless of log level and remain evaluation-only.\nLong-form --pdf, --schema, --allow-remote and --execution-config are also supported.\n";
+const HELP: &str = "VOLTFILL — PDF extraction\n\nvoltfill run --config voltfill.yaml (or voltfill.toml / voltfill.json)\nvoltfill serve --config voltfill.yaml\nvoltfill serve --help\nvoltfill run INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --mock ANSWERS.json\nvoltfill inspect INPUT.pdf\nvoltfill validate SCHEMA.json\n\n--strategy text|vision|hybrid (default: text)\n--model ID (default: jev-1.14.0); images require a pinned version >= 1.14.0.\n--renderer pdfium|hayro selects an enabled renderer; no automatic fallback.\n--pdfium-lib PATH or VOLTFILL_PDFIUM_LIB_PATH selects PDFium when --renderer is omitted\n--pixels-per-point NUMBER sets render scale (default: 1.5).\n--config FILE (or -c FILE, default VOLTFILL_CONFIG) loads YAML/TOML launch settings or legacy JSON execution limits.\nPrecedence: CLI > selected file > environment > defaults.\n--resource-config FILE (or VOLTFILL_RESOURCE_CONFIG) lowers PDF/render ceilings.\nVOLTFILL_EXECUTION_CONFIG selects execution JSON when no execution section/file is supplied.\nVOLTFILL_MODEL, VOLTFILL_STRATEGY, VOLTFILL_RENDERER, VOLTFILL_PIXELS_PER_POINT\nand VOLTFILL_LOG_LEVEL provide startup defaults.\n--max-concurrency N (default: 2, at least 1); rate limits may reduce concurrency.\n--max-attempts 1|2|3 includes the first attempt (default: 3).\n--log-level off|error|warn|info|debug (default: off) enables JSON Lines logs.\nLogs use stderr with JSON on stdout; with --output FILE (or -o FILE),\nlogs use stdout and results go to the file. Debug logs cover VOLTFILL only.\n--dry-run inspects the input without sending requests.\n--evaluation-profile synthetic enables confidence filtering for local synthetic examples.\nBy default, resolved values are returned without a confidence cutoff.\n\nRemote mode requires VOLTFILL_JEV_ENDPOINT (trusted HTTPS, no URL fallback) and\nVOLTFILL_JEV_API_KEY or VOLTFILL_JEV_API_KEY_FILE (one explicit credential file). Vision/Hybrid select image input;\nno additional image permission flag is required. Reports retain original\nresponse bodies regardless of log level and remain evaluation-only.\nLong-form --pdf, --schema, --allow-remote and --execution-config are also supported.\n";
 
 struct Args {
     command: String,
@@ -403,13 +403,13 @@ fn execution_config(args: &Args) -> Result<ExecutionConfig, (u8, &'static str)> 
         .map_err(|_| (2, "invalid_execution_config"))?;
     Ok(config)
 }
-fn logger(level: log::LevelFilter, output_file: bool) -> voltfill_core::logging::TelemetryLogger {
+fn logger(level: log::LevelFilter, output_file: bool) -> voltfill_core::logging::JsonLogger {
     let writer: Box<dyn Write + Send> = if output_file {
         Box::new(io::stdout())
     } else {
         Box::new(io::stderr())
     };
-    voltfill_core::logging::TelemetryLogger::new("voltfill-cli", level, writer)
+    voltfill_core::logging::JsonLogger::new("voltfill-cli", level, writer)
 }
 fn run_with<E: Evaluator>(
     arguments: impl IntoIterator<Item = String>,
@@ -610,13 +610,6 @@ mod tests {
         AttemptBudget, Clock, HttpRequest, HttpResponse, NoopObserver, Transport, TransportError,
     };
 
-    mod otel {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/support/otel.rs"
-        ));
-    }
-
     #[test]
     fn logger_limits_levels_to_our_targets() {
         let logger = logger(log::LevelFilter::Info, false);
@@ -712,7 +705,7 @@ mod tests {
             bytes: captured.clone(),
             owner: std::thread::current().id(),
         };
-        let built = voltfill_core::logging::TelemetryLogger::new(
+        let built = voltfill_core::logging::JsonLogger::new(
             "voltfill-cli",
             log::LevelFilter::Debug,
             writer,
@@ -782,7 +775,7 @@ mod tests {
                 .lock()
                 .expect("the test capture writer must not have panicked")
                 .clone();
-            let logs = std::str::from_utf8(&bytes).expect("OTLP log output must be UTF-8");
+            let logs = std::str::from_utf8(&bytes).expect("log output must be UTF-8");
             for canary in [
                 "private_response_canary",
                 "private_source_canary",
@@ -795,10 +788,7 @@ mod tests {
             let events: Vec<Value> = logs
                 .lines()
                 .map(|line| {
-                    otel::otlp_event(
-                        serde_json::from_str(line)
-                            .expect("each OTLP output line must be a JSON envelope"),
-                    )
+                    serde_json::from_str(line).expect("each log line must be a JSON object")
                 })
                 .collect();
             assert_eq!(events.is_empty(), level <= log::LevelFilter::Error);
