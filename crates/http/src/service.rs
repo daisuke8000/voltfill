@@ -4,18 +4,20 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing;
 use axum::{Json, Router};
-use domain::engine::{self, DocumentCache, EvaluationProfile, ExtractOptions};
-use domain::evaluate::{FixtureEvaluator, MonotonicClock, RemoteEvaluator};
-use domain::jev::http::{Endpoint, HttpTransport};
-use domain::jev::transport::{AttemptBudget, Clock, ExecutionConfig, Secret, TransportError};
-use domain::model::{ExtractionReport, JevResponse, Strategy};
-use domain::schema;
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
+use voltfill_domain::engine::{self, DocumentCache, EvaluationProfile, ExtractOptions};
+use voltfill_domain::evaluate::{FixtureEvaluator, MonotonicClock, RemoteEvaluator};
+use voltfill_domain::jev::http::{Endpoint, HttpTransport};
+use voltfill_domain::jev::transport::{
+    AttemptBudget, Clock, ExecutionConfig, Secret, TransportError,
+};
+use voltfill_domain::model::{ExtractionReport, JevResponse, Strategy};
+use voltfill_domain::schema;
 
 enum Backend {
     Fixture(Vec<u8>),
@@ -24,7 +26,7 @@ enum Backend {
 pub struct ServerConfig {
     backend: Backend,
     pub execution: ExecutionConfig,
-    pub resources: domain::resources::ResourceLimits,
+    pub resources: voltfill_domain::resources::ResourceLimits,
     pub upload_timeout_ms: u64,
     /// Off by default: reuse keeps the last document's text and page images in
     /// memory after the request ends, until `reuse_document_ttl_ms` passes.
@@ -34,7 +36,7 @@ pub struct ServerConfig {
     pub allow_preview_images: bool,
     pub api_key: Option<Secret>,
     #[cfg(any(feature = "pdfium", feature = "hayro"))]
-    pub render: Option<domain::render::RenderConfig>,
+    pub render: Option<voltfill_domain::render::RenderConfig>,
 }
 impl ServerConfig {
     pub fn fixture(bytes: Vec<u8>) -> Result<Self, &'static str> {
@@ -46,7 +48,7 @@ impl ServerConfig {
             upload_timeout_ms: 30_000,
             reuse_document: false,
             reuse_document_ttl_ms: 60_000,
-            model: domain::jev::MODEL.into(),
+            model: voltfill_domain::jev::MODEL.into(),
             allow_preview_images: false,
             api_key: None,
             #[cfg(any(feature = "pdfium", feature = "hayro"))]
@@ -62,7 +64,7 @@ impl ServerConfig {
             upload_timeout_ms: 30_000,
             reuse_document: false,
             reuse_document_ttl_ms: 60_000,
-            model: domain::jev::MODEL.into(),
+            model: voltfill_domain::jev::MODEL.into(),
             allow_preview_images: false,
             api_key: None,
             #[cfg(any(feature = "pdfium", feature = "hayro"))]
@@ -148,7 +150,7 @@ impl AppState {
         if !(1..=3_600_000).contains(&config.reuse_document_ttl_ms) {
             return Err("invalid_reuse_document_ttl");
         }
-        domain::jev::validate_model(&config.model).map_err(|_| "invalid_model")?;
+        voltfill_domain::jev::validate_model(&config.model).map_err(|_| "invalid_model")?;
         let transport = match &config.backend {
             Backend::Remote(endpoint, _) => Some(
                 HttpTransport::try_new(endpoint.clone()).map_err(|_| "transport_setup_failed")?,
@@ -434,10 +436,10 @@ async fn extract(State(state): State<AppState>, request: Request) -> Response {
         return error(StatusCode::BAD_REQUEST, "strategy_schema_mismatch");
     }
     let model = options.model.unwrap_or_else(|| state.config.model.clone());
-    if domain::jev::validate_model(&model).is_err() {
+    if voltfill_domain::jev::validate_model(&model).is_err() {
         return error(StatusCode::BAD_REQUEST, "invalid_model");
     }
-    if options.strategy != Strategy::TextFirst && !domain::jev::supports_images(&model) {
+    if options.strategy != Strategy::TextFirst && !voltfill_domain::jev::supports_images(&model) {
         return error(StatusCode::BAD_REQUEST, "model_does_not_support_images");
     }
     if matches!(state.config.backend, Backend::Remote(_, _))
@@ -505,7 +507,7 @@ async fn extract(State(state): State<AppState>, request: Request) -> Response {
                                     cancelled,
                                 },
                                 AttemptBudget::default(),
-                                domain::jev::transport::NoopObserver,
+                                voltfill_domain::jev::transport::NoopObserver,
                             )
                             .ok()
                         })
@@ -604,8 +606,8 @@ fn extraction_error(error: engine::EngineError) -> Response {
 mod tests {
     use super::*;
     use axum::body::{self, Body};
-    use domain::model::{JevResponse, ResponseBody};
     use tower::ServiceExt;
+    use voltfill_domain::model::{JevResponse, ResponseBody};
 
     fn state() -> AppState {
         AppState::try_new(

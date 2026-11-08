@@ -1,12 +1,12 @@
 mod support;
-use domain::engine::{self, ExtractOptions};
-use domain::evaluate::{FixtureEvaluator, RemoteEvaluator};
-use domain::jev::transport::{
+use serde_json::{Value, json};
+use voltfill_domain::engine::{self, ExtractOptions};
+use voltfill_domain::evaluate::{FixtureEvaluator, RemoteEvaluator};
+use voltfill_domain::jev::transport::{
     AttemptBudget, Clock, HttpRequest, HttpResponse, NoopObserver, Secret, Transport,
     TransportError,
 };
-use domain::{jev, schema};
-use serde_json::{Value, json};
+use voltfill_domain::{jev, schema};
 
 #[derive(Default)]
 struct Time(u64);

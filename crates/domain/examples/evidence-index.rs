@@ -1,11 +1,11 @@
 //! Reproducible synthetic microbenchmark for canonical Evidence lookup.
 //! Not a PDF/Jev benchmark; output contains timings/counts only.
-use domain::candidates::CandidateIndex;
-use domain::geometry::Rect;
-use domain::model::{Quality, SourceFragment, Strategy};
 use serde_json::json;
 use std::hint;
 use std::time::Instant;
+use voltfill_domain::candidates::CandidateIndex;
+use voltfill_domain::geometry::Rect;
+use voltfill_domain::model::{Quality, SourceFragment, Strategy};
 fn main() {
     let mut samples = Vec::new();
     for count in [1_000, 5_000, 10_000] {

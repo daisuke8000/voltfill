@@ -1,7 +1,7 @@
 //! Construction-only integration checks. No call to Transport::send occurs.
 //! Request/header/Retry-After preparation is tested in the http module itself.
-use domain::jev::http::{Endpoint, HttpTransport};
-use domain::jev::transport::Secret;
+use voltfill_domain::jev::http::{Endpoint, HttpTransport};
+use voltfill_domain::jev::transport::Secret;
 
 #[test]
 fn transport_constructs_without_network_or_credentials() {

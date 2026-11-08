@@ -351,20 +351,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "client"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "httpdate",
- "log",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
-]
-
-[[package]]
 name = "color"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -506,22 +492,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
-]
-
-[[package]]
-name = "domain"
-version = "0.1.0"
-dependencies = [
- "client",
- "log",
- "lopdf 0.46.0",
- "render",
- "serde",
- "serde_json",
- "sha2",
- "source",
- "thiserror",
- "unicode-normalization",
 ]
 
 [[package]]
@@ -1822,17 +1792,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
-name = "render"
-version = "0.1.0"
-dependencies = [
- "firecrawl-pdfium",
- "hayro",
- "png",
- "source",
- "thiserror",
-]
-
-[[package]]
 name = "reqwest"
 version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2035,19 +1994,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "server"
-version = "0.1.0"
-dependencies = [
- "axum",
- "domain",
- "log",
- "serde",
- "serde_json",
- "tokio",
- "tower",
-]
-
-[[package]]
 name = "sha2"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2132,17 +2078,6 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "source"
-version = "0.1.0"
-dependencies = [
- "lopdf 0.46.0",
- "pdf-inspector",
- "serde",
- "sha2",
- "thiserror",
 ]
 
 [[package]]
@@ -2509,16 +2444,81 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
-name = "voltfill"
+name = "voltfill-cli"
 version = "0.1.0"
 dependencies = [
- "domain",
  "log",
  "serde",
  "serde-saphyr",
  "serde_json",
- "server",
  "toml",
+ "voltfill-domain",
+ "voltfill-http",
+]
+
+[[package]]
+name = "voltfill-client"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "httpdate",
+ "log",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "voltfill-domain"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "lopdf 0.46.0",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "unicode-normalization",
+ "voltfill-client",
+ "voltfill-render",
+ "voltfill-source",
+]
+
+[[package]]
+name = "voltfill-http"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "log",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "voltfill-domain",
+]
+
+[[package]]
+name = "voltfill-render"
+version = "0.1.0"
+dependencies = [
+ "firecrawl-pdfium",
+ "hayro",
+ "png",
+ "thiserror",
+ "voltfill-source",
+]
+
+[[package]]
+name = "voltfill-source"
+version = "0.1.0"
+dependencies = [
+ "lopdf 0.46.0",
+ "pdf-inspector",
+ "serde",
+ "sha2",
+ "thiserror",
 ]
 
 [[package]]

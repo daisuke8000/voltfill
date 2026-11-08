@@ -16,10 +16,10 @@ These rules protect users, credentials and response data. Do not relax them with
 
 ## Crate boundaries
 
-- `source` owns PDF inspection, source diagnostics and geometry. `render` owns optional page rendering and may depend on `source`. Neither requires an extraction schema or Evidence.
-- `client` owns the Jev protocol, transport, bounded execution and received-body recording. It must not depend on PDF crates or `domain`.
-- `domain` owns Evidence, extraction fields/results, aggregate timings/usage and logging. Foundation crates must never depend on `domain`.
-- `voltfill` and `server` are thin front ends over `domain`.
+- `voltfill-source` owns PDF inspection, source diagnostics and geometry. `voltfill-render` owns optional page rendering and may depend on `voltfill-source`. Neither requires an extraction schema or Evidence.
+- `voltfill-client` owns the Jev protocol, transport, bounded execution and received-body recording. It must not depend on PDF crates or `voltfill-domain`.
+- `voltfill-domain` owns Evidence, extraction fields/results, aggregate timings/usage and logging. Foundation crates must never depend on `voltfill-domain`.
+- `voltfill-cli` and `voltfill-http` are thin front ends over `voltfill-domain`.
 
 ## Conventions
 

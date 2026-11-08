@@ -1,18 +1,18 @@
 //! Command parsing, local inspection, and explicitly enabled extraction.
 use crate::config;
-use domain::engine::{self, EvaluationProfile, ExtractOptions};
-use domain::evaluate::{Evaluator, FixtureEvaluator, RemoteEvaluator};
-use domain::jev::transport::{ExecutionConfig, Secret};
-use domain::model::{JevResponse, Strategy};
-use domain::{pdf, schema};
 #[cfg(test)]
 use serde_json::Value;
 use serde_json::json;
-use server::cli::settings;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use voltfill_domain::engine::{self, EvaluationProfile, ExtractOptions};
+use voltfill_domain::evaluate::{Evaluator, FixtureEvaluator, RemoteEvaluator};
+use voltfill_domain::jev::transport::{ExecutionConfig, Secret};
+use voltfill_domain::model::{JevResponse, Strategy};
+use voltfill_domain::{pdf, schema};
+use voltfill_http::cli::settings;
 
 const HELP: &str = "VOLTFILL — PDF extraction\n\nvoltfill run --config voltfill.yaml (or voltfill.toml / voltfill.json)\nvoltfill serve --config voltfill.yaml\nvoltfill serve --help\nvoltfill run INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --mock ANSWERS.json\nvoltfill inspect INPUT.pdf\nvoltfill fill INPUT.pdf FORM.json (offline: match form labels to PDF text)\nvoltfill validate SCHEMA.json\n\n--strategy text|vision|hybrid (default: text)\n--model ID (default: jev-1.14.0); images require a pinned version >= 1.14.0.\n--renderer pdfium|hayro selects an enabled renderer; no automatic fallback.\n--pdfium-lib PATH or VOLTFILL_PDFIUM_LIB_PATH selects PDFium when --renderer is omitted\n--pixels-per-point NUMBER sets render scale (default: 1.5).\n--config FILE (or -c FILE, default VOLTFILL_CONFIG) loads YAML/TOML launch settings or legacy JSON execution limits.\nPrecedence: CLI > selected file > environment > defaults.\n--resource-config FILE (or VOLTFILL_RESOURCE_CONFIG) lowers PDF/render ceilings.\nVOLTFILL_EXECUTION_CONFIG selects execution JSON when no execution section/file is supplied.\nVOLTFILL_MODEL, VOLTFILL_STRATEGY, VOLTFILL_RENDERER, VOLTFILL_PIXELS_PER_POINT\nand VOLTFILL_LOG_LEVEL provide startup defaults.\n--max-concurrency N (default: 2, at least 1); rate limits may reduce concurrency.\n--max-attempts 1|2|3 includes the first attempt (default: 3).\n--log-level off|error|warn|info|debug (default: off) enables JSON Lines logs.\nLogs use stderr with JSON on stdout; with --output FILE (or -o FILE),\nlogs use stdout and results go to the file. Debug logs cover VOLTFILL only.\n--dry-run inspects the input without sending requests.\n--evaluation-profile synthetic enables confidence filtering for local synthetic examples.\nBy default, resolved values are returned without a confidence cutoff.\n\nRemote mode requires VOLTFILL_JEV_ENDPOINT (trusted HTTPS, no URL fallback) and\nVOLTFILL_JEV_API_KEY or VOLTFILL_JEV_API_KEY_FILE (one explicit credential file). Vision/Hybrid select image input;\nno additional image permission flag is required. Reports retain original\nresponse bodies regardless of log level and remain evaluation-only.\nLong-form --pdf, --schema, --allow-remote and --execution-config are also supported.\n";
 
@@ -22,7 +22,7 @@ struct Args {
     flags: BTreeSet<String>,
     library_path: Option<PathBuf>,
     execution: Option<ExecutionConfig>,
-    resources: domain::resources::ResourceLimits,
+    resources: voltfill_domain::resources::ResourceLimits,
     launch_path: Option<PathBuf>,
 }
 fn input_error() -> (u8, &'static str) {
@@ -298,7 +298,7 @@ fn execute<E: Evaluator>(
     let code = if report
         .fields
         .iter()
-        .all(|f| f.status == domain::model::Status::Extracted)
+        .all(|f| f.status == voltfill_domain::model::Status::Extracted)
     {
         0
     } else {
@@ -342,9 +342,9 @@ fn configure_rendering(
     #[cfg(any(feature = "pdfium", feature = "hayro"))]
     {
         let mut config = if renderer == "hayro" {
-            domain::render::RenderConfig::hayro()
+            voltfill_domain::render::RenderConfig::hayro()
         } else {
-            domain::render::RenderConfig::new(
+            voltfill_domain::render::RenderConfig::new(
                 args.library_path
                     .as_ref()
                     .ok_or((2, "rendering_required"))?,
@@ -413,13 +413,13 @@ fn execution_config(args: &Args) -> Result<ExecutionConfig, (u8, &'static str)> 
         .map_err(|_| (2, "invalid_execution_config"))?;
     Ok(config)
 }
-fn logger(level: log::LevelFilter, output_file: bool) -> domain::logging::JsonLogger {
+fn logger(level: log::LevelFilter, output_file: bool) -> voltfill_domain::logging::JsonLogger {
     let writer: Box<dyn Write + Send> = if output_file {
         Box::new(io::stdout())
     } else {
         Box::new(io::stderr())
     };
-    domain::logging::JsonLogger::new("voltfill-cli", level, writer)
+    voltfill_domain::logging::JsonLogger::new("voltfill-cli", level, writer)
 }
 fn run_with<E: Evaluator>(
     arguments: impl IntoIterator<Item = String>,
@@ -441,13 +441,15 @@ fn run_with<E: Evaluator>(
         return Ok(0);
     }
     if args.command == "fill" {
-        let form =
-            domain::fill::parse_form(&read(args.value("--form")?, domain::fill::MAX_FORM_BYTES)?)
-                .map_err(|_| (2, "invalid_form"))?;
+        let form = voltfill_domain::fill::parse_form(&read(
+            args.value("--form")?,
+            voltfill_domain::fill::MAX_FORM_BYTES,
+        )?)
+        .map_err(|_| (2, "invalid_form"))?;
         let bytes = read(args.value("--pdf")?, args.resources.pdf.max_bytes)?;
         let snapshot =
             pdf::inspect(&bytes, args.resources.pdf).map_err(|_| (4, "pdf_inspection_failed"))?;
-        let result = domain::fill::fill(&snapshot.document_id, &snapshot.fragments, &form);
+        let result = voltfill_domain::fill::fill(&snapshot.document_id, &snapshot.fragments, &form);
         output(&args, &result)?;
         return Ok(0);
     }
@@ -477,9 +479,9 @@ fn run_with<E: Evaluator>(
         .values
         .get("--model")
         .map(String::as_str)
-        .unwrap_or(domain::jev::MODEL);
-    domain::jev::validate_model(model).map_err(|_| (2, "invalid_model"))?;
-    if strategy != Strategy::TextFirst && !domain::jev::supports_images(model) {
+        .unwrap_or(voltfill_domain::jev::MODEL);
+    voltfill_domain::jev::validate_model(model).map_err(|_| (2, "invalid_model"))?;
+    if strategy != Strategy::TextFirst && !voltfill_domain::jev::supports_images(model) {
         return Err((2, "model_does_not_support_images"));
     }
     let evaluation_profile = match args.values.get("--evaluation-profile").map(String::as_str) {
@@ -588,10 +590,10 @@ pub(crate) fn main() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.first().is_some_and(|s| s == "serve") {
         let code = if arguments.iter().any(|s| s == "--help" || s == "-h") {
-            server::cli::entry(vec!["--help".into()], None)
+            voltfill_http::cli::entry(vec!["--help".into()], None)
         } else {
             match config::expand(arguments) {
-                Ok(invocation) => server::cli::entry_with_resources(
+                Ok(invocation) => voltfill_http::cli::entry_with_resources(
                     invocation.arguments.into_iter().skip(1).collect(),
                     invocation.execution,
                     invocation.resources,
@@ -625,11 +627,11 @@ pub(crate) fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use domain::jev::transport::{
-        AttemptBudget, Clock, HttpRequest, HttpResponse, NoopObserver, Transport, TransportError,
-    };
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use voltfill_domain::jev::transport::{
+        AttemptBudget, Clock, HttpRequest, HttpResponse, NoopObserver, Transport, TransportError,
+    };
 
     #[test]
     fn logger_limits_levels_to_our_targets() {
@@ -696,7 +698,7 @@ mod tests {
                 answers.insert(id.clone(), json!({"type":"choice","choice":selected,"probabilities":probabilities,"confidence":self.1}));
             }
             Ok(HttpResponse { body_error: None, status: 200, body: serde_json::to_vec(&json!({
-                "model":domain::jev::MODEL,"answers":answers,"usage":{"input_tokens":10,"output_tokens":1}
+                "model":voltfill_domain::jev::MODEL,"answers":answers,"usage":{"input_tokens":10,"output_tokens":1}
             })).expect("the scripted response must serialize as JSON"), retry_after_ms: None })
         }
     }
@@ -726,11 +728,14 @@ mod tests {
             bytes: captured.clone(),
             owner: std::thread::current().id(),
         };
-        let built =
-            domain::logging::JsonLogger::new("voltfill-cli", log::LevelFilter::Debug, writer);
+        let built = voltfill_domain::logging::JsonLogger::new(
+            "voltfill-cli",
+            log::LevelFilter::Debug,
+            writer,
+        );
         log::set_boxed_logger(Box::new(built))
             .expect("this test binary must install the log capture once");
-        let request=domain::jev::parse_request(br#"{"model":"jev-1.14.0","state":"private_source_canary","questions":{"q":{"type":"choice","instructions":"pick","criteria":{"a":"ALPHA42","b":"other"}}}}"#,domain::jev::Limits::default()).expect("the synthetic choice request satisfies the wire contract");
+        let request=voltfill_domain::jev::parse_request(br#"{"model":"jev-1.14.0","state":"private_source_canary","questions":{"q":{"type":"choice","instructions":"pick","criteria":{"a":"ALPHA42","b":"other"}}}}"#,voltfill_domain::jev::Limits::default()).expect("the synthetic choice request satisfies the wire contract");
         let mut baseline = None;
         for level in [
             log::LevelFilter::Off,
@@ -759,7 +764,7 @@ mod tests {
                 .evaluate(
                     &request,
                     &[],
-                    &domain::evaluate::EvaluationContext {
+                    &voltfill_domain::evaluate::EvaluationContext {
                         field_id: "field",
                         page: 1,
                         remaining_requests: 2,

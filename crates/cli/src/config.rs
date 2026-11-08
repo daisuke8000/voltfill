@@ -1,11 +1,11 @@
 //! Explicit launch files; no filesystem discovery, interpolation or credentials.
-use domain::jev::transport::ExecutionConfig;
-use domain::resources::ResourceLimits;
 use serde::Deserialize;
 use serde_json::Value;
-use server::cli::settings;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use voltfill_domain::jev::transport::ExecutionConfig;
+use voltfill_domain::resources::ResourceLimits;
+use voltfill_http::cli::settings;
 
 pub struct Invocation {
     pub arguments: Vec<String>,
@@ -175,7 +175,7 @@ pub fn expand(arguments: impl IntoIterator<Item = String>) -> Result<Invocation,
             .map_err(|_| "invalid_launch_config")?
     } else {
         // Use the existing duplicate-key/depth checks for JSON configuration too.
-        domain::jev::json::parse(&bytes, domain::jev::Limits::default())
+        voltfill_domain::jev::json::parse(&bytes, voltfill_domain::jev::Limits::default())
             .map_err(|_| "invalid_launch_config")?
     };
     let is_launch = value.as_object().is_some_and(|v| {

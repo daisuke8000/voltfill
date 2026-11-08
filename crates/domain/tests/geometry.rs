@@ -1,5 +1,5 @@
 //! Mathematical fixtures only: these do not establish PDFium device agreement.
-use domain::geometry::{
+use voltfill_domain::geometry::{
     AffineTransform, GeometryError, ImageTransform, Padding, PageGeometry, Point, Rect, Rotation,
 };
 

@@ -1,9 +1,9 @@
-use client::transport::{
+use std::collections::VecDeque;
+use voltfill_client::transport::{
     self, Attempt, AttemptBudget, AttemptContext, AttemptObserver, Clock, Failure, HttpRequest,
     HttpResponse, Policy, Secret, Transport, TransportError,
 };
-use client::{self as jev, RecordingTransport, ResponseBody};
-use std::collections::VecDeque;
+use voltfill_client::{self as jev, RecordingTransport, ResponseBody};
 
 struct Wire(VecDeque<Result<HttpResponse, TransportError>>);
 impl Transport for Wire {

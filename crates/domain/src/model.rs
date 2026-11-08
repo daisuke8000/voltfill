@@ -20,7 +20,7 @@ pub enum Strategy {
     Hybrid,
 }
 
-pub use source::{Quality, SourceFragment};
+pub use voltfill_source::{Quality, SourceFragment};
 
 /// Byte offsets into one original source fragment; offsets must lie on UTF-8 boundaries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -81,7 +81,7 @@ impl FieldResult {
     }
 }
 
-pub use source::PageDiagnostic;
+pub use voltfill_source::PageDiagnostic;
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Timings {
@@ -132,7 +132,7 @@ impl UsageSummary {
     }
 }
 
-pub use client::ResponseBody;
+pub use voltfill_client::ResponseBody;
 
 #[derive(Debug, Serialize)]
 pub struct JevResponse {

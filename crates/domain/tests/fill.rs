@@ -1,7 +1,7 @@
 mod support;
-use domain::fill::{self, FillStatus};
-use domain::pdf::{self, PdfLimits};
 use serde_json::json;
+use voltfill_domain::fill::{self, FillStatus};
+use voltfill_domain::pdf::{self, PdfLimits};
 
 #[test]
 fn fills_a_labelled_value_from_a_real_pdf_text_layer() {

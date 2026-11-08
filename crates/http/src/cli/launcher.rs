@@ -1,10 +1,10 @@
 //! Server command parsing and startup.
 use super::settings;
 use crate::{AppState, ServerConfig};
-use domain::jev::transport::ExecutionConfig;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
+use voltfill_domain::jev::transport::ExecutionConfig;
 
 const HELP: &str = "voltfill serve --config voltfill.yaml (or voltfill.toml / voltfill.json)\nvoltfill serve --mock FIXTURE.json | --remote\nvoltfill-server remains supported.\n  [--listen 127.0.0.1:3000] [--config CONFIG.json]\n  [--allow-images] [--renderer pdfium|hayro] (no automatic fallback)\n  [--pdfium-lib ABSOLUTE_PATH or VOLTFILL_PDFIUM_LIB_PATH] (selects PDFium when renderer omitted)\n  [--pixels-per-point NUMBER] (default: 1.5)\n  [--log-level off|error|warn|info|debug] (default: off)\n  [--model ID] [--upload-timeout-ms 1..3600000] (default: 30000)\n  [--reuse-document] keeps the last PDF's text and page images in memory for reuse by an identical next request (default: off)\n  [--reuse-document-ttl-ms 1..3600000] drops that copy after this idle time (default: 60000)\n  [--resource-config FILE] lowers PDF/render resource ceilings.\nPrecedence: CLI > selected launch file > environment > defaults.\nVOLTFILL_LISTEN, VOLTFILL_UPLOAD_TIMEOUT_MS, VOLTFILL_REUSE_DOCUMENT_TTL_MS, VOLTFILL_MODEL, VOLTFILL_RENDERER,\nVOLTFILL_PIXELS_PER_POINT and VOLTFILL_LOG_LEVEL provide startup defaults.\nVOLTFILL_EXECUTION_CONFIG and VOLTFILL_RESOURCE_CONFIG select JSON files when\nno corresponding file/section was selected. VOLTFILL_CONFIG selects a launch\nfile for voltfill serve; standalone voltfill-server accepts execution JSON.\n\nPOST /v1/extract: multipart fields pdf, schema, optional options JSON.\noptions.model overrides the startup model (default jev-1.14.0); image strategies require a pinned version >= 1.14.0.\noptions.evaluation_profile optionally enables confidence filtering; omitted by default.\nGET /health: health check. Remote mode requires VOLTFILL_JEV_ENDPOINT (trusted HTTPS)\nand VOLTFILL_JEV_API_KEY or VOLTFILL_JEV_API_KEY_FILE.\nVOLTFILL_SERVER_API_KEY or VOLTFILL_SERVER_API_KEY_FILE enables Bearer authentication and is required\nfor non-loopback binding. Logs are JSONL; responses contain originals.\n";
 
@@ -60,9 +60,9 @@ fn configure_rendering(
     #[cfg(any(feature = "pdfium", feature = "hayro"))]
     {
         let mut render = if renderer == "hayro" {
-            domain::render::RenderConfig::hayro()
+            voltfill_domain::render::RenderConfig::hayro()
         } else {
-            domain::render::RenderConfig::new(library.ok_or("rendering_required")?)
+            voltfill_domain::render::RenderConfig::new(library.ok_or("rendering_required")?)
         };
         render.pixels_per_point = values
             .get("--pixels-per-point")
@@ -80,7 +80,7 @@ fn configure_rendering(
 fn run(
     arguments: Vec<String>,
     execution: Option<ExecutionConfig>,
-    resources: Option<domain::resources::ResourceLimits>,
+    resources: Option<voltfill_domain::resources::ResourceLimits>,
 ) -> Result<(), &'static str> {
     let mut args = arguments.into_iter();
     let (mut values, mut flags) = (BTreeMap::new(), BTreeSet::new());
@@ -167,7 +167,7 @@ fn run(
         _ => return Err("invalid_log_level"),
     };
     if level != log::LevelFilter::Off {
-        domain::logging::JsonLogger::new("voltfill-server", level, std::io::stdout())
+        voltfill_domain::logging::JsonLogger::new("voltfill-server", level, std::io::stdout())
             .try_init()
             .map_err(|_| "logging_setup_failed")?;
     }
@@ -256,7 +256,7 @@ pub fn entry(arguments: Vec<String>, execution: Option<ExecutionConfig>) -> u8 {
 pub fn entry_with_resources(
     arguments: Vec<String>,
     execution: Option<ExecutionConfig>,
-    resources: Option<domain::resources::ResourceLimits>,
+    resources: Option<voltfill_domain::resources::ResourceLimits>,
 ) -> u8 {
     if arguments.is_empty() || arguments.iter().any(|s| s == "--help" || s == "-h") {
         println!("{HELP}");

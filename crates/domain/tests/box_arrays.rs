@@ -1,7 +1,7 @@
 //! Local source geometry and synthetic extraction; no API or rendering calls.
-use domain::candidates::CandidateIndex;
-use domain::geometry::Rect;
-use domain::model::{Quality, SourceFragment, Strategy};
+use voltfill_domain::candidates::CandidateIndex;
+use voltfill_domain::geometry::Rect;
+use voltfill_domain::model::{Quality, SourceFragment, Strategy};
 
 fn fragment(id: &str, item_index: usize, text: &str, bbox: Rect) -> SourceFragment {
     SourceFragment {

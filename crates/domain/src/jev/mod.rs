@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-pub use client::*;
+pub use voltfill_client::*;
 pub mod transport;
 
 pub(crate) fn entry(value: &Content) -> bool {
