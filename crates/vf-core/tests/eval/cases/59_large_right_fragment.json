@@ -1,0 +1,22 @@
+{
+  "description": "記入前の小さい「氏名：」（10pt）の同じ行の右に、大きい片（14ptの会社名・30ptの見出し「請求書」）がある。間は小さいラベルの高さで4emを超えるため、区切り記号で結び付けず位置だけの候補（ambiguous・geometric_only）。以前はemを2つの片の高さの大きいほうで測り、会社名や見出しを値として埋めていた。4em以内の「請求日：」の右の値は埋める",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "氏名："},
+    {"x": 140, "y": 100, "size": 14, "text": "株式会社サンプル商事"},
+    {"x": 60, "y": 160, "text": "担当者："},
+    {"x": 190, "y": 160, "size": 30, "text": "請求書"},
+    {"x": 60, "y": 200, "text": "請求日："},
+    {"x": 130, "y": 200, "text": "2026/11/08"}
+  ],
+  "form": {"fields": [
+    {"id": "name", "label": "氏名"},
+    {"id": "person", "label": "担当者"},
+    {"id": "issued", "label": "請求日", "type": "date"}
+  ]},
+  "expect": {
+    "name": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "株式会社サンプル商事"},
+    "person": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "請求書"},
+    "issued": {"raw": "2026/11/08", "value": "2026-11-08"}
+  }
+}

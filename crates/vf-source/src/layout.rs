@@ -85,14 +85,16 @@ pub const MAX_COLUMN_ROWS: usize = 5;
 pub const MAX_WINDOW: usize = 16;
 /// Default ceiling on label/value hypotheses for one document.
 pub const DEFAULT_MAX_PAIRS: usize = 50_000;
-/// Widest gap, in em (the larger height of the two fragments), between a
+/// Widest gap, in em (the smaller height of the two fragments), between a
 /// `label：` fragment and the next fragment to its right for the delimiter
 /// to bind them ([`Binding::Delimiter`]). A wider gap binds by position
 /// only ([`Binding::Geometric`]): a blank `氏名：` must not take an unrelated
 /// fragment far to its right (a right-aligned company name) as its value.
 /// Runs closer than about half an em are usually extracted as one fragment
 /// (split by the delimiter instead), so delimiter-bound right values lie
-/// roughly 0.5 to 4 em to the right of their labels.
+/// roughly 0.5 to 4 em to the right of their labels. The smaller height
+/// sets the em, so a large right fragment (a 30 pt title next to a 10 pt
+/// `氏名：`) does not widen the reach of a small label.
 pub const MAX_DELIMITER_GAP_EM: f64 = 4.0;
 /// A value fragment followed on its line by a plain fragment closer than
 /// this many em (the larger height of the two) may continue in it: a value
@@ -314,7 +316,9 @@ pub fn analyze_within(
             // `windows(2)` over left-sorted fragments: no other fragment
             // starts between the label and its value.
             let (l, v) = (fragments[label].bbox, fragments[value].bbox);
-            let em = l.height().max(v.height());
+            // The smaller height: a large right fragment must not widen the
+            // reach of a small `label：`.
+            let em = l.height().min(v.height());
             let binding = if measures[label].kind == Kind::Label
                 && v.left - l.right <= MAX_DELIMITER_GAP_EM * em
             {
@@ -1720,12 +1724,30 @@ mod tests {
         // Up to MAX_DELIMITER_GAP_EM em (40 pt at 10 pt) the delimiter binds.
         assert_eq!(pair(130.0), (Placement::Right, Binding::Delimiter));
         assert_eq!(pair(130.5), (Placement::Right, Binding::Geometric));
-        // The larger font sets the em.
-        let fragments = [
-            frag("a", "合計：", [60.0, 100.0, 90.0, 110.0]),
+        // The smaller font sets the em. Before: the larger one, so a big
+        // right fragment widened the reach of a small `label：` and these
+        // were bound by the delimiter (50 pt and 90 pt from a 10 pt label).
+        let binding = |value: SourceFragment| {
+            let fragments = [frag("a", "氏名：", [60.0, 100.0, 90.0, 110.0]), value];
+            analyze(&fragments).pairs[0].binding
+        };
+        for value in [
+            frag("b", "株式会社サンプル商事", [140.0, 98.0, 280.0, 112.0]),
+            frag("b", "請求書", [180.0, 86.0, 280.0, 116.0]),
             frag("b", "¥12,100", [140.0, 92.0, 210.0, 110.0]),
+        ] {
+            assert_eq!(binding(value), Binding::Geometric);
+        }
+        // A large label and a small value: the small value sets the em too.
+        let fragments = [
+            frag("a", "合計：", [60.0, 90.0, 120.0, 110.0]),
+            frag("b", "¥12,100", [165.0, 100.0, 200.0, 110.0]),
         ];
-        assert_eq!(analyze(&fragments).pairs[0].binding, Binding::Delimiter);
+        assert_eq!(analyze(&fragments).pairs[0].binding, Binding::Geometric);
+        assert_eq!(
+            binding(frag("b", "¥12,100", [130.0, 96.0, 200.0, 110.0])),
+            Binding::Delimiter
+        );
     }
 
     #[test]
