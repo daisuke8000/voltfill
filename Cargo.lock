@@ -2447,13 +2447,17 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "vf-cli"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "log",
  "serde",
  "serde-saphyr",
  "serde_json",
+ "tokio",
  "toml",
  "vf-core",
+ "vf-legacy",
  "vf-server",
+ "vf-source",
 ]
 
 [[package]]
@@ -2472,6 +2476,18 @@ dependencies = [
 
 [[package]]
 name = "vf-core"
+version = "0.1.0"
+dependencies = [
+ "lopdf 0.46.0",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "unicode-normalization",
+ "vf-source",
+]
+
+[[package]]
+name = "vf-legacy"
 version = "0.1.0"
 dependencies = [
  "log",
@@ -2507,7 +2523,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower",
- "vf-core",
+ "vf-legacy",
 ]
 
 [[package]]

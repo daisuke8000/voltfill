@@ -3,11 +3,11 @@ use serde_json::{Value, json};
 use std::cell::Cell;
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
-use vf_core::jev::transport::{
+use vf_legacy::jev::transport::{
     self, Clock, Execution, Failure, HttpRequest, HttpResponse, Policy, Secret, Transport,
     TransportError,
 };
-use vf_core::jev::{
+use vf_legacy::jev::{
     self, Answer, Content, Diagnostic, Error, Limits, Question, Request, multipart,
 };
 

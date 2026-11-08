@@ -6,13 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-[[bin]]
-# Kept until `voltfill serve` becomes the only entry point.
-name = "voltfill-server"
-path = "src/main.rs"
-
 [dependencies]
-vf-core.workspace = true
+vf-legacy.workspace = true
 axum.workspace = true
 tokio.workspace = true
 serde.workspace = true
@@ -24,5 +19,5 @@ tower.workspace = true
 
 [features]
 default = []
-pdfium = ["vf-core/pdfium"]
-hayro = ["vf-core/hayro"]
+pdfium = ["vf-legacy/pdfium"]
+hayro = ["vf-legacy/hayro"]

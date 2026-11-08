@@ -2235,7 +2235,7 @@ mod tests {
         bytes
     }
     fn reuse_form() -> FormDefinition {
-        crate::schema::parse(include_bytes!("../../../examples/text-form.json"))
+        crate::schema::parse(include_bytes!("../../../examples/legacy/text-form.json"))
             .expect("the checked-in text form satisfies the schema")
     }
     fn reuse_run(
@@ -2244,7 +2244,7 @@ mod tests {
         cache: &mut DocumentCache,
     ) -> ExtractionReport {
         let mut evaluator = evaluate::FixtureEvaluator::from_bytes(include_bytes!(
-            "../../../examples/text-mock.json"
+            "../../../examples/legacy/text-mock.json"
         ))
         .expect("the checked-in text mock initializes the fixture evaluator");
         extract_reusing(bytes, &reuse_form(), options, &mut evaluator, Some(cache))
@@ -2342,8 +2342,9 @@ mod tests {
         let mut bytes = Vec::new();
         pdf.save_to(&mut bytes)
             .expect("the three-page PDF must serialize into memory");
-        let mut form = crate::schema::parse(include_bytes!("../../../examples/vision-form.json"))
-            .expect("the checked-in vision form satisfies the schema");
+        let mut form =
+            crate::schema::parse(include_bytes!("../../../examples/legacy/vision-form.json"))
+                .expect("the checked-in vision form satisfies the schema");
         form.fields[0].pages = vec![1, 2, 3];
         let mut config = crate::render::RenderConfig::hayro();
         config.pixels_per_point = 0.5;
@@ -2354,7 +2355,7 @@ mod tests {
             ..Default::default()
         };
         let original: serde_json::Value =
-            serde_json::from_slice(include_bytes!("../../../examples/vision-mock.json"))
+            serde_json::from_slice(include_bytes!("../../../examples/legacy/vision-mock.json"))
                 .expect("the checked-in vision mock must be JSON");
         let mut answers = serde_json::Map::new();
         let mut images = serde_json::Map::new();
@@ -2417,11 +2418,12 @@ mod tests {
     #[test]
     fn rendered_pages_are_reused_and_a_different_render_config_renders_again() {
         let bytes = pdf_with_text("ALPHA");
-        let form = crate::schema::parse(include_bytes!("../../../examples/vision-form.json"))
-            .expect("the checked-in vision form satisfies the schema");
+        let form =
+            crate::schema::parse(include_bytes!("../../../examples/legacy/vision-form.json"))
+                .expect("the checked-in vision form satisfies the schema");
         let run = |options: &ExtractOptions, cache: Option<&mut DocumentCache>| {
             let mut evaluator = evaluate::FixtureEvaluator::from_bytes(include_bytes!(
-                "../../../examples/vision-mock.json"
+                "../../../examples/legacy/vision-mock.json"
             ))
             .expect("the checked-in vision mock initializes the evaluator");
             extract_reusing(&bytes, &form, options, &mut evaluator, cache)

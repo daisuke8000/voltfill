@@ -594,7 +594,7 @@ impl AttemptBudget {
                         return Err(Failure::Deadline);
                     }
                     if announced.is_none_or(|at: u64| clock.now_ms().saturating_sub(at) >= 1000) {
-                        log::info!(target:"voltfill_core::jev","{}",serde_json::json!({"event":"admission_wait","duration_ms":wait}));
+                        log::info!(target:"vf_client","{}",serde_json::json!({"event":"admission_wait","duration_ms":wait}));
                         observer.waiting(wait).inspect_err(|_| self.stop())?;
                         announced = Some(clock.now_ms());
                     }
@@ -1023,7 +1023,7 @@ fn execute_with<T: Transport, C: Clock, O: AttemptObserver>(
             return Err(Failure::Protocol(Error::Request));
         }
         let planned = |input: &InputSummary| {
-            log::info!(target:"voltfill_core::jev","{}",serde_json::json!({"event":"request_planned","input_kind":input.input_kind,"question_count":input.question_count,"image_count":input.image_dimensions.len(),"estimated_input_tokens":estimate.request_tokens,"estimated_largest_question_tokens":estimate.largest_question_tokens,"reserved_input_tokens":policy.estimated_input_tokens_per_attempt}));
+            log::info!(target:"vf_client","{}",serde_json::json!({"event":"request_planned","input_kind":input.input_kind,"question_count":input.question_count,"image_count":input.image_dimensions.len(),"estimated_input_tokens":estimate.request_tokens,"estimated_largest_question_tokens":estimate.largest_question_tokens,"reserved_input_tokens":policy.estimated_input_tokens_per_attempt}));
         };
         if let Some((_, input)) = &prepared {
             planned(input);
@@ -1047,7 +1047,7 @@ fn execute_with<T: Transport, C: Clock, O: AttemptObserver>(
                 if wait >= deadline.saturating_sub(clock.now_ms()) {
                     return Err(Failure::Deadline);
                 }
-                log::info!(target:"voltfill_core::jev","{}",serde_json::json!({"event":"waiting","duration_ms":wait}));
+                log::info!(target:"vf_client","{}",serde_json::json!({"event":"waiting","duration_ms":wait}));
                 observer.waiting(wait).inspect_err(|_| budget.stop())?;
                 if wait >= deadline.saturating_sub(clock.now_ms()) {
                     return Err(Failure::Deadline);
@@ -1120,7 +1120,7 @@ fn execute_with<T: Transport, C: Clock, O: AttemptObserver>(
                 return Err(Failure::Config);
             };
 
-            log::info!(target:"voltfill_core::jev","{}",serde_json::json!({"event":"attempt_reserved","session_attempt":slot,"attempt_in_batch":index+1,"batch_cap":policy.max_attempts,"input_kind":input.input_kind,"question_count":input.question_count,"image_count":input.image_dimensions.len(),"image_dimensions":input.image_dimensions}));
+            log::info!(target:"vf_client","{}",serde_json::json!({"event":"attempt_reserved","session_attempt":slot,"attempt_in_batch":index+1,"batch_cap":policy.max_attempts,"input_kind":input.input_kind,"question_count":input.question_count,"image_count":input.image_dimensions.len(),"image_dimensions":input.image_dimensions}));
             let trace = AttemptContext {
                 slot,
                 question_ids: &question_ids,
@@ -1236,12 +1236,12 @@ fn execute_with<T: Transport, C: Clock, O: AttemptObserver>(
                 },
                 retryable_failure,
             );
-            log::info!(target:"voltfill_core::jev","{}",serde_json::json!({"event":"response_complete","session_attempt":slot,"elapsed_ms":attempt.elapsed_ms,"queue_wait_ms":attempt.queue_wait_ms,"http_status":attempt.http_status,"invalid_answers":attempt.answer_errors.len(),"retryable":attempt.retryable,"known_input_tokens":attempt.input_tokens,"estimated_known_cost_nano_usd":budget.snapshot().known_cost,"unknown_reserved_nano_usd":budget.snapshot().reserved}));
+            log::info!(target:"vf_client","{}",serde_json::json!({"event":"response_complete","session_attempt":slot,"elapsed_ms":attempt.elapsed_ms,"queue_wait_ms":attempt.queue_wait_ms,"http_status":attempt.http_status,"invalid_answers":attempt.answer_errors.len(),"retryable":attempt.retryable,"known_input_tokens":attempt.input_tokens,"estimated_known_cost_nano_usd":budget.snapshot().known_cost,"unknown_reserved_nano_usd":budget.snapshot().reserved}));
             if let Some(failure) = attempt.failure {
-                log::warn!(target:"voltfill_core::jev","{}",serde_json::json!({"event":"attempt_failure","session_attempt":slot,"category":format!("{failure:?}")}));
+                log::warn!(target:"vf_client","{}",serde_json::json!({"event":"attempt_failure","session_attempt":slot,"category":format!("{failure:?}")}));
             }
             for error in attempt.answer_errors.values() {
-                log::warn!(target:"voltfill_core::jev","{}",serde_json::json!({"event":"answer_invalid","session_attempt":slot,"code":format!("{error:?}")}));
+                log::warn!(target:"vf_client","{}",serde_json::json!({"event":"answer_invalid","session_attempt":slot,"code":format!("{error:?}")}));
             }
             let observed = observer.after_send(&attempt, response.as_ref(), budget, &trace);
             let failure = attempt.failure;
@@ -1277,7 +1277,7 @@ fn execute_with<T: Transport, C: Clock, O: AttemptObserver>(
                 .saturating_add(jitter)
                 .min(policy.max_backoff_ms)
                 .max(retry_after);
-            log::info!(target:"voltfill_core::jev","{}",serde_json::json!({"event":"retry_wait","session_attempt":slot,"retry_index":index+1,"exponential_ms":exponential,"jitter_ms":jitter,"retry_after_ms":retry_after,"delay_ms":backoff}));
+            log::info!(target:"vf_client","{}",serde_json::json!({"event":"retry_wait","session_attempt":slot,"retry_index":index+1,"exponential_ms":exponential,"jitter_ms":jitter,"retry_after_ms":retry_after,"delay_ms":backoff}));
             retry_ready = clock.now_ms().saturating_add(backoff);
             if retry_ready >= deadline {
                 return Err(Failure::Deadline);

@@ -1,6 +1,6 @@
 {
   "log_targets": [
-    "voltfill_core::jev"
+    "vf_client"
   ],
   "mock": {
     "configuration_id": "ff5cc3c911f54153540a8189ef6aa152d723e7b0bce8b023fb4b5b4d690cc8d7",

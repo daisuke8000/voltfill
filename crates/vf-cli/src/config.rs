@@ -1,11 +1,11 @@
 //! Explicit launch files; no filesystem discovery, interpolation or credentials.
+use crate::settings;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use vf_core::jev::transport::ExecutionConfig;
-use vf_core::resources::ResourceLimits;
-use vf_server::cli::settings;
+use vf_legacy::jev::transport::ExecutionConfig;
+use vf_legacy::resources::ResourceLimits;
 
 pub struct Invocation {
     pub arguments: Vec<String>,
@@ -175,7 +175,7 @@ pub fn expand(arguments: impl IntoIterator<Item = String>) -> Result<Invocation,
             .map_err(|_| "invalid_launch_config")?
     } else {
         // Use the existing duplicate-key/depth checks for JSON configuration too.
-        vf_core::jev::json::parse(&bytes, vf_core::jev::Limits::default())
+        vf_legacy::jev::json::parse(&bytes, vf_legacy::jev::Limits::default())
             .map_err(|_| "invalid_launch_config")?
     };
     let is_launch = value.as_object().is_some_and(|v| {

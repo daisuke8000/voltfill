@@ -10,12 +10,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
-use vf_core::engine::{self, DocumentCache, EvaluationProfile, ExtractOptions};
-use vf_core::evaluate::{FixtureEvaluator, MonotonicClock, RemoteEvaluator};
-use vf_core::jev::http::{Endpoint, HttpTransport};
-use vf_core::jev::transport::{AttemptBudget, Clock, ExecutionConfig, Secret, TransportError};
-use vf_core::model::{ExtractionReport, JevResponse, Strategy};
-use vf_core::schema;
+use vf_legacy::engine::{self, DocumentCache, EvaluationProfile, ExtractOptions};
+use vf_legacy::evaluate::{FixtureEvaluator, MonotonicClock, RemoteEvaluator};
+use vf_legacy::jev::http::{Endpoint, HttpTransport};
+use vf_legacy::jev::transport::{AttemptBudget, Clock, ExecutionConfig, Secret, TransportError};
+use vf_legacy::model::{ExtractionReport, JevResponse, Strategy};
+use vf_legacy::schema;
 
 enum Backend {
     Fixture(Vec<u8>),
@@ -24,7 +24,7 @@ enum Backend {
 pub struct ServerConfig {
     backend: Backend,
     pub execution: ExecutionConfig,
-    pub resources: vf_core::resources::ResourceLimits,
+    pub resources: vf_legacy::resources::ResourceLimits,
     pub upload_timeout_ms: u64,
     /// Off by default: reuse keeps the last document's text and page images in
     /// memory after the request ends, until `reuse_document_ttl_ms` passes.
@@ -34,7 +34,7 @@ pub struct ServerConfig {
     pub allow_preview_images: bool,
     pub api_key: Option<Secret>,
     #[cfg(any(feature = "pdfium", feature = "hayro"))]
-    pub render: Option<vf_core::render::RenderConfig>,
+    pub render: Option<vf_legacy::render::RenderConfig>,
 }
 impl ServerConfig {
     pub fn fixture(bytes: Vec<u8>) -> Result<Self, &'static str> {
@@ -46,7 +46,7 @@ impl ServerConfig {
             upload_timeout_ms: 30_000,
             reuse_document: false,
             reuse_document_ttl_ms: 60_000,
-            model: vf_core::jev::MODEL.into(),
+            model: vf_legacy::jev::MODEL.into(),
             allow_preview_images: false,
             api_key: None,
             #[cfg(any(feature = "pdfium", feature = "hayro"))]
@@ -62,7 +62,7 @@ impl ServerConfig {
             upload_timeout_ms: 30_000,
             reuse_document: false,
             reuse_document_ttl_ms: 60_000,
-            model: vf_core::jev::MODEL.into(),
+            model: vf_legacy::jev::MODEL.into(),
             allow_preview_images: false,
             api_key: None,
             #[cfg(any(feature = "pdfium", feature = "hayro"))]
@@ -148,7 +148,7 @@ impl AppState {
         if !(1..=3_600_000).contains(&config.reuse_document_ttl_ms) {
             return Err("invalid_reuse_document_ttl");
         }
-        vf_core::jev::validate_model(&config.model).map_err(|_| "invalid_model")?;
+        vf_legacy::jev::validate_model(&config.model).map_err(|_| "invalid_model")?;
         let transport = match &config.backend {
             Backend::Remote(endpoint, _) => Some(
                 HttpTransport::try_new(endpoint.clone()).map_err(|_| "transport_setup_failed")?,
@@ -434,10 +434,10 @@ async fn extract(State(state): State<AppState>, request: Request) -> Response {
         return error(StatusCode::BAD_REQUEST, "strategy_schema_mismatch");
     }
     let model = options.model.unwrap_or_else(|| state.config.model.clone());
-    if vf_core::jev::validate_model(&model).is_err() {
+    if vf_legacy::jev::validate_model(&model).is_err() {
         return error(StatusCode::BAD_REQUEST, "invalid_model");
     }
-    if options.strategy != Strategy::TextFirst && !vf_core::jev::supports_images(&model) {
+    if options.strategy != Strategy::TextFirst && !vf_legacy::jev::supports_images(&model) {
         return error(StatusCode::BAD_REQUEST, "model_does_not_support_images");
     }
     if matches!(state.config.backend, Backend::Remote(_, _))
@@ -464,7 +464,7 @@ async fn extract(State(state): State<AppState>, request: Request) -> Response {
     }
     let cancelled = Arc::new(AtomicBool::new(false));
     let _cancellation = CancelOnDrop(cancelled.clone());
-    log::info!(target:"voltfill_server","{}",json!({"event":"extraction_started","pdf_bytes":pdf.len(),"fields":form.fields.len()}));
+    log::info!(target:"vf_server","{}",json!({"event":"extraction_started","pdf_bytes":pdf.len(),"fields":form.fields.len()}));
     let job_state = state.clone();
     let joined = tokio::task::spawn_blocking(move || {
         let _permit = permit;
@@ -505,7 +505,7 @@ async fn extract(State(state): State<AppState>, request: Request) -> Response {
                                     cancelled,
                                 },
                                 AttemptBudget::default(),
-                                vf_core::jev::transport::NoopObserver,
+                                vf_legacy::jev::transport::NoopObserver,
                             )
                             .ok()
                         })
@@ -528,7 +528,7 @@ async fn extract(State(state): State<AppState>, request: Request) -> Response {
         }
         match result {
             Ok(report) => {
-                log::info!(target:"voltfill_server","{}",json!({"event":"extraction_completed","fields":report.fields.len(),"attempts":report.usage.attempts}));
+                log::info!(target:"vf_server","{}",json!({"event":"extraction_completed","fields":report.fields.len(),"attempts":report.usage.attempts}));
                 Json(report).into_response()
             }
             Err(error) => extraction_error(error),
@@ -605,12 +605,14 @@ mod tests {
     use super::*;
     use axum::body::{self, Body};
     use tower::ServiceExt;
-    use vf_core::model::{JevResponse, ResponseBody};
+    use vf_legacy::model::{JevResponse, ResponseBody};
 
     fn state() -> AppState {
         AppState::try_new(
-            ServerConfig::fixture(include_bytes!("../../../examples/text-mock.json").to_vec())
-                .expect("the checked-in mock must initialize the fixture server config"),
+            ServerConfig::fixture(
+                include_bytes!("../../../examples/legacy/text-mock.json").to_vec(),
+            )
+            .expect("the checked-in mock must initialize the fixture server config"),
         )
         .expect("the default fixture server config must initialize app state")
     }
@@ -741,9 +743,10 @@ mod tests {
     }
 
     fn busy_state(upload_timeout_ms: u64) -> AppState {
-        let mut config =
-            ServerConfig::fixture(include_bytes!("../../../examples/text-mock.json").to_vec())
-                .expect("the checked-in mock must initialize the fixture server config");
+        let mut config = ServerConfig::fixture(
+            include_bytes!("../../../examples/legacy/text-mock.json").to_vec(),
+        )
+        .expect("the checked-in mock must initialize the fixture server config");
         config.upload_timeout_ms = upload_timeout_ms;
         AppState::try_new(config).expect("the requested upload deadline must initialize app state")
     }
@@ -941,7 +944,7 @@ mod tests {
             ("options", options.as_bytes()),
             (
                 "schema",
-                &include_bytes!("../../../examples/text-form.json")[..],
+                &include_bytes!("../../../examples/legacy/text-form.json")[..],
             ),
         ] {
             body.extend(
@@ -963,9 +966,10 @@ mod tests {
     }
 
     fn reuse_state(ttl_ms: u64) -> (AppState, Arc<DocumentReuse>) {
-        let mut config =
-            ServerConfig::fixture(include_bytes!("../../../examples/text-mock.json").to_vec())
-                .expect("the checked-in mock must initialize the fixture server config");
+        let mut config = ServerConfig::fixture(
+            include_bytes!("../../../examples/legacy/text-mock.json").to_vec(),
+        )
+        .expect("the checked-in mock must initialize the fixture server config");
         config.reuse_document = true;
         config.reuse_document_ttl_ms = ttl_ms;
         let state = AppState::try_new(config)
@@ -1059,8 +1063,10 @@ mod tests {
     #[test]
     fn reuse_is_off_by_default_and_the_ttl_is_range_checked() {
         let config = || {
-            ServerConfig::fixture(include_bytes!("../../../examples/text-mock.json").to_vec())
-                .expect("the checked-in mock must initialize the fixture server config")
+            ServerConfig::fixture(
+                include_bytes!("../../../examples/legacy/text-mock.json").to_vec(),
+            )
+            .expect("the checked-in mock must initialize the fixture server config")
         };
         assert!(
             AppState::try_new(config())

@@ -1,12 +1,12 @@
 mod support;
 use serde_json::json;
 use vf_core::fill::{self, FillStatus};
-use vf_core::pdf::{self, PdfLimits};
+use vf_source::{PdfLimits, inspect};
 
 #[test]
 fn fills_a_labelled_value_from_a_real_pdf_text_layer() {
     let bytes = support::pdf_with_text("Ref: AB12");
-    let snapshot = pdf::inspect(&bytes, PdfLimits::default()).expect("synthetic PDF must inspect");
+    let snapshot = inspect(&bytes, PdfLimits::default()).expect("synthetic PDF must inspect");
     let form = fill::parse_form(
         json!({"fields":[
             {"id":"reference","label":"Ref"},
@@ -36,7 +36,10 @@ fn fills_a_labelled_value_from_a_real_pdf_text_layer() {
 
 #[test]
 fn documented_example_form_parses() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/fill-form.json");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/forms/invoice.json"
+    );
     let form = fill::parse_form(&std::fs::read(path).expect("example form must exist"))
         .expect("example form must satisfy the form contract");
     assert_eq!(form.fields.len(), 4);

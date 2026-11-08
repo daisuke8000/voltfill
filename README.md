@@ -28,10 +28,10 @@ voltfill inspect input.pdf
 
 ### フォーム入力（fill）
 
-フォーム項目の一覧（[例](examples/fill-form.json)）を渡すと、PDFの原文から各項目の値を探して返します。Jevには送信しません。
+フォーム項目の一覧（[例](examples/forms/invoice.json)）を渡すと、PDFの原文から各項目の値を探して返します。Jevには送信しません。
 
 ```sh
-voltfill fill input.pdf examples/fill-form.json -o result.json
+voltfill fill input.pdf examples/forms/invoice.json -o result.json
 ```
 
 項目は `id`・`label`・`type`（`text` / `date` / `amount` / `number`、既定 `text`）・`hints`（ラベルの別名）です。ラベルの表記ゆれ（全角半角・空白・括弧）を吸収して照合し、型に合う値だけを採用します。
@@ -51,16 +51,16 @@ voltfill fill input.pdf examples/fill-form.json -o result.json
 接続先とキーを設定し（[実APIの利用](#environment)）、PDFと抽出定義を渡します。
 
 ```sh
-voltfill run input.pdf examples/text-form.json --remote -o result.json
+voltfill run input.pdf examples/legacy/text-form.json --remote -o result.json
 ```
 
 既定はText方式です。全オプションは `voltfill --help` を参照してください。
 
 | 方式 | 動作 | スキーマ例 |
 |---|---|---|
-| `text` | 原文の候補から選択 | [Text](examples/text-form.json) |
-| `vision` | 画像のBoxを原文に対応付け | [Vision](examples/vision-form.json) |
-| `hybrid` | 文字候補とBoxを照合 | [Hybrid](examples/hybrid-form.json) |
+| `text` | 原文の候補から選択 | [Text](examples/legacy/text-form.json) |
+| `vision` | 画像のBoxを原文に対応付け | [Vision](examples/legacy/vision-form.json) |
+| `hybrid` | 文字候補とBoxを照合 | [Hybrid](examples/legacy/hybrid-form.json) |
 
 既定モデルは `jev-1.14.0`（`--model ID` で変更）。Vision／Hybridは1.14.0以降のバージョン指定IDと[レンダラー](#rendering)が必要です。
 
@@ -75,12 +75,12 @@ voltfill run input.pdf examples/text-form.json --remote -o result.json
 ## 設定
 
 ```sh
-voltfill run --config examples/voltfill.yaml
+voltfill run --config examples/legacy/voltfill.yaml
 ```
 
-[YAML例](examples/voltfill.yaml)は固定回答で無送信です。TOML・JSONも使えます。優先順位は **CLI → 指定ファイル → 環境変数 → 既定値**。`--config` 省略時は `VOLTFILL_CONFIG` を使います。相対パスの基準は、ファイル内なら設定ディレクトリ、それ以外は作業ディレクトリです。
+[YAML例](examples/legacy/voltfill.yaml)は固定回答で無送信です。TOML・JSONも使えます。優先順位は **CLI → 指定ファイル → 環境変数 → 既定値**。`--config` 省略時は `VOLTFILL_CONFIG` を使います。相対パスの基準は、ファイル内なら設定ディレクトリ、それ以外は作業ディレクトリです。
 
-送信制限の[設定例](examples/execution-config.json)は既定値一覧ではありません。`--execution-config FILE` / `--resource-config FILE` は `execution` / `resources` 全体をJSONで置き換えます。資源制限はPDF解析を隔離せず、費用予約も入力の推定で請求上限ではありません。
+送信制限の[設定例](examples/legacy/execution-config.json)は既定値一覧ではありません。`--execution-config FILE` / `--resource-config FILE` は `execution` / `resources` 全体をJSONで置き換えます。資源制限はPDF解析を隔離せず、費用予約も入力の推定で請求上限ではありません。
 
 ログは既定オフ（`--log-level`）で、1行1件のJSONを出力します。CLIは標準エラー、`--output` 指定時とサーバーは標準出力です。本文・認証情報・HTTPヘッダーは出しません。
 
@@ -98,7 +98,7 @@ Vision／Hybridはレンダラーのビルドと選択が必要です。自動�
 
 ```sh
 cargo install --path crates/vf-cli --locked --features hayro
-voltfill run input.pdf examples/vision-form.json --remote --strategy vision --renderer hayro
+voltfill run input.pdf examples/legacy/vision-form.json --remote --strategy vision --renderer hayro
 ```
 
 Hayroはネイティブライブラリ不要です。PDFiumは利用側で用意し、`--features pdfium`、`--renderer pdfium` と `--pdfium-lib` / `VOLTFILL_PDFIUM_LIB_PATH` の絶対パスで指定します。描画倍率は既定1.5ピクセル/PDF単位（`--pixels-per-point`）です。
@@ -108,7 +108,7 @@ Hayroはネイティブライブラリ不要です。PDFiumは利用側で用意
 ## HTTPサーバー
 
 ```sh
-voltfill serve --mock examples/text-mock.json --listen 127.0.0.1:3000
+voltfill serve --mock examples/legacy/text-mock.json --listen 127.0.0.1:3000
 ```
 
 `POST /v1/extract` はmultipartの `pdf`・`schema` と任意のJSON `options`（`strategy`・`model`）、`GET /health` はヘルスチェックです。モックは形式確認用で、精度評価には使えません。実APIでは `--remote` で起動し、Vision／Hybridは `--allow-images` とレンダラーを指定します。
@@ -116,7 +116,7 @@ voltfill serve --mock examples/text-mock.json --listen 127.0.0.1:3000
 ```sh
 curl --fail-with-body --silent --show-error http://127.0.0.1:3000/v1/extract \
   --form 'pdf=@input.pdf;type=application/pdf' \
-  --form 'schema=@examples/text-form.json;type=application/json'
+  --form 'schema=@examples/legacy/text-form.json;type=application/json'
 ```
 
 認証は `VOLTFILL_SERVER_API_KEY` / `VOLTFILL_SERVER_API_KEY_FILE` の一方を設定し、`Authorization: Bearer <key>` を送ります。未設定のループバックでは任意、非ループバック待ち受け・`Origin` 付き抽出では必須です。VOLTFILLはHTTPのため、別マシンからはTLSプロキシを使います。

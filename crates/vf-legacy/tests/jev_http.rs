@@ -1,7 +1,7 @@
 //! Construction-only integration checks. No call to Transport::send occurs.
 //! Request/header/Retry-After preparation is tested in the http module itself.
-use vf_core::jev::http::{Endpoint, HttpTransport};
-use vf_core::jev::transport::Secret;
+use vf_legacy::jev::http::{Endpoint, HttpTransport};
+use vf_legacy::jev::transport::Secret;
 
 #[test]
 fn transport_constructs_without_network_or_credentials() {

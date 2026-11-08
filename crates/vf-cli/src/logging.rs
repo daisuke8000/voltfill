@@ -1,4 +1,4 @@
-//! JSON Lines logs for the VOLTFILL crates only.
+//! JSON Lines logs for the workspace crates only.
 //!
 //! Each record is one JSON object per line. A message that is itself a JSON
 //! object is emitted with its fields; any other message becomes `event`.
@@ -8,7 +8,7 @@ use std::io::Write;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const TARGETS: &[&str] = &["voltfill_core", "voltfill_cli", "voltfill_server"];
+const TARGETS: &[&str] = &["vf_core", "vf_legacy", "vf_client", "vf_server", "vf_cli"];
 
 pub struct JsonLogger {
     service: &'static str,

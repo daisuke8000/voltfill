@@ -1,16 +1,5 @@
-//! Best-effort PDF form extraction with explicit provenance and abstention.
+//! Form fill: match a document's label/value hypotheses to form fields and
+//! return exact source values with Evidence. Values always come from the
+//! document's own text layer; results are evaluation-only.
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
-pub mod candidates;
-pub mod engine;
-pub mod evaluate;
 pub mod fill;
-pub use vf_source::geometry;
-pub mod jev;
-pub mod logging;
-pub mod model;
-pub mod pdf;
-#[cfg(any(feature = "pdfium", feature = "hayro"))]
-pub use vf_render as render;
-pub mod resources;
-pub mod schema;
-pub mod validate;
