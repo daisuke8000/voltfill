@@ -2537,6 +2537,7 @@ dependencies = [
  "lopdf 0.46.0",
  "pdf-inspector",
  "serde",
+ "serde_json",
  "sha2",
  "thiserror",
 ]

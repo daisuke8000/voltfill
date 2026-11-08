@@ -660,6 +660,7 @@ mod tests {
                 bottom: b,
             },
             quality: Quality::Usable,
+            orientation: vf_source::Orientation::Deg0,
         }
     }
 

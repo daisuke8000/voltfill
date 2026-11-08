@@ -1834,6 +1834,7 @@ mod tests {
                     bbox: Rect::try_new(0.0, i as f64 * 10.0, 50.0, i as f64 * 10.0 + 5.0)
                         .expect("generated source rows have finite positive rectangles"),
                     quality: Quality::Usable,
+                    orientation: vf_source::Orientation::Deg0,
                 })
             })
             .collect();

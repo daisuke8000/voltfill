@@ -6,6 +6,16 @@
 //! character classes (full width = 1 em, otherwise 0.5 em) and marked
 //! [`Precision::Estimated`]; they are never reported as measured.
 //!
+//! Text is read in each fragment's own reading direction: horizontal, or
+//! turned by a right angle (see [`crate::SourceFragment::orientation`]).
+//! Each turned orientation is analysed in a turned copy of its fragments
+//! (its reading frame) by the same rules, limits and budget as upright text,
+//! and every box is turned back: all boxes are Display coordinates, and
+//! "right", "below", "left edge" and "line" below mean the reading frame.
+//! Fragments of different orientations never pair. Turned runs that lie
+//! within half an em of a neighbour on their reading line are pieces of one
+//! phrase drawn word by word and take part in no pair (see `orient`).
+//!
 //! Each pair records how its value is tied to its label ([`Binding`]):
 //! - [`Binding::Delimiter`]: an inline `label：value` / `label: value` in one
 //!   fragment, or a fragment ending with its only delimiter (`label：`)
@@ -19,8 +29,8 @@
 //! its column; a value with more than one line is still one pair, with one
 //! span per line. Not supported: values in multi-row tables and stacked
 //! lists (only flagged, see [`Placement::Column`]), AcroForm values,
-//! vertical text, and splits without a delimiter (for example
-//! `発行日 2026年…`).
+//! true vertical writing (vertical writing mode fonts, glyphs stacked one
+//! per run), and splits without a delimiter (for example `発行日 2026年…`).
 //!
 //! Hypotheses are conservative ("a wrong value is worse than an empty one"):
 //! - A fragment with more than one `label：` delimiter (for example
@@ -67,15 +77,20 @@
 //! Work, time and memory are bounded: [`LayoutLimits::max_pairs`] caps the
 //! hypotheses per document, each value holds at most [`MAX_VALUE_LINES`]
 //! spans and each label at most [`MAX_COLUMN_ROWS`] column rows, every
-//! search is limited to [`MAX_WINDOW`] fragments, and each fragment's text is
-//! read twice (classified and measured) however many pairs use it.
-//! [`LayoutLimits::max_work`] and [`LayoutLimits::deadline`] stop the
-//! analysis with a typed error (see [`analyze_within`] for the units).
+//! search is limited to [`MAX_WINDOW`] fragments, and each usable fragment's
+//! text is read twice (classified and measured) however many pairs use it.
+//! The limits cover all orientations together: the pair cap counts every
+//! orientation's hypotheses, and turned copies, their analysis and the
+//! mapping back spend from the same budget. [`LayoutLimits::max_work`] and
+//! [`LayoutLimits::deadline`] stop the analysis with a typed error (see
+//! [`analyze_within`] for the units).
 use crate::budget::{Budget, BudgetError};
 use crate::geometry::Rect;
-use crate::source::{Quality, SourceFragment};
+use crate::source::{Orientation, Quality, SourceFragment};
 use serde::Serialize;
 use std::time::Instant;
+
+mod orient;
 
 /// Most lines one value may span: its first line plus continuation lines.
 /// A value that would run longer is dropped, not truncated.
@@ -160,7 +175,8 @@ pub struct Span {
     pub precision: Precision,
 }
 
-/// Usable fragments sharing a baseline band, left to right.
+/// Usable fragments of one orientation sharing a baseline band, in reading
+/// order (left to right for upright text).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Line {
     pub page: u32,
@@ -174,9 +190,11 @@ pub struct Line {
 pub enum Placement {
     /// Label and value in one fragment, split at a delimiter.
     Inline,
-    /// Value is the next fragment to the right on the same line.
+    /// Value is the next fragment on the same line in reading order (to the
+    /// right for upright text).
     Right,
-    /// The only data row directly below the label.
+    /// The only data row directly below the label in its reading frame (the
+    /// next line in the direction lines advance).
     Below,
     /// One data row below a label that has two or more data rows (a table
     /// header or the first line of a stacked list); one pair per non-blank
@@ -234,14 +252,22 @@ pub fn analyze(fragments: &[SourceFragment], limits: &LayoutLimits) -> Result<La
 
 /// Build lines and label/value hypotheses, spending work from `budget`.
 ///
-/// Work units: one per fragment and per sort comparison while grouping
-/// lines; two per byte of fragment text, which is classified and measured
-/// once per fragment; one per line and per fragment examined in a search;
-/// and one plus the fragment id's length per span written into a pair.
-/// Searches are bounded ([`MAX_VALUE_LINES`], [`MAX_COLUMN_ROWS`],
-/// [`MAX_WINDOW`]), and a span reuses its fragment's measurements instead of
-/// reading the text again, so the units count all work that grows with the
-/// input.
+/// Upright fragments are analysed first, then each turned orientation in
+/// its own reading frame; lines and pairs are grouped by page (stable, so
+/// upright results come first within a page).
+///
+/// Work units, per orientation analysed: one per fragment and per sort
+/// comparison while grouping lines; two per byte of usable fragment text,
+/// which is classified and measured once per fragment; one per line and per
+/// fragment examined in a search; and one plus the fragment id's length per
+/// span written into a pair. For each turned orientation also one per
+/// fragment scanned for it, one plus the id's and the text's length per
+/// turned copy, one per line and one plus the ids' lengths per fragment
+/// visited for phrase pieces, one plus the id's length per span checked
+/// against them, and one per line, line fragment and span turned back. Searches are bounded ([`MAX_VALUE_LINES`],
+/// [`MAX_COLUMN_ROWS`], [`MAX_WINDOW`]), and a span reuses its fragment's
+/// measurements instead of reading the text again, so the units count all
+/// work that grows with the input.
 ///
 /// # Errors
 /// [`LayoutError::LimitExceeded`] as soon as the document would produce more
@@ -255,9 +281,25 @@ pub fn analyze_within(
     budget: &mut Budget,
 ) -> Result<Layout, LayoutError> {
     budget.check_deadline()?;
+    orient::analyze(fragments, max_pairs, budget, analyze_frame)
+}
+
+/// [`analyze_within`] for upright fragments only: turned ones are skipped
+/// here and reach it as reading-frame copies (see `orient`).
+fn analyze_frame(
+    fragments: &[SourceFragment],
+    max_pairs: usize,
+    budget: &mut Budget,
+) -> Result<Layout, LayoutError> {
+    budget.check_deadline()?;
     let lines = group_lines(fragments, budget)?;
     let mut measures = Vec::with_capacity(fragments.len());
     for fragment in fragments {
+        if !usable(fragment) {
+            // Never on a line, so never measured or read.
+            measures.push(Measure::UNUSED);
+            continue;
+        }
         // Classification and measurement each read the text once.
         budget.spend(2 * u64::try_from(fragment.raw_text.len()).unwrap_or(u64::MAX / 2))?;
         measures.push(Measure::new(fragment));
@@ -448,6 +490,14 @@ struct Measure {
 }
 
 impl Measure {
+    /// The placeholder for a fragment that is not [`usable`].
+    const UNUSED: Self = Self {
+        kind: Kind::Opaque,
+        at: [0; 4],
+        em: [0.0; 4],
+        total: 0.0,
+    };
+
     fn new(f: &SourceFragment) -> Self {
         let text = f.raw_text.as_str();
         let kind = classify(f);
@@ -884,7 +934,10 @@ fn same_column(a: Rect, b: Rect, tolerance: f64) -> bool {
 }
 
 fn usable(f: &SourceFragment) -> bool {
-    f.quality == Quality::Usable && !f.raw_text.trim().is_empty() && f.bbox.validate().is_ok()
+    f.quality == Quality::Usable
+        && f.orientation == Orientation::Deg0
+        && !f.raw_text.trim().is_empty()
+        && f.bbox.validate().is_ok()
 }
 
 fn group_lines(
@@ -979,6 +1032,7 @@ mod tests {
                 bottom: b,
             },
             quality: Quality::Usable,
+            orientation: Orientation::Deg0,
         }
     }
 

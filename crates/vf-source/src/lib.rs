@@ -8,7 +8,7 @@ pub mod layout;
 pub mod metadata;
 pub mod select;
 mod source;
-pub use source::{PageDiagnostic, Quality, SourceFragment};
+pub use source::{Orientation, PageDiagnostic, Quality, SourceFragment};
 
 mod inspection;
 pub use inspection::{DocumentSnapshot, InspectionTimings, PdfError, PdfLimits, inspect};

@@ -78,3 +78,86 @@ pub fn pdf_with_text(text: &str) -> Vec<u8> {
         .expect("synthetic PDF must serialize");
     bytes
 }
+
+/// One text show in [`pdf_with_runs`]: the text matrix's linear part, its
+/// origin and the shown text.
+pub type Run<'a> = ([f64; 4], (f64, f64), &'a str);
+
+/// A one-page PDF drawing each run with its own text matrix in a composite
+/// font whose codes are the characters' (BMP) code points; every glyph
+/// advances one em (12 pt).
+pub fn pdf_with_runs(runs: &[Run<'_>]) -> Vec<u8> {
+    use lopdf::content::{Content, Operation};
+    use lopdf::{Document, Object, Stream, StringFormat, dictionary};
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let chars: std::collections::BTreeSet<char> = runs.iter().flat_map(|r| r.2.chars()).collect();
+    let mut cmap = String::from(
+        "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapName /Adobe-Identity-UCS def /CMapType 2 def 1 begincodespacerange <0000> <FFFF> endcodespacerange\n",
+    );
+    cmap += &format!("{} beginbfchar\n", chars.len());
+    for c in chars {
+        cmap += &format!("<{:04X}> <{:04X}>\n", c as u32, c as u32);
+    }
+    cmap += "endbfchar endcmap CMapName currentdict /CMap defineresource pop end end";
+    let to_unicode = doc.add_object(Stream::new(dictionary! {}, cmap.into_bytes()));
+    let descriptor = doc.add_object(dictionary! {
+        "Type" => "FontDescriptor", "FontName" => "TestCID", "Flags" => 4,
+        "FontBBox" => vec![0.into(), (-200).into(), 1000.into(), 800.into()],
+        "ItalicAngle" => 0, "Ascent" => 800, "Descent" => -200, "CapHeight" => 700, "StemV" => 80,
+    });
+    let descendant = doc.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "CIDFontType2", "BaseFont" => "TestCID",
+        "CIDSystemInfo" => dictionary! {
+            "Registry" => Object::string_literal("Adobe"),
+            "Ordering" => Object::string_literal("Identity"),
+            "Supplement" => 0,
+        },
+        "FontDescriptor" => descriptor, "DW" => 1000, "CIDToGIDMap" => "Identity",
+    });
+    let font_id = doc.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "Type0", "BaseFont" => "TestCID",
+        "Encoding" => "Identity-H", "DescendantFonts" => vec![descendant.into()],
+        "ToUnicode" => to_unicode,
+    });
+    let mut operations = Vec::new();
+    for &([a, b, c, d], (x, y), text) in runs {
+        let bytes = text.encode_utf16().flat_map(u16::to_be_bytes).collect();
+        operations.extend([
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 12.into()]),
+            Operation::new(
+                "Tm",
+                [a, b, c, d, x, y]
+                    .iter()
+                    .map(|&v| Object::Real(v as f32))
+                    .collect(),
+            ),
+            Operation::new("Tj", vec![Object::String(bytes, StringFormat::Hexadecimal)]),
+            Operation::new("ET", vec![]),
+        ]);
+    }
+    let content_id = doc.add_object(Stream::new(
+        dictionary! {},
+        Content { operations }
+            .encode()
+            .expect("synthetic text operations must encode"),
+    ));
+    let page_id = doc.add_object(dictionary! {
+        "Type" => "Page", "Parent" => pages_id, "Contents" => content_id,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Resources" => dictionary! {"Font" => dictionary! {"F1" => font_id}},
+    });
+    doc.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages", "Kids" => vec![page_id.into()], "Count" => 1,
+        }),
+    );
+    let catalog_id = doc.add_object(dictionary! {"Type" => "Catalog", "Pages" => pages_id});
+    doc.trailer.set("Root", catalog_id);
+    let mut bytes = Vec::new();
+    doc.save_to(&mut bytes)
+        .expect("synthetic PDF must serialize");
+    bytes
+}

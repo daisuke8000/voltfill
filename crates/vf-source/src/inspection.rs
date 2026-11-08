@@ -2,25 +2,31 @@
 //!
 //! # Vertical and rotated text
 //!
-//! Layout reads only horizontal text. Rotated runs, re-based pages and
-//! vertical writing mode fonts are detected and kept out of `Usable`:
+//! A run whose rendered baseline (pdf-inspector's `TextItem::rotation` in the
+//! Display frame, where any re-basing of the page frame is already undone)
+//! lies within [`ROTATION_TOLERANCE_DEGREES`] of a right angle carries that
+//! quarter turn as its [`Orientation`], and layout reads it in its own
+//! reading direction (see [`crate::layout`]). Oblique runs, re-based pages
+//! and vertical writing mode fonts stay out of `Usable`:
 //!
-//! - A run whose rendered baseline (pdf-inspector's `TextItem::rotation` in
-//!   the Display frame, where any re-basing of the page frame is already
-//!   undone) is more than [`ROTATION_TOLERANCE_DEGREES`] from 0° is
-//!   `Unknown` (`rotated_text_present`). A run turned by a right angle is
-//!   marked on its own: pdf-inspector never merges a run that is not upright
-//!   in its frame into an upright one. An oblique run can be merged into a
-//!   level neighbour that then reports the neighbour's angle, so one oblique
-//!   run leaves the whole page `Unknown` (`oblique_text_present`).
+//! - A run turned by 90°, 180° or 270° is `Usable` on the same terms as a
+//!   level run, unless pdf-inspector's super/subscript pass may have joined
+//!   it or another turned run on its page (below). Its page reports
+//!   `rotated_text_present`.
+//! - An oblique run is `Unknown` and leaves the whole page `Unknown`
+//!   (`oblique_text_present`): it can be merged into a level neighbour that
+//!   then reports the neighbour's angle. Its orientation is the nearest
+//!   quarter turn.
 //! - A page pdf-inspector re-based because most of its text runs vertically
 //!   is `Unknown` as a whole (`page_text_rotated`): its runs were merged and
-//!   spaced in the turned frame, which does not match the rendered page.
-//!   The one exception is a turn equal to the page's `/Rotate`
-//!   (`PageRotation::Ccw`, runs reading bottom to top, on a `/Rotate 90`
-//!   page; `PageRotation::Cw` on a `/Rotate 270` page): both are then the
-//!   same quarter turn of the sheet, so the frame pdf-inspector merged runs
-//!   in is the rendered page up to a shift, as on an upright page.
+//!   spaced in the turned frame, and pdf-inspector merges a re-based page
+//!   without the clip boundaries it applies elsewhere (an upstream
+//!   unsupported case). The one exception is a turn equal to the page's
+//!   `/Rotate` (`PageRotation::Ccw`, runs reading bottom to top, on a
+//!   `/Rotate 90` page; `PageRotation::Cw` on a `/Rotate 270` page): both are
+//!   then the same quarter turn of the sheet, so the frame pdf-inspector
+//!   merged runs in is the rendered page up to a shift, as on an upright
+//!   page. Clip boundaries are not applied there either.
 //! - pdf-inspector ignores a composite font's writing mode and lays vertical
 //!   glyphs out horizontally, so a page whose resources hold a vertical-mode
 //!   font is `Unknown` as a whole (`vertical_writing_mode_unsupported`).
@@ -32,11 +38,52 @@
 //!   fails the inspection. A vertical-mode font listed in the resources
 //!   counts as used.
 //!
+//! What pdf-inspector 1.25.2 gives a turned run, from its source:
+//!
+//! - Box: `run_geometry` takes the axis-aligned device-space box of the
+//!   run's advance and a one-em glyph height perpendicular to its baseline,
+//!   so a 90° or 270° run is one em wide and its advance tall.
+//!   `items_to_display_frame` moves boxes into the Display frame with exact
+//!   quarter turns and shifts, so the Display box is the run's box. A run
+//!   whose advance was estimated is `Unknown` (`estimated_advance`), as for
+//!   level runs.
+//! - Merging: `merge_text_items_with_clips` joins runs only while both are
+//!   upright (within 45° of 0°) in the frame it works in: the sheet, before
+//!   `/Rotate`, unless the page was re-based. A run turned in that frame is
+//!   never merged. Runs merged there were joined along their own reading
+//!   direction with their own gaps, which a quarter turn of the sheet keeps:
+//!   on a `/Rotate 90` page, text upright on the sheet reads at 270° and is
+//!   merged as on an upright page. A turned phrase drawn word by word
+//!   therefore arrives as one run per word; layout holds such close
+//!   neighbours rather than pair them (see [`crate::layout`]).
+//! - Super/subscripts: `merge_subscript_items` runs afterwards and ignores
+//!   rotation; it takes x as the reading axis and y as the baseline. It
+//!   fuses a short digit run into a neighbour as superscript or subscript
+//!   digits, widening the neighbour's box along x, or joins a chain of short
+//!   glyph runs into one item with a nonzero `baseline_shift`, its text in x
+//!   order. It also chains scripts onto scripts and measures such a chain's
+//!   shift from the body baseline, so a chain hung on a raised script can
+//!   report a zero shift. A turned run showing either sign is `Unknown`
+//!   (`rotated_script_join_unverified`), and then so is every other turned
+//!   run on its page; this does not change the page's quality. A turned
+//!   digit run fused into a level neighbour leaves no trace and is not
+//!   detected.
+//! - Text order: a run's text is in content-stream order, its advance
+//!   direction, and `rotation` is that direction for an unreflected text
+//!   matrix. For a reflected (mirrored) matrix such as `[0 1 1 0]`,
+//!   `[0 -1 -1 0]` or `[1 0 0 -1]` it is how the glyphs stand, so
+//!   mirror-written text reads against its orientation. `TextItem` does not
+//!   expose the matrix, so a mirrored run is not detected: it is read in the
+//!   reported orientation, an estimated partial span can sit at the wrong
+//!   end of its run, and a `Right` or `Below` pair can come out in reverse
+//!   order. Level runs share this limit.
+//!
 //! Not detected: vertical text set glyph by glyph in an upright horizontal
-//! font, which carries no rotation and no vertical CMap. Vertical layout
-//! itself is not supported yet.
+//! font, which carries no rotation and no vertical CMap. True vertical
+//! writing (a vertical writing mode font) is not read yet: it needs
+//! pdf-inspector to lay vertical glyphs out vertically.
 use crate::metadata;
-use crate::source::{PageDiagnostic, Quality, SourceFragment};
+use crate::source::{Orientation, PageDiagnostic, Quality, SourceFragment};
 
 /// Observed inspection timings and parser load count, without extraction or transport accounting.
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -121,9 +168,12 @@ pub struct DocumentSnapshot {
 /// Limits bound application work and input; they do not sandbox the parser or
 /// bound all allocations inside upstream. No OCR or renderer is invoked.
 ///
-/// Rotated runs, re-based pages and vertical writing mode fonts are kept out
-/// of `Usable`: a run whose rendered baseline is more than 1° from
-/// horizontal is `Unknown` (`rotated_text_present`); an oblique run
+/// A run whose rendered baseline is within 1° of a right angle carries that
+/// quarter turn as its orientation and may be `Usable` (`rotated_text_present`
+/// when turned); once a turned run on a page may have been joined by
+/// pdf-inspector's super/subscript pass, every turned run on that page is
+/// `Unknown` (`rotated_script_join_unverified`). Mirrored text matrices are
+/// not detected (see the module docs). An oblique run
 /// (`oblique_text_present`), a page re-based for mostly vertical text unless
 /// the turn equals its `/Rotate` (`page_text_rotated`), a page whose
 /// resources hold a vertical writing mode font
@@ -131,7 +181,7 @@ pub struct DocumentSnapshot {
 /// bounds (`writing_mode_scan_incomplete`) are `Unknown` as a whole. The font
 /// scan reuses the metadata load and is bounded per page and per document.
 /// Vertical text set glyph by glyph in a horizontal font is not detected;
-/// vertical layout itself is not supported yet.
+/// true vertical writing is not read yet.
 pub fn inspect(bytes: &[u8], limits: PdfLimits) -> Result<DocumentSnapshot, PdfError> {
     use sha2::{Digest, Sha256};
 
@@ -332,6 +382,7 @@ pub fn inspect(bytes: &[u8], limits: PdfLimits) -> Result<DocumentSnapshot, PdfE
             .extend(page_unknown.into_iter().map(String::from));
         page.quality = base_quality;
         let mut oblique = false;
+        let mut script_joined_turn = false;
         let first_fragment = fragments.len();
         let mut page_hash = document_hash.clone();
         page_hash.update(page.page.to_be_bytes());
@@ -372,19 +423,31 @@ pub fn inspect(bytes: &[u8], limits: PdfLimits) -> Result<DocumentSnapshot, PdfE
             } else if quality == Quality::Unknown && page.quality == Quality::Usable {
                 page.quality = Quality::Unknown;
             }
-            // A turned run is left out on its own; an oblique one taints the
-            // page below because it may hide inside a level neighbour.
-            let quality = match baseline(item.rotation) {
-                Baseline::Level => quality,
-                turn => {
-                    page.reason_codes.push("rotated_text_present".into());
-                    oblique |= turn == Baseline::Oblique;
-                    if quality == Quality::Usable {
-                        Quality::Unknown
-                    } else {
-                        quality
-                    }
-                }
+            // A turned run is read in its own frame unless the script pass
+            // may have joined it; an oblique one taints the page below
+            // because it may hide inside a level neighbour.
+            let (orientation, oblique_run) = match baseline(item.rotation) {
+                Baseline::Right(orientation) => (orientation, false),
+                Baseline::Oblique(nearest) => (nearest, true),
+            };
+            if !orientation.is_upright() || oblique_run {
+                page.reason_codes.push("rotated_text_present".into());
+            }
+            let held = if oblique_run {
+                oblique = true;
+                true
+            } else if !orientation.is_upright() && script_joined(&item) {
+                page.reason_codes
+                    .push("rotated_script_join_unverified".into());
+                script_joined_turn = true;
+                true
+            } else {
+                false
+            };
+            let quality = if held && quality == Quality::Usable {
+                Quality::Unknown
+            } else {
+                quality
             };
             let mut hash = page_hash.clone();
             hash.update((item_index as u64).to_be_bytes());
@@ -395,7 +458,19 @@ pub fn inspect(bytes: &[u8], limits: PdfLimits) -> Result<DocumentSnapshot, PdfE
                 raw_text: item.text,
                 bbox,
                 quality,
+                orientation,
             });
+        }
+        // The script pass chains scripts of scripts and measures a chain's
+        // shift from the body baseline, so a chain hung on a held script can
+        // report no shift at all: once one turned run is held, every turned
+        // run on the page is.
+        if script_joined_turn {
+            for fragment in &mut fragments[first_fragment..] {
+                if !fragment.orientation.is_upright() && fragment.quality == Quality::Usable {
+                    fragment.quality = Quality::Unknown;
+                }
+            }
         }
         if oblique {
             page.reason_codes.push("oblique_text_present".into());
@@ -417,7 +492,8 @@ pub fn inspect(bytes: &[u8], limits: PdfLimits) -> Result<DocumentSnapshot, PdfE
             page.quality = Quality::Unknown;
             page.reason_codes.push("image_or_no_text".into());
         } else if !page.text_available {
-            // Reachable with a Usable page only when every run is turned.
+            // Reachable with a Usable page only when every run is held back
+            // on its own (a turned run the script pass may have joined).
             if page.quality == Quality::Usable {
                 page.quality = Quality::Unknown;
             }
@@ -467,28 +543,48 @@ fn white_paint(item: &TextItem) -> bool {
 /// How a run's rendered baseline lies relative to the page's x axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Baseline {
-    /// Within the tolerance of 0°: ordinary left-to-right text.
-    Level,
-    /// Within the tolerance of 90°, 180° or 270°.
-    Turned,
-    /// Any other angle, including a non-finite one.
-    Oblique,
+    /// Within the tolerance of a right angle; `Deg0` is ordinary
+    /// left-to-right text.
+    Right(Orientation),
+    /// Any other angle, with the nearest right angle (`Deg0` for a
+    /// non-finite one).
+    Oblique(Orientation),
 }
 
-/// Classify a Display-frame `TextItem::rotation` (degrees, counter-clockwise).
+/// Classify a Display-frame `TextItem::rotation` (degrees, counter-clockwise
+/// with y up, so 90° reads bottom to top on the rendered page).
 fn baseline(rotation: f32) -> Baseline {
     if !rotation.is_finite() {
-        return Baseline::Oblique;
+        return Baseline::Oblique(Orientation::Deg0);
     }
     let degrees = f64::from(rotation).rem_euclid(360.0);
-    let off_right_angle = (degrees - (degrees / 90.0).round() * 90.0).abs();
-    if degrees <= ROTATION_TOLERANCE_DEGREES || degrees >= 360.0 - ROTATION_TOLERANCE_DEGREES {
-        Baseline::Level
-    } else if off_right_angle <= ROTATION_TOLERANCE_DEGREES {
-        Baseline::Turned
+    let quarter = (degrees / 90.0).round();
+    let nearest = match quarter as u8 {
+        1 => Orientation::Deg90,
+        2 => Orientation::Deg180,
+        3 => Orientation::Deg270,
+        // 0, or 4 just below 360°.
+        _ => Orientation::Deg0,
+    };
+    if (degrees - quarter * 90.0).abs() <= ROTATION_TOLERANCE_DEGREES {
+        Baseline::Right(nearest)
     } else {
-        Baseline::Oblique
+        Baseline::Oblique(nearest)
     }
+}
+
+/// Whether pdf-inspector's super/subscript pass (`merge_subscript_items`),
+/// which ignores rotation, may have joined this run: it fuses digit runs
+/// into a neighbour as the digits below, and gives a joined glyph chain a
+/// baseline shift.
+fn script_joined(item: &TextItem) -> bool {
+    item.baseline_shift != 0.0
+        || item.text.chars().any(|c| {
+            matches!(c,
+                '\u{00b2}' | '\u{00b3}' | '\u{00b9}'
+                | '\u{2070}' | '\u{2074}'..='\u{2079}'
+                | '\u{2080}'..='\u{2089}')
+        })
 }
 
 /// Whether pdf-inspector's turned frame is the rendered page up to a shift.
