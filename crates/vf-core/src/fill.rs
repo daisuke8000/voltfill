@@ -5,12 +5,12 @@
 //! candidates ("a wrong value is worse than an empty one"). Values are exact
 //! source text; `value` is a deterministic normalization of that text.
 //! Results are evaluation-only and carry no calibrated probability.
-use vf_source::geometry::Rect;
-use vf_source::SourceFragment;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use unicode_normalization::UnicodeNormalization;
+use vf_source::SourceFragment;
+use vf_source::geometry::Rect;
 use vf_source::layout::{self, Pair, Placement, Precision};
 
 pub const MAX_FORM_BYTES: usize = 1024 * 1024;
@@ -424,8 +424,8 @@ fn parse_number(text: &str, field_type: FieldType) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vf_source::Quality;
     use serde_json::json;
+    use vf_source::Quality;
 
     fn frag(id: &str, text: &str, [l, t, r, b]: [f64; 4]) -> SourceFragment {
         SourceFragment {

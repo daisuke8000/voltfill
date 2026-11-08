@@ -36,7 +36,10 @@ fn fills_a_labelled_value_from_a_real_pdf_text_layer() {
 
 #[test]
 fn documented_example_form_parses() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/forms/invoice.json");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/forms/invoice.json"
+    );
     let form = fill::parse_form(&std::fs::read(path).expect("example form must exist"))
         .expect("example form must satisfy the form contract");
     assert_eq!(form.fields.len(), 4);

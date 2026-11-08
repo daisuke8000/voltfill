@@ -2342,8 +2342,9 @@ mod tests {
         let mut bytes = Vec::new();
         pdf.save_to(&mut bytes)
             .expect("the three-page PDF must serialize into memory");
-        let mut form = crate::schema::parse(include_bytes!("../../../examples/legacy/vision-form.json"))
-            .expect("the checked-in vision form satisfies the schema");
+        let mut form =
+            crate::schema::parse(include_bytes!("../../../examples/legacy/vision-form.json"))
+                .expect("the checked-in vision form satisfies the schema");
         form.fields[0].pages = vec![1, 2, 3];
         let mut config = crate::render::RenderConfig::hayro();
         config.pixels_per_point = 0.5;
@@ -2417,8 +2418,9 @@ mod tests {
     #[test]
     fn rendered_pages_are_reused_and_a_different_render_config_renders_again() {
         let bytes = pdf_with_text("ALPHA");
-        let form = crate::schema::parse(include_bytes!("../../../examples/legacy/vision-form.json"))
-            .expect("the checked-in vision form satisfies the schema");
+        let form =
+            crate::schema::parse(include_bytes!("../../../examples/legacy/vision-form.json"))
+                .expect("the checked-in vision form satisfies the schema");
         let run = |options: &ExtractOptions, cache: Option<&mut DocumentCache>| {
             let mut evaluator = evaluate::FixtureEvaluator::from_bytes(include_bytes!(
                 "../../../examples/legacy/vision-mock.json"
