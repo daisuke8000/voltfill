@@ -1,0 +1,20 @@
+{
+  "description": "見出しが1つの片（品名 数量 単価 金額）にまとまっている。片全体が列のラベルと一致しないため見出しとみなさない（not_found）",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "品名 数量 単価 金額"},
+    {"x": 60, "y": 118, "text": "りんご"},
+    {"x": 300, "y": 118, "text": "3"},
+    {"right": 520, "y": 118, "text": "¥300"}
+  ],
+  "form": {"fields": [
+    {"id": "items", "label": "明細", "type": "table", "columns": [
+      {"id": "name", "label": "品名"},
+      {"id": "qty", "label": "数量", "type": "number"},
+      {"id": "amount", "label": "金額", "type": "amount"}
+    ]}
+  ]},
+  "expect": {
+    "items": {"abstain": "not_found"}
+  }
+}

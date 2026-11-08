@@ -1,0 +1,36 @@
+{
+  "description": "1ページ目の明細がページの小計で終わり、2ページ目に「次頁」なしで明細行と合計が続く。後ろのページがあるときは合計系のうち締めの合計（合計・請求金額など）だけが表を閉じ、小計では閉じない（continues_on_next_page）",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "品名"},
+    {"x": 300, "y": 100, "text": "数量"},
+    {"x": 380, "y": 100, "text": "単価"},
+    {"right": 520, "y": 100, "text": "金額"},
+    {"x": 60, "y": 118, "text": "りんご"},
+    {"x": 300, "y": 118, "text": "3"},
+    {"x": 380, "y": 118, "text": "100"},
+    {"right": 520, "y": 118, "text": "¥300"},
+    {"x": 60, "y": 136, "text": "みかん"},
+    {"x": 300, "y": 136, "text": "2"},
+    {"x": 380, "y": 136, "text": "250"},
+    {"right": 520, "y": 136, "text": "¥500"},
+    {"x": 380, "y": 154, "text": "小計"},
+    {"right": 520, "y": 154, "text": "¥800"},
+    {"page": 2, "x": 60, "y": 100, "text": "ぶどう"},
+    {"page": 2, "x": 300, "y": 100, "text": "1"},
+    {"page": 2, "x": 380, "y": 100, "text": "900"},
+    {"page": 2, "right": 520, "y": 100, "text": "¥900"},
+    {"page": 2, "x": 380, "y": 118, "text": "合計"},
+    {"page": 2, "right": 520, "y": 118, "text": "¥1,700"}
+  ],
+  "form": {"fields": [
+    {"id": "items", "label": "明細", "type": "table", "columns": [
+      {"id": "name", "label": "品名"},
+      {"id": "qty", "label": "数量", "type": "number"},
+      {"id": "amount", "label": "金額", "type": "amount"}
+    ]}
+  ]},
+  "expect": {
+    "items": {"abstain": "ambiguous", "hold": "continues_on_next_page"}
+  }
+}

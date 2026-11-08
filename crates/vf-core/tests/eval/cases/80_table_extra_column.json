@@ -1,0 +1,31 @@
+{
+  "description": "文書の表に、フォームにない列（単価）がある。単価のセルは単価の列だけにそろい、どのセルも1つの列にしかそろわないため、フォームの列（品名・数量・金額）だけを確定する",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "品名"},
+    {"x": 300, "y": 100, "text": "数量"},
+    {"x": 360, "y": 100, "text": "単価"},
+    {"x": 440, "y": 100, "text": "金額"},
+    {"x": 60, "y": 118, "text": "USBケーブル Type-C 1m"},
+    {"x": 300, "y": 118, "text": "2"},
+    {"x": 360, "y": 118, "text": "¥1,200"},
+    {"x": 440, "y": 118, "text": "¥2,400"},
+    {"x": 60, "y": 136, "text": "HDMIケーブル 2m"},
+    {"x": 300, "y": 136, "text": "1"},
+    {"id": "unit2", "x": 360, "y": 136, "text": "¥1,800"},
+    {"id": "amount2", "x": 440, "y": 136, "text": "¥1,800"}
+  ],
+  "form": {"fields": [
+    {"id": "items", "label": "明細", "type": "table", "columns": [
+      {"id": "name", "label": "品名"},
+      {"id": "qty", "label": "数量", "type": "number"},
+      {"id": "amount", "label": "金額", "type": "amount"}
+    ]}
+  ]},
+  "expect": {
+    "items": {"rows": [
+      {"name": {"raw": "USBケーブル Type-C 1m"}, "qty": {"raw": "2", "value": 2}, "amount": {"raw": "¥2,400", "value": 2400}},
+      {"name": {"raw": "HDMIケーブル 2m"}, "qty": {"raw": "1", "value": 1}, "amount": {"raw": "¥1,800", "value": 1800, "source": "amount2"}}
+    ]}
+  }
+}

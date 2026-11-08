@@ -1,0 +1,25 @@
+{
+  "description": "文書の見出しの金額の列が「金額（税込）」で、フォームの列「金額」とは片方にだけ補足がある（完全一致ではない）。品名・数量は一致しても、すべての列が完全一致する見出し行がないため not_found",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "品名"},
+    {"x": 300, "y": 100, "text": "数量"},
+    {"x": 420, "y": 100, "text": "金額（税込）"},
+    {"x": 60, "y": 118, "text": "りんご"},
+    {"x": 300, "y": 118, "text": "3"},
+    {"x": 420, "y": 118, "text": "¥330"},
+    {"x": 60, "y": 136, "text": "みかん"},
+    {"x": 300, "y": 136, "text": "2"},
+    {"x": 420, "y": 136, "text": "¥550"}
+  ],
+  "form": {"fields": [
+    {"id": "items", "label": "明細", "type": "table", "columns": [
+      {"id": "name", "label": "品名"},
+      {"id": "qty", "label": "数量", "type": "number"},
+      {"id": "amount", "label": "金額", "type": "amount"}
+    ]}
+  ]},
+  "expect": {
+    "items": {"abstain": "not_found"}
+  }
+}

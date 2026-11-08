@@ -1,0 +1,25 @@
+{
+  "description": "1ページ目は表紙で、明細表は2ページ目にある。後ろのページがない表はページの最後で閉じ、確定する。根拠は2ページ目の片",
+  "support": "supported",
+  "runs": [
+    {"page": 1, "x": 60, "y": 100, "text": "表紙"},
+    {"page": 2, "x": 60, "y": 100, "text": "品名"},
+    {"page": 2, "x": 300, "y": 100, "text": "数量"},
+    {"page": 2, "right": 520, "y": 100, "text": "金額"},
+    {"page": 2, "x": 60, "y": 118, "text": "りんご"},
+    {"page": 2, "x": 300, "y": 118, "text": "3"},
+    {"page": 2, "right": 520, "y": 118, "text": "¥12,300"}
+  ],
+  "form": {"fields": [
+    {"id": "items", "label": "明細", "type": "table", "columns": [
+      {"id": "name", "label": "品名"},
+      {"id": "qty", "label": "数量", "type": "number"},
+      {"id": "amount", "label": "金額", "type": "amount"}
+    ]}
+  ]},
+  "expect": {
+    "items": {"rows": [
+      {"name": {"raw": "りんご"}, "qty": {"raw": "3", "value": 3}, "amount": {"raw": "¥12,300", "value": 12300}}
+    ]}
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "description": "グループごとの小計の後に空白の行があり、その下に次のグループの明細行と小計・合計が続く。締めの合計を読む前に空白の後に明細行があれば表を確定しない（irregular_table）",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "品名"},
+    {"x": 300, "y": 100, "text": "数量"},
+    {"right": 520, "y": 100, "text": "金額"},
+    {"x": 60, "y": 118, "text": "りんご"},
+    {"x": 300, "y": 118, "text": "3"},
+    {"right": 520, "y": 118, "text": "¥300"},
+    {"x": 60, "y": 136, "text": "みかん"},
+    {"x": 300, "y": 136, "text": "2"},
+    {"right": 520, "y": 136, "text": "¥500"},
+    {"x": 300, "y": 154, "text": "小計"},
+    {"right": 520, "y": 154, "text": "¥800"},
+    {"x": 60, "y": 190, "text": "ぶどう"},
+    {"x": 300, "y": 190, "text": "1"},
+    {"right": 520, "y": 190, "text": "¥900"},
+    {"x": 300, "y": 208, "text": "小計"},
+    {"right": 520, "y": 208, "text": "¥900"},
+    {"x": 300, "y": 226, "text": "合計"},
+    {"right": 520, "y": 226, "text": "¥1,700"}
+  ],
+  "form": {"fields": [
+    {"id": "items", "label": "明細", "type": "table", "columns": [
+      {"id": "name", "label": "品名"},
+      {"id": "qty", "label": "数量", "type": "number"},
+      {"id": "amount", "label": "金額", "type": "amount"}
+    ]}
+  ]},
+  "expect": {
+    "items": {"abstain": "ambiguous", "hold": "irregular_table"}
+  }
+}

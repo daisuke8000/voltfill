@@ -1,0 +1,28 @@
+{
+  "description": "明細表が1ページ目のテキストの最後まで続き、2ページ目がある（表が次のページに続く可能性がある）。ページをまたいで読まず、表を確定しない（continues_on_next_page）",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 700, "text": "品名"},
+    {"x": 300, "y": 700, "text": "数量"},
+    {"x": 440, "y": 700, "text": "金額"},
+    {"x": 60, "y": 718, "text": "りんご"},
+    {"x": 300, "y": 718, "text": "3"},
+    {"x": 440, "y": 718, "text": "¥300"},
+    {"x": 60, "y": 736, "text": "みかん"},
+    {"x": 300, "y": 736, "text": "2"},
+    {"x": 440, "y": 736, "text": "¥500"},
+    {"page": 2, "x": 60, "y": 100, "text": "ぶどう"},
+    {"page": 2, "x": 300, "y": 100, "text": "1"},
+    {"page": 2, "x": 440, "y": 100, "text": "¥2,000"}
+  ],
+  "form": {"fields": [
+    {"id": "items", "label": "明細", "type": "table", "columns": [
+      {"id": "name", "label": "品名"},
+      {"id": "qty", "label": "数量", "type": "number"},
+      {"id": "amount", "label": "金額", "type": "amount"}
+    ]}
+  ]},
+  "expect": {
+    "items": {"abstain": "ambiguous", "hold": "continues_on_next_page"}
+  }
+}

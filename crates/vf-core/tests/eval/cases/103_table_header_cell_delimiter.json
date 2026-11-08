@@ -1,0 +1,26 @@
+{
+  "description": "見出しの候補の片に区切り記号がある（品名：・金額：）。区切り記号付きの片はラベルで見出しのセルではないため表は not_found。通常の項目の金額は「金額：」の右の値で確定し、品名は右と真下の候補が並ぶため ambiguous",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "品名："},
+    {"x": 120, "y": 100, "text": "りんご"},
+    {"x": 300, "y": 100, "text": "金額："},
+    {"x": 360, "y": 100, "text": "¥300"},
+    {"x": 60, "y": 118, "text": "品番"},
+    {"x": 120, "y": 118, "text": "A-100"},
+    {"x": 300, "y": 118, "text": "¥330"}
+  ],
+  "form": {"fields": [
+    {"id": "items", "label": "明細", "type": "table", "columns": [
+      {"id": "name", "label": "品名"},
+      {"id": "amount", "label": "金額", "type": "amount"}
+    ]},
+    {"id": "amount", "label": "金額", "type": "amount"},
+    {"id": "name", "label": "品名"}
+  ]},
+  "expect": {
+    "items": {"abstain": "not_found"},
+    "amount": {"raw": "¥300", "value": 300},
+    "name": {"abstain": "ambiguous"}
+  }
+}

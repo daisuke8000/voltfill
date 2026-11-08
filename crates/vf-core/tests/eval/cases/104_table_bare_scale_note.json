@@ -1,0 +1,32 @@
+{
+  "description": "表の上に「単位」のない括弧付きの桁の注記（（千円））があり、金額は単位なしの数字。括弧付きの桁だけの片もページの単位の注記とみなし、表の金額も通常の項目の金額も変換しない（invalid）",
+  "support": "supported",
+  "runs": [
+    {"right": 520, "y": 80, "text": "（千円）"},
+    {"x": 60, "y": 100, "text": "品名"},
+    {"x": 300, "y": 100, "text": "数量"},
+    {"x": 380, "y": 100, "text": "単価"},
+    {"right": 520, "y": 100, "text": "金額"},
+    {"x": 60, "y": 118, "text": "りんご"},
+    {"x": 300, "y": 118, "text": "3"},
+    {"x": 380, "y": 118, "text": "100"},
+    {"right": 520, "y": 118, "text": "300"},
+    {"x": 60, "y": 136, "text": "みかん"},
+    {"x": 300, "y": 136, "text": "2"},
+    {"x": 380, "y": 136, "text": "250"},
+    {"right": 520, "y": 136, "text": "500"},
+    {"x": 60, "y": 200, "text": "粗利：56"}
+  ],
+  "form": {"fields": [
+    {"id": "items", "label": "明細", "type": "table", "columns": [
+      {"id": "name", "label": "品名"},
+      {"id": "qty", "label": "数量", "type": "number"},
+      {"id": "amount", "label": "金額", "type": "amount"}
+    ]},
+    {"id": "margin", "label": "粗利", "type": "amount"}
+  ]},
+  "expect": {
+    "items": {"abstain": "invalid", "hold": "invalid_cell"},
+    "margin": {"abstain": "invalid"}
+  }
+}

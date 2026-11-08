@@ -1,0 +1,29 @@
+{
+  "description": "括弧付きの桁の注記（（千円））がある表の金額に ¥ が付いている（¥300）。注記と金額が食い違い得るため変換せず、表を確定しない（invalid_cell）",
+  "support": "supported",
+  "runs": [
+    {"right": 520, "y": 80, "text": "（千円）"},
+    {"x": 60, "y": 100, "text": "品名"},
+    {"x": 300, "y": 100, "text": "数量"},
+    {"x": 380, "y": 100, "text": "単価"},
+    {"right": 520, "y": 100, "text": "金額"},
+    {"x": 60, "y": 118, "text": "りんご"},
+    {"x": 300, "y": 118, "text": "3"},
+    {"x": 380, "y": 118, "text": "100"},
+    {"right": 520, "y": 118, "text": "¥300"},
+    {"x": 60, "y": 136, "text": "みかん"},
+    {"x": 300, "y": 136, "text": "2"},
+    {"x": 380, "y": 136, "text": "250"},
+    {"right": 520, "y": 136, "text": "¥500"}
+  ],
+  "form": {"fields": [
+    {"id": "items", "label": "明細", "type": "table", "columns": [
+      {"id": "name", "label": "品名"},
+      {"id": "qty", "label": "数量", "type": "number"},
+      {"id": "amount", "label": "金額", "type": "amount"}
+    ]}
+  ]},
+  "expect": {
+    "items": {"abstain": "invalid", "hold": "invalid_cell"}
+  }
+}

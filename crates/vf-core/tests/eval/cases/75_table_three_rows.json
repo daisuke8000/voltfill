@@ -1,0 +1,34 @@
+{
+  "description": "明細表（3行）を表の項目で読む。見出しの各列ラベルが完全一致し、セルが見出しの列にそろう（金額は見出しと右端がそろう）。同じ見出しラベルの単独の項目（金額）は従来どおり列の候補止まり（geometric_only）で、データ行の値を入れない",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "品名"},
+    {"x": 300, "y": 100, "text": "数量"},
+    {"right": 520, "y": 100, "text": "金額"},
+    {"x": 60, "y": 118, "text": "USBケーブル Type-C 1m"},
+    {"x": 300, "y": 118, "text": "2"},
+    {"right": 520, "y": 118, "text": "¥2,400"},
+    {"x": 60, "y": 136, "text": "HDMIケーブル 2m"},
+    {"x": 300, "y": 136, "text": "1"},
+    {"right": 520, "y": 136, "text": "¥1,800"},
+    {"x": 60, "y": 154, "text": "電源タップ 4口"},
+    {"x": 300, "y": 154, "text": "3"},
+    {"right": 520, "y": 154, "text": "¥6,000"}
+  ],
+  "form": {"fields": [
+    {"id": "items", "label": "明細", "type": "table", "columns": [
+      {"id": "name", "label": "品名"},
+      {"id": "qty", "label": "数量", "type": "number"},
+      {"id": "amount", "label": "金額", "type": "amount"}
+    ]},
+    {"id": "amount", "label": "金額", "type": "amount"}
+  ]},
+  "expect": {
+    "items": {"rows": [
+      {"name": {"raw": "USBケーブル Type-C 1m"}, "qty": {"raw": "2", "value": 2}, "amount": {"raw": "¥2,400", "value": 2400}},
+      {"name": {"raw": "HDMIケーブル 2m"}, "qty": {"raw": "1", "value": 1}, "amount": {"raw": "¥1,800", "value": 1800}},
+      {"name": {"raw": "電源タップ 4口"}, "qty": {"raw": "3", "value": 3}, "amount": {"raw": "¥6,000", "value": 6000}}
+    ]},
+    "amount": {"abstain": "ambiguous", "hold": "geometric_only"}
+  }
+}

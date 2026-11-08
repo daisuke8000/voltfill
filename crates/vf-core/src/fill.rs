@@ -40,7 +40,9 @@
 //!   normalized when the label states a scale unit (`売上高（千円）`) or
 //!   any text on any page of the document is a unit note (`（単位：千円）`,
 //!   `（単位は千円）`, `（千円単位）`, `（単位：1,000円）`, `（単位：ドル）`,
-//!   also split over two or three adjacent fragments of a line): which tables or pages a note covers cannot be told.
+//!   a text that is only a bracketed scale, `（千円）`, also split over two
+//!   or three adjacent fragments of a line): which tables or pages a note
+//!   covers cannot be told.
 //!
 //! Only the best-scoring candidates decide (an exact label over a partial
 //! one). The field is filled only when every one of them may be committed
@@ -77,6 +79,8 @@ use vf_source::SourceFragment;
 use vf_source::budget::{Budget, BudgetError};
 use vf_source::geometry::Rect;
 use vf_source::layout::{self, Binding, LayoutError, Pair, Placement, Precision};
+
+pub mod table;
 
 pub const MAX_FORM_BYTES: usize = 1024 * 1024;
 pub const MAX_FIELDS: usize = 512;
@@ -167,6 +171,9 @@ pub enum FieldType {
     Date,
     Amount,
     Number,
+    /// Line items: rows of [`FormColumn`]s under one header row (see
+    /// [`table`]). Never a column type.
+    Table,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -176,8 +183,34 @@ pub struct FormField {
     pub label: String,
     #[serde(rename = "type", default)]
     pub field_type: FieldType,
+    /// Other labels for the field; not allowed for table fields.
     #[serde(default)]
     pub hints: Vec<String>,
+    /// Table fields only: the columns to read, 1 to [`table::MAX_COLUMNS`].
+    #[serde(default)]
+    pub columns: Vec<FormColumn>,
+}
+
+/// One column of a table field. Its label or one of its hints must equal a
+/// header cell exactly.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FormColumn {
+    pub id: String,
+    pub label: String,
+    /// `text`, `date`, `amount` or `number`.
+    #[serde(rename = "type", default)]
+    pub column_type: FieldType,
+    /// Other header labels for the column (at most 16).
+    #[serde(default)]
+    pub hints: Vec<String>,
+}
+
+impl FormColumn {
+    /// The column's label, then its hints.
+    pub fn names(&self) -> impl Iterator<Item = &String> {
+        std::iter::once(&self.label).chain(&self.hints)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -198,6 +231,8 @@ pub enum FormError {
     FieldText,
     #[error("form field ids must be unique")]
     DuplicateId,
+    #[error("table columns are missing, invalid or not unique")]
+    Columns,
 }
 
 /// Parse and validate a form definition.
@@ -226,8 +261,37 @@ pub fn parse_form(bytes: &[u8]) -> Result<Form, FormError> {
         if !ids.insert(field.id.as_str()) {
             return Err(FormError::DuplicateId);
         }
+        if !valid_columns(field, text_ok) {
+            return Err(FormError::Columns);
+        }
     }
     Ok(form)
+}
+
+/// A table field has no hints of its own and 1 to [`table::MAX_COLUMNS`]
+/// columns with unique ids, scalar types and at most [`MAX_HINTS`] hints;
+/// no two labels or hints of its columns are equal after normalization (one
+/// header cell would match two columns, or one column twice). Any other
+/// field has no columns.
+fn valid_columns(field: &FormField, text_ok: impl Fn(&str) -> bool) -> bool {
+    if field.field_type != FieldType::Table {
+        return field.columns.is_empty();
+    }
+    if !field.hints.is_empty() || !(1..=table::MAX_COLUMNS).contains(&field.columns.len()) {
+        return false;
+    }
+    let mut ids = BTreeSet::new();
+    let mut labels = BTreeSet::new();
+    field.columns.iter().all(|column| {
+        text_ok(&column.id)
+            && column.column_type != FieldType::Table
+            && column.hints.len() <= MAX_HINTS
+            && ids.insert(column.id.as_str())
+            && column.names().all(|name| {
+                let label = normalize_label(name);
+                text_ok(name) && !label.base.is_empty() && labels.insert(table::key(&label))
+            })
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -279,6 +343,26 @@ pub enum Hold {
     /// later word that is a form label, or a word with its own value after
     /// a phone number, date or amount.
     SeveralValues,
+    /// Table fields: a row is not regular (a wrapped cell, a cell spanning
+    /// columns, a fragment outside the columns, a row closer than the row
+    /// pitch, a one-column header), the rows resume after a blank gap, item
+    /// rows follow the totals or other line where the rows stopped, or a
+    /// row has no cell in a requested typed column or none in the first or
+    /// a requested text column.
+    IrregularTable,
+    /// Table fields: a later page exists and the rows do not end at a
+    /// closing total (`合計`, `請求金額`, `以下余白`; a subtotal such as `小計`
+    /// does not close them); or the page says the document continues
+    /// (`次頁`, `次ページ`).
+    ContinuesOnNextPage,
+    /// Table fields: more than [`vf_source::layout::MAX_TABLE_ROWS`] rows.
+    TooManyRows,
+    /// Table fields: a date, amount or number cell does not match its
+    /// column's whole-text grammar.
+    InvalidCell,
+    /// Table fields: the field has only text columns, so no cell's type can
+    /// tell item rows from other lines (the header of a table below).
+    UntypedTable,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -311,19 +395,100 @@ pub struct FillCandidate {
     pub evidence: Vec<FillEvidence>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// The result for one form field.
+///
+/// Serialized with the fields below in order, leaving out `method`, `raw`,
+/// `value` and `rows` when `None`. `candidates` and `table_candidates` share
+/// the JSON key `candidates`: a scalar field has only value candidates and
+/// a table field only table candidates, never both (checked in debug
+/// builds); the key is written once, from whichever is not empty, and left
+/// out when both are.
+#[derive(Debug, Clone, PartialEq)]
 pub struct FieldFill {
     pub status: FillStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub method: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub raw: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<Value>,
+    /// The value's spans; for a filled table field, the header cells of its
+    /// columns in form order.
+    pub evidence: Vec<FillEvidence>,
+    /// Table fields only: the rows of a filled table.
+    pub rows: Option<Vec<TableRow>>,
+    /// Scalar fields only: ranked alternatives when the field was not
+    /// filled, serialized as `candidates`.
+    pub candidates: Vec<FillCandidate>,
+    /// Table fields only: the tables read but not filled, in document
+    /// order, serialized as `candidates`.
+    pub table_candidates: Vec<TableCandidate>,
+}
+
+impl FieldFill {
+    /// Whether value and table candidates are not both set (they share the
+    /// JSON key `candidates`).
+    fn candidates_exclusive(&self) -> bool {
+        self.candidates.is_empty() || self.table_candidates.is_empty()
+    }
+}
+
+impl Serialize for FieldFill {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        debug_assert!(
+            self.candidates_exclusive(),
+            "a field has value or table candidates, never both"
+        );
+        let mut out = serializer.serialize_struct("FieldFill", 7)?;
+        out.serialize_field("status", &self.status)?;
+        match &self.method {
+            Some(method) => out.serialize_field("method", method)?,
+            None => out.skip_field("method")?,
+        }
+        match &self.raw {
+            Some(raw) => out.serialize_field("raw", raw)?,
+            None => out.skip_field("raw")?,
+        }
+        match &self.value {
+            Some(value) => out.serialize_field("value", value)?,
+            None => out.skip_field("value")?,
+        }
+        out.serialize_field("evidence", &self.evidence)?;
+        match &self.rows {
+            Some(rows) => out.serialize_field("rows", rows)?,
+            None => out.skip_field("rows")?,
+        }
+        if !self.table_candidates.is_empty() {
+            out.serialize_field("candidates", &self.table_candidates)?;
+        } else if !self.candidates.is_empty() {
+            out.serialize_field("candidates", &self.candidates)?;
+        } else {
+            out.skip_field("candidates")?;
+        }
+        out.end()
+    }
+}
+
+/// One cell of a table row: exact source text, its normalized value
+/// (`None` when it fails the column's grammar) and its span.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TableCell {
+    pub raw: String,
     pub value: Option<Value>,
     pub evidence: Vec<FillEvidence>,
-    /// Ranked alternatives when the field was not filled.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub candidates: Vec<FillCandidate>,
+}
+
+/// A table row keyed by column id; a blank cell is `None` (`null`).
+pub type TableRow = BTreeMap<String, Option<TableCell>>;
+
+/// A table that was read but not committed.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TableCandidate {
+    /// Why it may not be filled offline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hold: Option<Hold>,
+    /// The rows read before the table ended.
+    pub rows: Vec<TableRow>,
+    /// The header cells of the form's columns, in form order.
+    pub evidence: Vec<FillEvidence>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -381,15 +546,15 @@ pub fn fill_with_limits(
                 .collect(),
         });
     }
-    // Whitespace-only splits start with a form label or hint, and their
-    // values hold none, compared exactly as `label_score` does (base or
-    // stem, then qualifiers).
+    // Whitespace-only splits start with a form label or hint (table column
+    // labels and hints included), and their values hold none, compared
+    // exactly as `label_score` does (base or stem, then qualifiers).
     let mut exact = BTreeSet::new();
-    for name in form
-        .fields
-        .iter()
-        .flat_map(|f| std::iter::once(&f.label).chain(&f.hints))
-    {
+    for name in form.fields.iter().flat_map(|f| {
+        std::iter::once(&f.label)
+            .chain(&f.hints)
+            .chain(f.columns.iter().flat_map(FormColumn::names))
+    }) {
         budget.spend_bytes(name)?;
         let label = normalize_label(name);
         if !label.base.is_empty() {
@@ -425,11 +590,11 @@ pub fn fill_with_limits(
     }
     // A value that reads as one of the form's own labels is a neighbouring label, not a value.
     let mut labels = BTreeSet::new();
-    for name in form
-        .fields
-        .iter()
-        .flat_map(|f| std::iter::once(&f.label).chain(&f.hints))
-    {
+    for name in form.fields.iter().flat_map(|f| {
+        std::iter::once(&f.label)
+            .chain(&f.hints)
+            .chain(f.columns.iter().flat_map(FormColumn::names))
+    }) {
         budget.spend_bytes(name)?;
         labels.insert(normalize_label(name).stem);
     }
@@ -444,10 +609,27 @@ pub fn fill_with_limits(
     let mut cache = Cache {
         slots: (0..pairs.len()).map(|_| None).collect(),
     };
+    let tables = if form.fields.iter().any(|f| f.field_type == FieldType::Table) {
+        Some(table::Tables::new(
+            fragments,
+            &layout.lines,
+            &texts,
+            scaled_document,
+            &mut budget,
+        )?)
+    } else {
+        None
+    };
     let mut fields = BTreeMap::new();
     for field in &form.fields {
         budget.check_deadline()?;
-        let fill = context.fill_field(field, &mut cache, &mut budget)?;
+        let fill = match &tables {
+            Some(tables) if field.field_type == FieldType::Table => {
+                tables.fill(field, &mut budget)?
+            }
+            _ => context.fill_field(field, &mut cache, &mut budget)?,
+        };
+        debug_assert!(fill.candidates_exclusive(), "{}", field.id);
         fields.insert(field.id.clone(), fill);
     }
     Ok(FillResult {
@@ -464,7 +646,9 @@ fn empty(status: FillStatus) -> FieldFill {
         raw: None,
         value: None,
         evidence: Vec::new(),
+        rows: None,
         candidates: Vec::new(),
+        table_candidates: Vec::new(),
     }
 }
 
@@ -738,7 +922,7 @@ impl Context<'_> {
         budget: &mut Budget,
     ) -> Result<Option<Value>, BudgetError> {
         let slot = match field_type {
-            FieldType::Text => return Ok(None),
+            FieldType::Text | FieldType::Table => return Ok(None),
             FieldType::Date => 0,
             FieldType::Amount => 1,
             FieldType::Number => 2,
@@ -1063,6 +1247,7 @@ const PLAIN_UNITS: [&str; 30] = [
 ];
 
 /// A unit note, whitespace ignored and NFKC applied:
+/// - only a bracketed scale, without `単位` ([`scale_only`], `（千円）`);
 /// - `単位` preceded by a scale and an optional `円` (`（千円単位）`);
 /// - `単位` followed by optional `:`, `：` or `は` and a note body up to `)`,
 ///   `。` or the end of the text, split into parts ([`note_parts`]) at `、`,
@@ -1088,21 +1273,22 @@ const PLAIN_UNITS: [&str; 30] = [
 /// unnormalized: which tables or pages it covers cannot be told.
 fn unit_note(text: &str) -> bool {
     let compact: String = text.nfkc().filter(|c| !c.is_whitespace()).collect();
-    compact.match_indices("単位").any(|(at, unit)| {
-        let rest = &compact[at + unit.len()..];
-        let after = rest.trim_start_matches([':', '：', 'は']);
-        let before = &compact[..at];
-        let opened = before.ends_with('(');
-        // A word right before `単位` (`発注単位`) names what is counted.
-        let named = before.ends_with(char::is_alphabetic);
-        let scaled = before.strip_suffix('円').unwrap_or(before);
-        let marked = opened || after.len() < rest.len();
-        if scaled.ends_with(NOTE_SCALES) {
-            return true;
-        }
-        let body = &after[..after.find([')', '。']).unwrap_or(after.len())];
-        note_parts(body).any(|part| note_part(part, marked, named))
-    })
+    scale_only(&compact)
+        || compact.match_indices("単位").any(|(at, unit)| {
+            let rest = &compact[at + unit.len()..];
+            let after = rest.trim_start_matches([':', '：', 'は']);
+            let before = &compact[..at];
+            let opened = before.ends_with('(');
+            // A word right before `単位` (`発注単位`) names what is counted.
+            let named = before.ends_with(char::is_alphabetic);
+            let scaled = before.strip_suffix('円').unwrap_or(before);
+            let marked = opened || after.len() < rest.len();
+            if scaled.ends_with(NOTE_SCALES) {
+                return true;
+            }
+            let body = &after[..after.find([')', '。']).unwrap_or(after.len())];
+            note_parts(body).any(|part| note_part(part, marked, named))
+        })
 }
 
 /// The parts of a unit note body ([`unit_note`]): split at `、`, `/`, `・`,
@@ -1233,6 +1419,19 @@ fn plain_unit(text: &str) -> bool {
         })
 }
 
+/// Whether `compact` (NFKC, without whitespace) is only a bracketed scale,
+/// without `単位` (`（千円）`, `(百万円)`, `【万円】`, `（千）`): a unit note
+/// ([`unit_note`]).
+fn scale_only(compact: &str) -> bool {
+    const SCALES: [&str; 12] = [
+        "十", "百", "千", "万", "十万", "百万", "千万", "億", "十億", "百億", "千億", "兆",
+    ];
+    [('(', ')'), ('[', ']'), ('【', '】'), ('〔', '〕')]
+        .iter()
+        .find_map(|&(open, close)| compact.strip_prefix(open)?.strip_suffix(close))
+        .is_some_and(|scale| SCALES.contains(&scale.strip_suffix('円').unwrap_or(scale)))
+}
+
 /// Scale units that make a label's amounts and numbers multiples
 /// (`売上高（千円）`, `金額（単位：万円）`, `売上高百万円`, `金額（単位は千円）`,
 /// `売上高（千円単位）`): a scaled yen unit in the base, a qualifier that
@@ -1261,7 +1460,7 @@ fn states_scale(label: &Label) -> bool {
 /// - number: one number with an optional unit ([`parse_number`]).
 fn normalize_value(field_type: FieldType, raw: &str) -> Option<Value> {
     match field_type {
-        FieldType::Text => None,
+        FieldType::Text | FieldType::Table => None,
         FieldType::Date => parse_date(&raw.nfkc().collect::<String>()).map(Value::String),
         FieldType::Amount => parse_amount(&numeric_text(raw)?),
         FieldType::Number => parse_number(&numeric_text(raw)?),
@@ -2303,6 +2502,9 @@ mod tests {
             page(2, "単位 万円", 80.0),
             page(2, "予算：56", 100.0),
             page(3, "経費：¥7,000", 100.0),
+            // A bracketed scale without 単位 is a unit note too.
+            page(4, "（百万円）", 80.0),
+            page(4, "粗利：56", 100.0),
         ];
         let result = fill(
             "doc",
@@ -2312,11 +2514,12 @@ mod tests {
                 {"id":"sales_number","label":"売上高","type":"number"},
                 {"id":"budget","label":"予算","type":"amount"},
                 {"id":"cost","label":"経費","type":"amount"},
+                {"id":"margin","label":"粗利","type":"amount"},
                 {"id":"sales_text","label":"売上高"}
             ]})),
         );
         let f = &result.fields;
-        for id in ["sales", "sales_number", "budget"] {
+        for id in ["sales", "sales_number", "budget", "margin"] {
             assert_eq!(f[id].status, FillStatus::Invalid, "{id}");
         }
         // Changed: a note applies to the whole document (before: its page
@@ -2386,7 +2589,16 @@ mod tests {
             assert!(unit_note(&text.nfkc().collect::<String>()), "{text}");
             assert!(unit_note(text), "{text}");
         }
+        for text in ["（千円）", "(百万円)", "【 万円 】", "（千）", "［億円］"] {
+            assert!(unit_note(text), "{text}");
+        }
         for text in [
+            "（円）",
+            "千円",
+            "金額（千円）",
+            "（千円未満切捨て）",
+            "(10)",
+            "（）",
             "単位：円",
             "単位：個",
             "単価：1,000円",
