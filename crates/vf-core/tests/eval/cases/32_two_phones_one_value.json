@@ -1,0 +1,18 @@
+{
+  "description": "1つの「ラベル：値」の値に電話番号が2つあり、間に語（FAX）がある。値と次のラベルの境目が分からないため文字列項目でも候補止まり（ambiguous）。区切り記号だけで結ばれた期間は1つの値として埋める",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "TEL：03-1234-5678 FAX 03-1234-5679"},
+    {"x": 60, "y": 124, "text": "受付期間：2026年11月8日〜2026年12月8日"}
+  ],
+  "form": {"fields": [
+    {"id": "phone", "label": "電話番号", "hints": ["TEL"]},
+    {"id": "fax", "label": "FAX番号", "hints": ["FAX"]},
+    {"id": "period", "label": "受付期間"}
+  ]},
+  "expect": {
+    "phone": {"abstain": "ambiguous", "hold": "several_values"},
+    "fax": {"abstain": "not_found"},
+    "period": {"raw": "2026年11月8日〜2026年12月8日"}
+  }
+}

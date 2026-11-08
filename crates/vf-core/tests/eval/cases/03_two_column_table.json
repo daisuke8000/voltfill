@@ -1,0 +1,30 @@
+{
+  "description": "2列のラベル・値の表（行間18pt、区切り記号なし）。表の全ラベルがフォームにある。右隣の値は位置だけの結び付きのため、すべて候補止まりで空欄（ambiguous・geometric_only）。候補の1位は正しい値",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "会社名"},
+    {"x": 180, "y": 100, "text": "株式会社サンプル商事"},
+    {"x": 60, "y": 118, "text": "部署"},
+    {"x": 180, "y": 118, "text": "経理部"},
+    {"x": 60, "y": 136, "text": "担当者"},
+    {"x": 180, "y": 136, "text": "佐藤 花子"},
+    {"x": 60, "y": 154, "text": "電話番号"},
+    {"x": 180, "y": 154, "text": "03-5555-0100"},
+    {"x": 60, "y": 172, "text": "メール"},
+    {"x": 180, "y": 172, "text": "keiri@example.com"}
+  ],
+  "form": {"fields": [
+    {"id": "company", "label": "会社名"},
+    {"id": "department", "label": "部署"},
+    {"id": "person", "label": "担当者"},
+    {"id": "phone", "label": "電話番号"},
+    {"id": "email", "label": "メールアドレス", "hints": ["メール"]}
+  ]},
+  "expect": {
+    "company": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "株式会社サンプル商事"},
+    "department": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "経理部"},
+    "person": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "佐藤 花子"},
+    "phone": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "03-5555-0100"},
+    "email": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "keiri@example.com"}
+  }
+}

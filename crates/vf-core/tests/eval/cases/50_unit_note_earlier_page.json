@@ -1,0 +1,22 @@
+{
+  "description": "1ページ目にだけ単位の注記（（単位は千円））があり、金額は2ページ目にある。注記は文書全体に及ぶため、金額・数値は変換しない（invalid）。以前は注記を「単位は」の形で認識せず、ページごとにしか適用しなかったため 1234・7000 で埋めていた。文字列項目は原文のまま",
+  "support": "supported",
+  "runs": [
+    {"x": 400, "y": 80, "text": "（単位は千円）"},
+    {"x": 60, "y": 100, "text": "損益計算書"},
+    {"page": 2, "x": 60, "y": 100, "text": "売上高：1,234"},
+    {"page": 2, "x": 60, "y": 124, "text": "経費：¥7,000"}
+  ],
+  "form": {"fields": [
+    {"id": "sales", "label": "売上高", "type": "amount"},
+    {"id": "sales_number", "label": "売上高", "type": "number"},
+    {"id": "sales_text", "label": "売上高"},
+    {"id": "cost", "label": "経費", "type": "amount"}
+  ]},
+  "expect": {
+    "sales": {"abstain": "invalid"},
+    "sales_number": {"abstain": "invalid"},
+    "sales_text": {"raw": "1,234"},
+    "cost": {"abstain": "invalid"}
+  }
+}

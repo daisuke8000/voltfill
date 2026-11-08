@@ -1,0 +1,24 @@
+{
+  "description": "文字列の値の中に、空白なしで2つ目の値が続く（「03-1234-5678 内線123」「03-1234-5678 担当山田」）か、「/」の後にフォームのラベルが続く（「山田 太郎/所属 経理部」）。値が2つ以上あるため候補止まり（ambiguous・several_values）。以前は空白で区切った形だけを判定し、文字全体で埋めていた。後ろが2文字までの語（「代表」）なら1つの値として埋める",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "電話：03-1234-5678 内線123"},
+    {"x": 60, "y": 124, "text": "TEL：03-1234-5678 担当山田"},
+    {"x": 60, "y": 148, "text": "氏名：山田 太郎/所属 経理部"},
+    {"x": 60, "y": 172, "text": "FAX：03-1234-5679 代表"}
+  ],
+  "form": {"fields": [
+    {"id": "tel", "label": "電話"},
+    {"id": "tel2", "label": "TEL"},
+    {"id": "name", "label": "氏名"},
+    {"id": "department", "label": "所属"},
+    {"id": "fax", "label": "FAX"}
+  ]},
+  "expect": {
+    "tel": {"abstain": "ambiguous", "hold": "several_values", "candidate": "03-1234-5678 内線123"},
+    "tel2": {"abstain": "ambiguous", "hold": "several_values", "candidate": "03-1234-5678 担当山田"},
+    "name": {"abstain": "ambiguous", "hold": "several_values", "candidate": "山田 太郎/所属 経理部"},
+    "department": {"abstain": "not_found"},
+    "fax": {"raw": "03-1234-5679 代表"}
+  }
+}

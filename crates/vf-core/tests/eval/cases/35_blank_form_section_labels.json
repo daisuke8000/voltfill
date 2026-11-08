@@ -1,0 +1,15 @@
+{
+  "description": "記入前の様式で、見出し【ご担当者】の下にラベル「部署」「役職」だけが縦に並ぶ。部署の真下の「役職」は位置だけの候補で、値として埋めない（ambiguous・geometric_only）",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "【ご担当者】"},
+    {"x": 60, "y": 118, "text": "部署"},
+    {"x": 60, "y": 136, "text": "役職"}
+  ],
+  "form": {"fields": [
+    {"id": "department", "label": "部署"}
+  ]},
+  "expect": {
+    "department": {"abstain": "ambiguous", "hold": "geometric_only"}
+  }
+}

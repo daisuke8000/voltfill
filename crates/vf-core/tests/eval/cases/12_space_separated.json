@@ -1,0 +1,20 @@
+{
+  "description": "未対応: 区切り記号のない「ラベル 値」（1つのラン、または0.5em以下の間隔で抽出時に結合されるラン）",
+  "support": "unsupported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "発行日 2026年11月8日"},
+    {"x": 60, "y": 124, "text": "請求番号 INV-0042"},
+    {"x": 60, "y": 148, "text": "氏名"},
+    {"x": 85, "y": 148, "text": "山田 太郎"}
+  ],
+  "form": {"fields": [
+    {"id": "issued", "label": "発行日", "type": "date"},
+    {"id": "invoice_no", "label": "請求番号"},
+    {"id": "name", "label": "氏名"}
+  ]},
+  "expect": {
+    "issued": {"raw": "2026年11月8日", "value": "2026-11-08"},
+    "invoice_no": {"raw": "INV-0042"},
+    "name": {"raw": "山田 太郎"}
+  }
+}

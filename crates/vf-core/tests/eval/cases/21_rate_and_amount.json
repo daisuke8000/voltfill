@@ -1,0 +1,19 @@
+{
+  "description": "1つの値に税率と金額が並ぶ（消費税：10% ¥1,100）。値全体が1つの金額ではないため金額項目は invalid。同じ形の「10%対象 ¥11,000」では金額が税額でなく対象額になるため、税率の付いた値からは金額を選ばない",
+  "support": "supported",
+  "runs": [
+    {"x": 330, "y": 300, "text": "小計：¥11,000"},
+    {"x": 330, "y": 320, "text": "消費税：10% ¥1,100"},
+    {"x": 330, "y": 340, "text": "合計：¥12,100"}
+  ],
+  "form": {"fields": [
+    {"id": "subtotal", "label": "小計", "type": "amount"},
+    {"id": "tax", "label": "消費税", "type": "amount"},
+    {"id": "total", "label": "合計", "type": "amount"}
+  ]},
+  "expect": {
+    "subtotal": {"raw": "¥11,000", "value": 11000},
+    "tax": {"abstain": "invalid"},
+    "total": {"raw": "¥12,100", "value": 12100}
+  }
+}

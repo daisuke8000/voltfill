@@ -1,0 +1,28 @@
+{
+  "description": "数の書式の細則。先頭の0（¥007、0012）、先頭の区切りが0で始まる数（0,123円、¥000,000）、欧州式の桁区切りと区別できない小数3桁（1.000）は invalid。ちょうど0は埋める",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "値引額：¥007"},
+    {"x": 60, "y": 124, "text": "数量：0012"},
+    {"x": 60, "y": 148, "text": "重量：1.000"},
+    {"x": 60, "y": 172, "text": "手数料：0,123円"},
+    {"x": 60, "y": 196, "text": "残高：¥000,000"},
+    {"id": "count", "x": 60, "y": 220, "text": "件数：0"}
+  ],
+  "form": {"fields": [
+    {"id": "discount", "label": "値引額", "type": "amount"},
+    {"id": "quantity", "label": "数量", "type": "number"},
+    {"id": "weight", "label": "重量", "type": "number"},
+    {"id": "fee", "label": "手数料", "type": "amount"},
+    {"id": "balance", "label": "残高", "type": "amount"},
+    {"id": "count", "label": "件数", "type": "number"}
+  ]},
+  "expect": {
+    "discount": {"abstain": "invalid"},
+    "quantity": {"abstain": "invalid"},
+    "weight": {"abstain": "invalid"},
+    "fee": {"abstain": "invalid"},
+    "balance": {"abstain": "invalid"},
+    "count": {"raw": "0", "value": 0, "source": ["count"]}
+  }
+}

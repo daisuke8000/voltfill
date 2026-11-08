@@ -1,0 +1,20 @@
+{
+  "description": "ラベル表の最後の2行（部署・役職）の値が空欄で、フォームは一部の項目だけを持つ（役職はフォームにない）。上の行に右の値があるため左の列はラベルの列で、部署の真下の「役職」を候補にもしない（not_found）。ラベルの列の判定を外すと ambiguous になる",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "会社名"},
+    {"x": 180, "y": 100, "text": "株式会社サンプル"},
+    {"x": 60, "y": 118, "text": "担当者"},
+    {"x": 180, "y": 118, "text": "佐藤 花子"},
+    {"x": 60, "y": 136, "text": "部署"},
+    {"x": 60, "y": 154, "text": "役職"}
+  ],
+  "form": {"fields": [
+    {"id": "company", "label": "会社名"},
+    {"id": "department", "label": "部署"}
+  ]},
+  "expect": {
+    "company": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "株式会社サンプル"},
+    "department": {"abstain": "not_found"}
+  }
+}

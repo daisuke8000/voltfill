@@ -1,0 +1,22 @@
+{
+  "description": "「ラベル：値」の値が次の行に続く（値の開始位置にそろう続き、ラベルの左端に折り返す続き）。複数行の値は候補止まり（ambiguous・multi_line）。続きの行が離れた位置にあれば1行の値として埋める",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "住所：東京都千代田区架空町1-2-3"},
+    {"x": 90, "y": 112, "text": "サンプルビル5階"},
+    {"x": 60, "y": 148, "text": "備考：午前中の配達を希望します。不在時は"},
+    {"x": 60, "y": 160, "text": "宅配ボックスへ。"},
+    {"x": 60, "y": 196, "text": "件名：ウェブサイト制作費"},
+    {"x": 300, "y": 208, "text": "以上"}
+  ],
+  "form": {"fields": [
+    {"id": "address", "label": "住所"},
+    {"id": "note", "label": "備考"},
+    {"id": "subject", "label": "件名"}
+  ]},
+  "expect": {
+    "address": {"abstain": "ambiguous", "hold": "multi_line", "candidate": "東京都千代田区架空町1-2-3\nサンプルビル5階"},
+    "note": {"abstain": "ambiguous", "hold": "multi_line", "candidate": "午前中の配達を希望します。不在時は\n宅配ボックスへ。"},
+    "subject": {"raw": "ウェブサイト制作費"}
+  }
+}

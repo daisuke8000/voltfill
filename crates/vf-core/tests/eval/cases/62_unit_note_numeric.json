@@ -1,0 +1,19 @@
+{
+  "description": "単位の注記が数字の倍率（「（単位：1,000円）」）。注記のある文書の金額・数値は変換しない（invalid）。以前は「単位」の後の漢字の倍率（千・百万など）だけを注記とみなし、「売上高：1,234」を1234に変換していた。文字列の項目は原文のまま埋める",
+  "support": "supported",
+  "runs": [
+    {"x": 400, "y": 80, "text": "（単位：1,000円）"},
+    {"x": 60, "y": 100, "text": "売上高：1,234"},
+    {"x": 60, "y": 124, "text": "営業利益：56"}
+  ],
+  "form": {"fields": [
+    {"id": "sales", "label": "売上高", "type": "amount"},
+    {"id": "profit", "label": "営業利益", "type": "number"},
+    {"id": "sales_text", "label": "売上高"}
+  ]},
+  "expect": {
+    "sales": {"abstain": "invalid", "candidate": "1,234"},
+    "profit": {"abstain": "invalid", "candidate": "56"},
+    "sales_text": {"raw": "1,234"}
+  }
+}

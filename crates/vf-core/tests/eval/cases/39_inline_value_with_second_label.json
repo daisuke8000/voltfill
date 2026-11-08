@@ -1,0 +1,15 @@
+{
+  "description": "「氏名：」の値の中に、区切り記号のない別のラベルと値（生年月日 1990年1月1日）が続く。語の後ろに日付があるため値が2つあるとみなし、文字列項目でも候補止まり（ambiguous・several_values）。生年月日は単独の候補がないため not_found",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "氏名：山田 太郎 生年月日 1990年1月1日"}
+  ],
+  "form": {"fields": [
+    {"id": "name", "label": "氏名"},
+    {"id": "birth", "label": "生年月日", "type": "date"}
+  ]},
+  "expect": {
+    "name": {"abstain": "ambiguous", "hold": "several_values", "candidate": "山田 太郎 生年月日 1990年1月1日"},
+    "birth": {"abstain": "not_found"}
+  }
+}

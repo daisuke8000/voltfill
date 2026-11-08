@@ -1,0 +1,28 @@
+{
+  "description": "文書のラベルがフォームのラベルを含むだけ、または一部だけ（再発行日と発行日、未入金額と入金額、非課税対象額と課税対象額、税込の金額と税抜金額、前回請求額と請求額、合計数量と合計）。部分一致は「ラベル：値」でも候補止まり（ambiguous・partial_label）",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "再発行日：2026/11/08"},
+    {"x": 60, "y": 124, "text": "未入金額：¥5,000"},
+    {"x": 60, "y": 148, "text": "非課税対象額：¥2,000"},
+    {"x": 60, "y": 172, "text": "金額：¥11,000（税込）"},
+    {"x": 60, "y": 196, "text": "前回請求額：¥8,800"},
+    {"x": 60, "y": 220, "text": "合計数量：12"}
+  ],
+  "form": {"fields": [
+    {"id": "issued", "label": "発行日", "type": "date"},
+    {"id": "received", "label": "入金額", "type": "amount"},
+    {"id": "taxable", "label": "課税対象額", "type": "amount"},
+    {"id": "net", "label": "税抜金額", "type": "amount"},
+    {"id": "billed", "label": "請求額", "type": "amount"},
+    {"id": "total", "label": "合計", "type": "amount"}
+  ]},
+  "expect": {
+    "issued": {"abstain": "ambiguous", "hold": "partial_label", "candidate": "2026/11/08"},
+    "received": {"abstain": "ambiguous", "hold": "partial_label", "candidate": "¥5,000"},
+    "taxable": {"abstain": "ambiguous", "hold": "partial_label", "candidate": "¥2,000"},
+    "net": {"abstain": "ambiguous", "hold": "partial_label", "candidate": "¥11,000（税込）"},
+    "billed": {"abstain": "ambiguous", "hold": "partial_label", "candidate": "¥8,800"},
+    "total": {"abstain": "ambiguous", "hold": "partial_label", "candidate": "12"}
+  }
+}

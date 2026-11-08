@@ -1,0 +1,19 @@
+{
+  "description": "ラベルは見つかるが値が型に合わない項目は invalid のまま埋めない（日付「未定」、金額「別途お見積り」）",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "件名：保守契約の更新"},
+    {"x": 60, "y": 124, "text": "発行日：未定"},
+    {"x": 60, "y": 148, "text": "金額：別途お見積り"}
+  ],
+  "form": {"fields": [
+    {"id": "subject", "label": "件名"},
+    {"id": "issued", "label": "発行日", "type": "date"},
+    {"id": "amount", "label": "金額", "type": "amount"}
+  ]},
+  "expect": {
+    "subject": {"raw": "保守契約の更新"},
+    "issued": {"abstain": "invalid"},
+    "amount": {"abstain": "invalid"}
+  }
+}

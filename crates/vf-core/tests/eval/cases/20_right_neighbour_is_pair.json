@@ -1,0 +1,20 @@
+{
+  "description": "値が空欄の「担当者」の右隣が別の「ラベル：値」（部署：経理部）。右隣を担当者の値の候補にしない（not_found）。部署は「ラベル：値」として埋め、会社名の右隣の値は区切り記号がないため候補止まり（geometric_only）",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 76, "text": "会社名"},
+    {"x": 180, "y": 76, "text": "株式会社サンプル商事"},
+    {"x": 60, "y": 100, "text": "担当者"},
+    {"x": 300, "y": 100, "text": "部署：経理部"}
+  ],
+  "form": {"fields": [
+    {"id": "company", "label": "会社名"},
+    {"id": "person", "label": "担当者"},
+    {"id": "department", "label": "部署"}
+  ]},
+  "expect": {
+    "company": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "株式会社サンプル商事"},
+    "person": {"abstain": "not_found"},
+    "department": {"raw": "経理部"}
+  }
+}

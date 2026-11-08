@@ -1,0 +1,24 @@
+{
+  "description": "「ラベル：値」の値の中に、区切り記号のない2つ目の項目が続く。空白の後の語がフォームのラベル（所属）と同じ値と、電話番号の後ろに「語 値」（担当 山田・内線 123）が続く値は、値が2つあるとみなし候補止まり（ambiguous・several_values）。2語の氏名だけの値は埋める",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "氏名：山田 太郎 所属 経理部"},
+    {"x": 60, "y": 124, "text": "電話：03-1234-5678 担当 山田"},
+    {"x": 60, "y": 148, "text": "代表電話：03-1111-2222 内線 123"},
+    {"x": 60, "y": 172, "text": "担当者：佐藤 花子"}
+  ],
+  "form": {"fields": [
+    {"id": "name", "label": "氏名"},
+    {"id": "department", "label": "所属"},
+    {"id": "tel", "label": "電話"},
+    {"id": "main", "label": "代表電話"},
+    {"id": "person", "label": "担当者"}
+  ]},
+  "expect": {
+    "name": {"abstain": "ambiguous", "hold": "several_values", "holds": ["several_values"], "candidate": "山田 太郎 所属 経理部"},
+    "department": {"abstain": "not_found"},
+    "tel": {"abstain": "ambiguous", "hold": "several_values", "candidate": "03-1234-5678 担当 山田"},
+    "main": {"abstain": "ambiguous", "hold": "several_values", "candidate": "03-1111-2222 内線 123"},
+    "person": {"raw": "佐藤 花子"}
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "description": "単位の注記が数量と倍率の併記（「（単位：100個、千円）」）や、数の後に数の単位が続くもの（「（単位：1,000個）」）。以前は数の単位を見て数量とみなし、「売上高：1,234」を1234に変換していた。注記の各部分のどれかが倍率なら注記で、数量とみなすのは「発注単位」のように語が単位を名指す場合だけ。注記のある文書の金額・数値は変換しない（invalid）",
+  "support": "supported",
+  "runs": [
+    {"x": 400, "y": 80, "text": "（単位：100個、千円）"},
+    {"x": 60, "y": 100, "text": "売上高：1,234"},
+    {"x": 400, "y": 300, "text": "（単位：1,000個）"},
+    {"x": 60, "y": 320, "text": "出荷数：56"}
+  ],
+  "form": {"fields": [
+    {"id": "sales", "label": "売上高", "type": "amount"},
+    {"id": "shipped", "label": "出荷数", "type": "number"},
+    {"id": "sales_text", "label": "売上高"}
+  ]},
+  "expect": {
+    "sales": {"abstain": "invalid", "candidate": "1,234"},
+    "shipped": {"abstain": "invalid", "candidate": "56"},
+    "sales_text": {"raw": "1,234"}
+  }
+}

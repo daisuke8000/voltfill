@@ -1,0 +1,40 @@
+{
+  "description": "金額は値全体が1つの金額のときだけ埋める。範囲・以上・約・まで・ホワイトリスト外の注記は invalid。負の記号（△ ▲ −）は負の金額として埋める。括弧で囲んだ金額（（1,000円））は負の金額とみなさず invalid",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "見積額：1,000〜2,000円"},
+    {"x": 60, "y": 124, "text": "予算：5,000円以上"},
+    {"x": 60, "y": 148, "text": "送料：約5,000円"},
+    {"x": 60, "y": 172, "text": "上限額：50,000円まで"},
+    {"x": 60, "y": 196, "text": "単価：¥1,100（10%対象）"},
+    {"x": 60, "y": 220, "text": "値引：△1,000円"},
+    {"x": 60, "y": 244, "text": "調整額：▲1,000円"},
+    {"x": 60, "y": 268, "text": "差引額：−1,000円"},
+    {"x": 60, "y": 292, "text": "返金額：（1,000円）"},
+    {"x": 60, "y": 316, "text": "税込価格：¥1,100 (税込)"}
+  ],
+  "form": {"fields": [
+    {"id": "estimate", "label": "見積額", "type": "amount"},
+    {"id": "budget", "label": "予算", "type": "amount"},
+    {"id": "shipping", "label": "送料", "type": "amount"},
+    {"id": "limit", "label": "上限額", "type": "amount"},
+    {"id": "unit_price", "label": "単価", "type": "amount"},
+    {"id": "discount", "label": "値引", "type": "amount"},
+    {"id": "adjustment", "label": "調整額", "type": "amount"},
+    {"id": "deduction", "label": "差引額", "type": "amount"},
+    {"id": "refund", "label": "返金額", "type": "amount"},
+    {"id": "gross", "label": "税込価格", "type": "amount"}
+  ]},
+  "expect": {
+    "estimate": {"abstain": "invalid"},
+    "budget": {"abstain": "invalid"},
+    "shipping": {"abstain": "invalid"},
+    "limit": {"abstain": "invalid"},
+    "unit_price": {"abstain": "invalid"},
+    "discount": {"raw": "△1,000円", "value": -1000},
+    "adjustment": {"raw": "▲1,000円", "value": -1000},
+    "deduction": {"raw": "−1,000円", "value": -1000},
+    "refund": {"abstain": "invalid"},
+    "gross": {"raw": "¥1,100 (税込)", "value": 1100}
+  }
+}

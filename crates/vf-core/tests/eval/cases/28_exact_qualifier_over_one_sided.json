@@ -1,0 +1,18 @@
+{
+  "description": "「合計」と「合計（税込）」が並ぶ（区切り記号なし）。補足が同じラベルは片側だけに補足のあるラベルより高く評価され、それぞれの項目の候補の1位になる。位置だけの結び付きのため候補止まり（geometric_only）",
+  "support": "supported",
+  "runs": [
+    {"x": 330, "y": 100, "text": "合計"},
+    {"right": 520, "y": 100, "text": "¥10,000"},
+    {"x": 330, "y": 120, "text": "合計（税込）"},
+    {"right": 520, "y": 120, "text": "¥11,000"}
+  ],
+  "form": {"fields": [
+    {"id": "total", "label": "合計", "type": "amount"},
+    {"id": "gross", "label": "合計（税込）", "type": "amount"}
+  ]},
+  "expect": {
+    "total": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "¥10,000"},
+    "gross": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "¥11,000"}
+  }
+}

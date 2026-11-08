@@ -1,0 +1,19 @@
+{
+  "description": "金額の数字が別々のランに分かれ、抽出で空白付きの1つの片に結合される（請求額：¥12, 100）。1つの片の中の「¥1 100」も同じ。値全体が1つの金額ではないため invalid（12 や 1 を採らない）",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "請求額："},
+    {"x": 100, "y": 100, "text": "¥12,"},
+    {"x": 125, "y": 100, "text": "100"},
+    {"x": 60, "y": 124, "text": "合計：¥1 100"}
+  ],
+  "fragments": ["請求額：¥12, 100", "合計：¥1 100"],
+  "form": {"fields": [
+    {"id": "billed", "label": "請求額", "type": "amount"},
+    {"id": "total", "label": "合計", "type": "amount"}
+  ]},
+  "expect": {
+    "billed": {"abstain": "invalid"},
+    "total": {"abstain": "invalid"}
+  }
+}

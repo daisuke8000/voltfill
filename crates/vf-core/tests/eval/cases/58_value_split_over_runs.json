@@ -1,0 +1,25 @@
+{
+  "description": "値が同じ行の複数のランに分かれる（「住所：」の右の「〒100-0001」と「東京都千代田区千代田1-1」、「氏名：山田」と「太郎」、間は1em）。値の片の同じ行のすぐ右に区切り記号のない片があるため、値が途中で切れている可能性があり候補止まり（ambiguous・split_value）。以前は「〒100-0001」「山田」で埋めていた。すぐ右が「ラベル：値」の片なら1つの値として埋める",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "住所："},
+    {"x": 100, "y": 100, "text": "〒100-0001"},
+    {"x": 160, "y": 100, "text": "東京都千代田区千代田1-1"},
+    {"x": 60, "y": 124, "text": "氏名：山田"},
+    {"x": 120, "y": 124, "text": "太郎"},
+    {"x": 60, "y": 148, "text": "電話：03-1234-5678"},
+    {"x": 160, "y": 148, "text": "FAX：03-1234-5679"}
+  ],
+  "form": {"fields": [
+    {"id": "address", "label": "住所"},
+    {"id": "name", "label": "氏名"},
+    {"id": "tel", "label": "電話"},
+    {"id": "fax", "label": "FAX"}
+  ]},
+  "expect": {
+    "address": {"abstain": "ambiguous", "hold": "split_value", "holds": ["split_value"], "candidate": "〒100-0001"},
+    "name": {"abstain": "ambiguous", "hold": "split_value", "holds": ["split_value"], "candidate": "山田"},
+    "tel": {"raw": "03-1234-5678"},
+    "fax": {"raw": "03-1234-5679"}
+  }
+}

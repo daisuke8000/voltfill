@@ -1,0 +1,15 @@
+{
+  "description": "記入前の様式で、ラベル「氏名」「住所」「電話番号」だけが縦に並ぶ。住所の真下の「電話番号」は位置だけの候補で、値として埋めない（ambiguous・geometric_only）",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "氏名"},
+    {"x": 60, "y": 118, "text": "住所"},
+    {"x": 60, "y": 136, "text": "電話番号"}
+  ],
+  "form": {"fields": [
+    {"id": "address", "label": "住所"}
+  ]},
+  "expect": {
+    "address": {"abstain": "ambiguous", "hold": "geometric_only"}
+  }
+}

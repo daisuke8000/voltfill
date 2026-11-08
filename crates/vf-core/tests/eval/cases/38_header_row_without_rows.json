@@ -1,0 +1,18 @@
+{
+  "description": "明細表の見出し行「品名 数量 単価 金額」だけでデータ行がない。品名の右隣の「数量」は位置だけの候補で埋めず（ambiguous・geometric_only）、右隣のない金額は not_found",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "品名"},
+    {"x": 300, "y": 100, "text": "数量"},
+    {"x": 380, "y": 100, "text": "単価"},
+    {"x": 460, "y": 100, "text": "金額"}
+  ],
+  "form": {"fields": [
+    {"id": "item", "label": "品名"},
+    {"id": "amount", "label": "金額", "type": "amount"}
+  ]},
+  "expect": {
+    "item": {"abstain": "ambiguous", "hold": "geometric_only"},
+    "amount": {"abstain": "not_found"}
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "description": "明細表（1行のみ）。見出しの真下の1行は位置だけの結び付きのため候補止まり（ambiguous・geometric_only）。候補の1位は各列の値",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "品名"},
+    {"x": 300, "y": 100, "text": "数量"},
+    {"x": 360, "y": 100, "text": "単価"},
+    {"x": 440, "y": 100, "text": "金額"},
+    {"x": 60, "y": 118, "text": "USBケーブル Type-C 1m"},
+    {"id": "quantity", "x": 300, "y": 118, "text": "2"},
+    {"x": 360, "y": 118, "text": "¥1,200"},
+    {"x": 440, "y": 118, "text": "¥2,400"}
+  ],
+  "form": {"fields": [
+    {"id": "item", "label": "品名"},
+    {"id": "quantity", "label": "数量", "type": "number"},
+    {"id": "unit_price", "label": "単価", "type": "amount"},
+    {"id": "amount", "label": "金額", "type": "amount"}
+  ]},
+  "expect": {
+    "item": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "USBケーブル Type-C 1m"},
+    "quantity": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "2"},
+    "unit_price": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "¥1,200"},
+    "amount": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "¥2,400"}
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "description": "明細表（3行）。単一の項目に対して値が一意に決まらないため、見出しの列はすべて空欄（ambiguous）",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "品名"},
+    {"x": 300, "y": 100, "text": "数量"},
+    {"x": 360, "y": 100, "text": "単価"},
+    {"x": 440, "y": 100, "text": "金額"},
+    {"x": 60, "y": 118, "text": "USBケーブル Type-C 1m"},
+    {"x": 300, "y": 118, "text": "2"},
+    {"x": 360, "y": 118, "text": "¥1,200"},
+    {"x": 440, "y": 118, "text": "¥2,400"},
+    {"x": 60, "y": 136, "text": "HDMIケーブル 2m"},
+    {"x": 300, "y": 136, "text": "1"},
+    {"x": 360, "y": 136, "text": "¥1,800"},
+    {"x": 440, "y": 136, "text": "¥1,800"},
+    {"x": 60, "y": 154, "text": "電源タップ 4口"},
+    {"x": 300, "y": 154, "text": "3"},
+    {"x": 360, "y": 154, "text": "¥2,000"},
+    {"x": 440, "y": 154, "text": "¥6,000"}
+  ],
+  "form": {"fields": [
+    {"id": "item", "label": "品名"},
+    {"id": "quantity", "label": "数量", "type": "number"},
+    {"id": "amount", "label": "金額", "type": "amount"}
+  ]},
+  "expect": {
+    "item": {"abstain": "ambiguous", "hold": "geometric_only"},
+    "quantity": {"abstain": "ambiguous", "hold": "geometric_only"},
+    "amount": {"abstain": "ambiguous", "hold": "geometric_only"}
+  }
+}

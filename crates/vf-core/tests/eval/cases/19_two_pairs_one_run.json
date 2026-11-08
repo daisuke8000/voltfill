@@ -1,0 +1,16 @@
+{
+  "description": "1つのランに「ラベル：値」が2組ある（TEL・FAX）。値と次のラベルの境目を決められないためランを分けず、どちらの項目も空欄",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 76, "text": "架空テック株式会社"},
+    {"x": 60, "y": 100, "text": "TEL：03-1234-5678 FAX：03-1234-5679"}
+  ],
+  "form": {"fields": [
+    {"id": "phone", "label": "電話番号", "hints": ["TEL"]},
+    {"id": "fax", "label": "FAX番号", "hints": ["FAX"]}
+  ]},
+  "expect": {
+    "phone": {"abstain": "not_found"},
+    "fax": {"abstain": "not_found"}
+  }
+}

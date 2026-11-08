@@ -135,5 +135,37 @@ fn fill_validates_the_form_and_its_remote_flags() {
         assert_eq!(out.status.code(), Some(2), "{args:?}");
         assert_error_response(&out.stderr, "invalid_arguments");
     }
+    // The deadline is 1 to 600000 ms, with or without `--remote`; a valid one
+    // reaches the input read (before any credential).
+    for remote in [&[][..], &["--remote"]] {
+        for value in ["0", "600001", "-1", "1.5", "soon"] {
+            let mut args = vec![
+                "fill",
+                "missing.pdf",
+                "missing-form.json",
+                "--deadline-ms",
+                value,
+            ];
+            args.extend_from_slice(remote);
+            let out = cli(&args);
+            assert_eq!(out.status.code(), Some(2), "{args:?}");
+            assert_error_response(&out.stderr, "invalid_deadline");
+        }
+        for value in ["1", "600000"] {
+            let mut args = vec![
+                "fill",
+                "missing.pdf",
+                "missing-form.json",
+                "--deadline-ms",
+                value,
+            ];
+            args.extend_from_slice(remote);
+            let out = cli(&args);
+            assert_eq!(out.status.code(), Some(2), "{args:?}");
+            assert_error_response(&out.stderr, "input_read_failed");
+        }
+    }
+    let out = cli(&["inspect", "missing.pdf", "--deadline-ms", "100"]);
+    assert_error_response(&out.stderr, "invalid_arguments");
     std::fs::remove_dir_all(&dir).ok();
 }

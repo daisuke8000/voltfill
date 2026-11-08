@@ -1,0 +1,26 @@
+{
+  "description": "ラベルと値が同じ行の別ラン。区切り記号のない右隣の値は位置だけの結び付きのため候補止まり（ambiguous・geometric_only）。ラベル側に区切り記号がある値（請求日：）も、ラベルとの間が4emを超える（6em）ため位置だけの結び付きとして候補止まり（以前は埋めていた）",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "氏名"},
+    {"x": 160, "y": 100, "text": "山田 太郎"},
+    {"x": 60, "y": 124, "text": "電話番号"},
+    {"x": 160, "y": 124, "text": "03-1234-5678"},
+    {"x": 60, "y": 148, "text": "請求日："},
+    {"x": 160, "y": 148, "text": "2026/11/08"},
+    {"x": 60, "y": 172, "text": "数量"},
+    {"x": 160, "y": 172, "text": "12 個"}
+  ],
+  "form": {"fields": [
+    {"id": "name", "label": "氏名"},
+    {"id": "phone", "label": "電話番号"},
+    {"id": "billed", "label": "請求日", "type": "date"},
+    {"id": "quantity", "label": "数量", "type": "number"}
+  ]},
+  "expect": {
+    "name": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "山田 太郎"},
+    "phone": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "03-1234-5678"},
+    "billed": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "2026/11/08"},
+    "quantity": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "12 個"}
+  }
+}

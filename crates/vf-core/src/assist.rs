@@ -2,14 +2,21 @@
 //! own source candidates.
 //!
 //! Only fields that the offline matcher left `ambiguous` are sent. Each one
-//! becomes a `choice` question whose options are exactly that field's
-//! candidates (`c0`, `c1`, … in `candidates` order) plus `none`. A question
-//! carries the form field's label, type and hints and, per candidate, its
-//! page, source label text and source value text. No page images and no
-//! other document text are sent.
+//! becomes a `choice` question whose options are that field's offered
+//! candidates plus `none`. A candidate is offered only when choosing it
+//! gives one value of the field's type: every failed condition in its
+//! `holds` (not only the first, `hold`) is [`Hold::PartialLabel`],
+//! [`Hold::OneSidedQualifier`] or [`Hold::GeometricOnly`], and for a date,
+//! amount or number field it has a normalized `value`. Option keys
+//! keep the candidate's index in `candidates` (`c0`, `c1`, …), so a key
+//! stays auditable when an earlier candidate is not offered. A field without
+//! an offered candidate is not sent and stays `ambiguous`. A question
+//! carries the form field's label, type and hints and, per offered
+//! candidate, its page, source label text and source value text. No page
+//! images and no other document text are sent.
 //!
 //! A field becomes `filled` with method `jev_choice` only when the chosen
-//! key is one of its candidate ids and is the unique maximum of returned
+//! key is one of its offered candidate ids and is the unique maximum of returned
 //! probabilities that sum to 1. Its `raw`, `value` and Evidence then come
 //! from that candidate, never from model output. A unique `none` makes the
 //! field `not_found`; a tie, an invalid answer (including probabilities that
@@ -29,7 +36,9 @@
 //! and later batches are not sent. Results are evaluation-only; Jev's
 //! confidence and probabilities are not calibrated probabilities of
 //! correctness.
-use crate::fill::{FieldFill, FieldType, FillCandidate, FillResult, FillStatus, Form, FormField};
+use crate::fill::{
+    FieldFill, FieldType, FillCandidate, FillResult, FillStatus, Form, FormField, Hold,
+};
 use serde::Serialize;
 use std::collections::{BTreeMap, VecDeque};
 use vf_client::planning;
@@ -220,15 +229,17 @@ pub struct AssistedFill {
 struct Pending {
     field_id: String,
     question_id: String,
-    options: Vec<String>,
+    /// Offered option keys with their index in the field's `candidates`.
+    options: Vec<(String, usize)>,
     question: Question,
 }
 
-/// Ask Jev to choose among the candidates of every `ambiguous` field of `fill`.
+/// Ask Jev to choose among the offered candidates of every `ambiguous` field
+/// of `fill` (see the module documentation).
 ///
 /// Validation happens before the first send; afterwards every failure is a
 /// per-field [`AssistOutcome`], so received bodies are always returned. With
-/// no ambiguous field nothing is sent.
+/// no ambiguous field that has an offered candidate nothing is sent.
 pub fn assist<T: Transport, C: Clock>(
     fill: FillResult,
     form: &Form,
@@ -251,18 +262,17 @@ pub fn assist<T: Transport, C: Clock>(
         .iter()
         .filter_map(|field| {
             let result = fill.fields.get(&field.id)?;
-            (result.status == FillStatus::Ambiguous && !result.candidates.is_empty())
-                .then_some((field, result.candidates.as_slice()))
+            if result.status != FillStatus::Ambiguous {
+                return None;
+            }
+            question(field, &result.candidates).map(|built| (field, built))
         })
         .enumerate()
-        .map(|(n, (field, candidates))| {
-            let (options, question) = question(field, candidates);
-            Pending {
-                field_id: field.id.clone(),
-                question_id: format!("q{n}"),
-                options,
-                question,
-            }
+        .map(|(n, (field, (options, question)))| Pending {
+            field_id: field.id.clone(),
+            question_id: format!("q{n}"),
+            options,
+            question,
         })
         .collect();
 
@@ -413,8 +423,38 @@ pub fn assist<T: Transport, C: Clock>(
     Ok(out)
 }
 
-/// Build one choice question; option keys are positional candidate ids.
-fn question(field: &FormField, candidates: &[FillCandidate]) -> (Vec<String>, Question) {
+/// Whether choosing `candidate` would give one value of the field's type:
+/// every failed condition (its `hold` and all of its `holds`) concerns only
+/// the label or how the value is tied to it ([`Hold::PartialLabel`],
+/// [`Hold::OneSidedQualifier`], [`Hold::GeometricOnly`]), and a date, amount
+/// or number candidate has a normalized value. A candidate whose value has
+/// several lines or values, or may be cut short ([`Hold::SplitValue`]),
+/// fails even when its first hold is a label or binding one.
+fn offered(field: &FormField, candidate: &FillCandidate) -> bool {
+    let choosable = |hold: &Hold| {
+        matches!(
+            hold,
+            Hold::PartialLabel | Hold::OneSidedQualifier | Hold::GeometricOnly
+        )
+    };
+    candidate.hold.iter().chain(&candidate.holds).all(choosable)
+        && (field.field_type == FieldType::Text || candidate.value.is_some())
+}
+
+/// Build one choice question over the offered candidates, or `None` when
+/// no candidate is offered. Option keys are the candidates' indexes.
+fn question(
+    field: &FormField,
+    candidates: &[FillCandidate],
+) -> Option<(Vec<(String, usize)>, Question)> {
+    let offered: Vec<(usize, &FillCandidate)> = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| offered(field, candidate))
+        .collect();
+    if offered.is_empty() {
+        return None;
+    }
     let kind = match field.field_type {
         FieldType::Text => "文字列",
         FieldType::Date => "日付",
@@ -434,9 +474,9 @@ fn question(field: &FormField, candidates: &[FillCandidate]) -> (Vec<String>, Qu
         instructions += &format!("別名: {}。", hints.join("、"));
     }
     instructions += "どの候補もこの項目の値でなければ none を選んでください。";
-    let mut keys = Vec::with_capacity(candidates.len());
+    let mut keys = Vec::with_capacity(offered.len());
     let mut criteria = BTreeMap::new();
-    for (i, candidate) in candidates.iter().enumerate() {
+    for (i, candidate) in offered {
         let key = format!("c{i}");
         let page = candidate.evidence.first().map_or(0, |e| e.page);
         criteria.insert(
@@ -447,16 +487,16 @@ fn question(field: &FormField, candidates: &[FillCandidate]) -> (Vec<String>, Qu
                 clip(&candidate.raw, MAX_VALUE_CHARS)
             )),
         );
-        keys.push(key);
+        keys.push((key, i));
     }
     criteria.insert(NONE.into(), Content::Text(NONE_TEXT.into()));
-    (
+    Some((
         keys,
         Question::Choice {
             instructions: Content::Text(instructions),
             criteria,
         },
-    )
+    ))
 }
 
 fn clip(text: &str, max: usize) -> String {
@@ -496,12 +536,13 @@ fn build(
         .then_some(request)
 }
 
-/// Apply one answer. The value and Evidence come only from the chosen candidate.
+/// Apply one answer. The value and Evidence come only from the chosen
+/// candidate, which must be one of the offered `options`.
 /// Probabilities that do not sum to 1 make the answer invalid, as in the
 /// legacy engine's `probability_sum_not_one`.
 fn decide(
     field: &mut FieldFill,
-    options: &[String],
+    options: &[(String, usize)],
     answer: Option<&Result<Answer, vf_client::Error>>,
     sums_to_one: bool,
 ) -> (AssistOutcome, Option<String>) {
@@ -526,8 +567,8 @@ fn decide(
     }
     let Some(candidate) = options
         .iter()
-        .position(|key| key == choice)
-        .and_then(|i| field.candidates.get(i))
+        .find(|(key, _)| key == choice)
+        .and_then(|&(_, i)| field.candidates.get(i))
     else {
         return (AssistOutcome::AnswerInvalid, chosen);
     };
@@ -791,9 +832,18 @@ mod tests {
         replies: Vec<Reply>,
         execution: ExecutionConfig,
     ) -> (AssistedFill, Fake, FillResult) {
+        run_on(&fragments(), form, replies, execution)
+    }
+
+    fn run_on(
+        fragments: &[SourceFragment],
+        form: &Form,
+        replies: Vec<Reply>,
+        execution: ExecutionConfig,
+    ) -> (AssistedFill, Fake, FillResult) {
         let time = Time::default();
         let mut fake = Fake::new(replies, &time);
-        let before = offline(form);
+        let before = fill::fill("doc", fragments, form);
         let secret = Secret::try_new(SECRET.into()).expect("synthetic bearer is valid");
         let out = assist(
             before.clone(),
@@ -1096,11 +1146,14 @@ mod tests {
 
     #[test]
     fn without_ambiguous_fields_nothing_is_sent() {
+        // `請求番号` is filled and `担当者` is not found; neither is sent.
         let form = form(json!([
             {"id":"no","label":"請求番号"},
-            {"id":"total","label":"合計","type":"amount"}
+            {"id":"person","label":"担当者"}
         ]));
         let (out, fake, before) = run(&form, Vec::new(), ExecutionConfig::default());
+        assert_eq!(before.fields["no"].status, FillStatus::Filled);
+        assert_eq!(before.fields["person"].status, FillStatus::NotFound);
         assert!(fake.requests().is_empty());
         assert!(out.jev_responses.is_empty() && out.assist.is_empty());
         assert_eq!(out.usage, AssistUsage::default());
@@ -1551,6 +1604,274 @@ mod tests {
             MAX_VALUE_CHARS + 1
         );
         assert_eq!(clip("短い", MAX_VALUE_CHARS), "短い");
+    }
+
+    /// A candidate failing `holds`, in order (`hold` is the first).
+    fn held_candidate(holds: &[Hold], value: Option<Value>) -> FillCandidate {
+        FillCandidate {
+            label: "ラベル".into(),
+            raw: "原文".into(),
+            value,
+            score: 1.0,
+            placement: vf_source::layout::Placement::Right,
+            hold: holds.first().copied(),
+            holds: holds.to_vec(),
+            evidence: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn only_candidates_that_give_one_typed_value_are_offered() {
+        let text = &form(json!([{"id":"x","label":"x"}])).fields[0];
+        let amount = &form(json!([{"id":"x","label":"x","type":"amount"}])).fields[0];
+        let choosable: [&[Hold]; 6] = [
+            &[],
+            &[Hold::PartialLabel],
+            &[Hold::OneSidedQualifier],
+            &[Hold::GeometricOnly],
+            &[Hold::PartialLabel, Hold::OneSidedQualifier],
+            &[Hold::OneSidedQualifier, Hold::GeometricOnly],
+        ];
+        for holds in choosable {
+            assert!(offered(text, &held_candidate(holds, None)), "{holds:?}");
+            assert!(
+                offered(amount, &held_candidate(holds, Some(json!(1)))),
+                "{holds:?}"
+            );
+            assert!(!offered(amount, &held_candidate(holds, None)), "{holds:?}");
+        }
+        // Before: only the first hold was checked, so a several-values or
+        // multi-line candidate behind a label or binding hold was offered.
+        let never: [&[Hold]; 8] = [
+            &[Hold::SeveralValues],
+            &[Hold::MultiLine],
+            &[Hold::SplitValue],
+            &[Hold::GeometricOnly, Hold::SplitValue],
+            &[Hold::PartialLabel, Hold::SeveralValues],
+            &[Hold::OneSidedQualifier, Hold::SeveralValues],
+            &[Hold::GeometricOnly, Hold::MultiLine],
+            &[Hold::PartialLabel, Hold::GeometricOnly, Hold::MultiLine],
+        ];
+        for holds in never {
+            assert!(!offered(text, &held_candidate(holds, None)), "{holds:?}");
+            assert!(
+                !offered(amount, &held_candidate(holds, Some(json!(1)))),
+                "{holds:?}"
+            );
+        }
+        // An inconsistently built candidate is judged by its `hold` as well.
+        let mut hidden = held_candidate(&[], None);
+        hidden.hold = Some(Hold::MultiLine);
+        assert!(!offered(text, &hidden));
+    }
+
+    /// Each document hides a value with several values or lines behind a
+    /// label or binding hold (its first `hold`), next to a choosable
+    /// candidate with the same score. The fake Jev picks the hidden
+    /// candidate's key: it was never offered, so the answer is invalid and
+    /// the field stays ambiguous. Alone (the first `alone` fragments), the
+    /// hidden candidate is not sent at all. Before: the hidden candidate was
+    /// offered and filled (`jev_choice`) with two phone numbers or two lines.
+    #[test]
+    fn hidden_several_or_multi_line_candidates_are_never_filled_by_jev() {
+        /// Name, fragments, how many of them hold the hidden candidate alone,
+        /// form label and the hidden candidate's holds.
+        type Case = (
+            &'static str,
+            Vec<SourceFragment>,
+            usize,
+            &'static str,
+            Vec<Hold>,
+        );
+        let cases: [Case; 3] = [
+            (
+                "partial label, two phone numbers",
+                vec![
+                    frag(
+                        "a",
+                        "電話番号：03-1234-5678 FAX 03-1234-5679",
+                        [60.0, 100.0, 260.0, 110.0],
+                    ),
+                    frag("b", "電話番号：03-9999-0000", [60.0, 130.0, 170.0, 140.0]),
+                ],
+                1,
+                "電話",
+                vec![Hold::PartialLabel, Hold::SeveralValues],
+            ),
+            (
+                "one-sided qualifier, two phone numbers",
+                vec![
+                    frag(
+                        "a",
+                        "連絡先（代表）：03-1234-5678、03-1234-5679",
+                        [60.0, 100.0, 300.0, 110.0],
+                    ),
+                    frag(
+                        "b",
+                        "連絡先（窓口）：03-9999-0000",
+                        [60.0, 130.0, 220.0, 140.0],
+                    ),
+                ],
+                1,
+                "連絡先",
+                vec![Hold::OneSidedQualifier, Hold::SeveralValues],
+            ),
+            (
+                "geometric binding, two lines",
+                vec![
+                    frag("a", "住所", [60.0, 100.0, 80.0, 110.0]),
+                    frag("b", "東京都架空区1-2-3", [200.0, 100.0, 290.0, 110.0]),
+                    frag("c", "テストビル5階", [200.0, 112.0, 270.0, 122.0]),
+                    frag("d", "住所", [60.0, 160.0, 80.0, 170.0]),
+                    frag("e", "大阪府架空市4-5-6", [200.0, 160.0, 290.0, 170.0]),
+                ],
+                3,
+                "住所",
+                vec![Hold::GeometricOnly, Hold::MultiLine],
+            ),
+        ];
+        for (name, fragments, alone, label, hidden) in cases {
+            let form = form(json!([{"id":"x","label":label}]));
+            let before = fill::fill("doc", &fragments, &form);
+            let field = &before.fields["x"];
+            assert_eq!(field.status, FillStatus::Ambiguous, "{name}");
+            assert_eq!(field.candidates.len(), 2, "{name}");
+            let bad = field
+                .candidates
+                .iter()
+                .position(|c| c.holds == hidden)
+                .unwrap_or_else(|| panic!("{name}: {:?}", field.candidates));
+            assert_eq!(field.candidates[bad].hold, Some(hidden[0]), "{name}");
+            assert_eq!(field.candidates[1 - bad].holds, hidden[..1], "{name}");
+            let key = format!("c{bad}");
+            let pick = {
+                let key = key.clone();
+                move |_: &serde_json::Map<String, Value>| key.clone()
+            };
+            let spread = {
+                let key = key.clone();
+                move |criteria: &serde_json::Map<String, Value>, _: &str| {
+                    let mut p = one_hot(criteria, NONE);
+                    p[NONE] = json!(0.0);
+                    p[key.as_str()] = json!(1.0);
+                    p
+                }
+            };
+            let (out, fake, before) = run_on(
+                &fragments,
+                &form,
+                vec![answer(pick, spread, json!({}))],
+                ExecutionConfig {
+                    max_attempts: 1,
+                    ..Default::default()
+                },
+            );
+            let requests = fake.requests();
+            assert_eq!(requests.len(), 1, "{name}");
+            let criteria = requests[0]["questions"]["q0"]["criteria"]
+                .as_object()
+                .expect("criteria object");
+            let offered: Vec<&str> = criteria.keys().map(String::as_str).collect();
+            assert_eq!(offered, [format!("c{}", 1 - bad).as_str(), NONE], "{name}");
+            assert_eq!(out.fill.fields["x"], before.fields["x"], "{name}");
+            assert_eq!(
+                out.assist["x"].outcome,
+                AssistOutcome::AnswerInvalid,
+                "{name}"
+            );
+            // Without the choosable candidate the field is not sent at all.
+            let (out, fake, before) = run_on(
+                &fragments[..alone],
+                &form,
+                Vec::new(),
+                ExecutionConfig::default(),
+            );
+            let field = &before.fields["x"];
+            assert_eq!(field.status, FillStatus::Ambiguous, "{name}");
+            assert_eq!(field.candidates.len(), 1, "{name}");
+            assert_eq!(field.candidates[0].holds, hidden, "{name}");
+            assert!(fake.requests().is_empty(), "{name}");
+            assert!(out.assist.is_empty(), "{name}");
+            assert_eq!(out.fill.fields["x"], *field, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_field_without_an_offered_candidate_is_not_sent() {
+        // Two phone numbers in one value: held as `several_values`.
+        let fragments = vec![frag(
+            "a",
+            "電話：03-1234-5678 FAX 03-1234-5679",
+            [60.0, 119.0, 260.0, 130.0],
+        )];
+        let form = form(json!([{"id":"tel","label":"電話"}]));
+        let (out, fake, before) = run_on(&fragments, &form, Vec::new(), ExecutionConfig::default());
+        let tel = &before.fields["tel"];
+        assert_eq!(tel.status, FillStatus::Ambiguous);
+        assert!(
+            !tel.candidates.is_empty()
+                && tel
+                    .candidates
+                    .iter()
+                    .all(|c| c.hold == Some(Hold::SeveralValues))
+        );
+        assert!(fake.requests().is_empty());
+        assert!(out.assist.is_empty() && out.jev_responses.is_empty());
+        assert_eq!(out.fill.fields["tel"], *tel);
+    }
+
+    #[test]
+    fn option_keys_keep_candidate_indexes_when_a_candidate_is_not_offered() {
+        // `約¥11,000` is no amount: that candidate has no value and is not
+        // offered; `¥12,100` keeps its key `c1`.
+        let mut fragments = fragments();
+        fragments[2].raw_text = "約¥11,000".into();
+        let form = form(json!([
+            {"id":"amount","label":"金額","type":"amount","hints":["小計","合計"]}
+        ]));
+        let reply = answer(key_with("¥12,100"), one_hot, json!({}));
+        let (out, fake, before) =
+            run_on(&fragments, &form, vec![reply], ExecutionConfig::default());
+        let candidates = &before.fields["amount"].candidates;
+        assert_eq!(before.fields["amount"].status, FillStatus::Ambiguous);
+        assert_eq!(candidates[0].raw, "約¥11,000");
+        assert_eq!(candidates[0].value, None);
+        assert_eq!(candidates[1].raw, "¥12,100");
+        let requests = fake.requests();
+        let criteria = requests[0]["questions"]["q0"]["criteria"]
+            .as_object()
+            .expect("criteria object");
+        assert_eq!(criteria.keys().collect::<Vec<_>>(), ["c1", NONE]);
+        assert!(!requests[0].to_string().contains("約¥11,000"));
+        let amount = &out.fill.fields["amount"];
+        assert_eq!(amount.status, FillStatus::Filled);
+        assert_eq!(amount.raw.as_deref(), Some("¥12,100"));
+        assert_eq!(amount.value, Some(json!(12100)));
+        assert_eq!(amount.evidence, candidates[1].evidence);
+        assert_eq!(out.assist["amount"].choice.as_deref(), Some("c1"));
+
+        // A key that was not offered is no valid answer.
+        let unoffered = answer(
+            |_| "c0".into(),
+            |criteria, _| {
+                let mut p = one_hot(criteria, "none");
+                p["none"] = json!(0.0);
+                p["c0"] = json!(1.0);
+                p
+            },
+            json!({}),
+        );
+        let (out, _, before) = run_on(
+            &fragments,
+            &form,
+            vec![unoffered],
+            ExecutionConfig {
+                max_attempts: 1,
+                ..Default::default()
+            },
+        );
+        assert_eq!(out.fill.fields["amount"], before.fields["amount"]);
+        assert_eq!(out.assist["amount"].outcome, AssistOutcome::AnswerInvalid);
     }
 
     /// The only test in this binary that installs a logger.

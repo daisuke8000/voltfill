@@ -1,0 +1,21 @@
+{
+  "description": "最初の確定できない理由がラベルや位置の結び付き（partial_label・one_sided_qualifier・geometric_only）でも、値が2つ以上（電話番号2つ）や複数行（住所2行）の候補は、すべての理由（holds）にそれを示す。オフラインでは埋めず（ambiguous）、--remote でもJevの選択肢にしない",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "電話番号：03-1234-5678 FAX 03-1234-5679"},
+    {"x": 60, "y": 124, "text": "連絡先（代表）：03-1111-2222、03-1111-2223"},
+    {"x": 60, "y": 160, "text": "所在地"},
+    {"x": 200, "y": 160, "text": "東京都千代田区架空町1-2-3"},
+    {"x": 200, "y": 172, "text": "サンプルビル5階"}
+  ],
+  "form": {"fields": [
+    {"id": "phone", "label": "電話"},
+    {"id": "contact", "label": "連絡先"},
+    {"id": "address", "label": "所在地"}
+  ]},
+  "expect": {
+    "phone": {"abstain": "ambiguous", "hold": "partial_label", "holds": ["partial_label", "several_values"], "candidate": "03-1234-5678 FAX 03-1234-5679"},
+    "contact": {"abstain": "ambiguous", "hold": "one_sided_qualifier", "holds": ["one_sided_qualifier", "several_values"], "candidate": "03-1111-2222、03-1111-2223"},
+    "address": {"abstain": "ambiguous", "hold": "geometric_only", "holds": ["geometric_only", "multi_line"], "candidate": "東京都千代田区架空町1-2-3\nサンプルビル5階"}
+  }
+}

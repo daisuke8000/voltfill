@@ -1,0 +1,20 @@
+{
+  "description": "文書には税抜の金額だけがあり、フォームは税込の金額を求める。括弧内の区別（税抜・税込）を無視して候補にしない（not_found）。補足が同じ「金額（税抜）」の金額は候補の1位だが区切り記号がないため候補止まり（geometric_only）。文書にだけ補足（10%）がある消費税は one_sided_qualifier",
+  "support": "supported",
+  "runs": [
+    {"x": 330, "y": 300, "text": "金額（税抜）"},
+    {"right": 520, "y": 300, "text": "¥10,000"},
+    {"x": 330, "y": 320, "text": "消費税（10%）"},
+    {"right": 520, "y": 320, "text": "¥1,000"}
+  ],
+  "form": {"fields": [
+    {"id": "net", "label": "金額（税抜）", "type": "amount"},
+    {"id": "gross", "label": "金額（税込）", "type": "amount"},
+    {"id": "tax", "label": "消費税", "type": "amount"}
+  ]},
+  "expect": {
+    "net": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "¥10,000"},
+    "gross": {"abstain": "not_found"},
+    "tax": {"abstain": "ambiguous", "hold": "one_sided_qualifier"}
+  }
+}
