@@ -25,8 +25,11 @@
 //!   otherwise; a multi-line value ends before a line that reads as one of
 //!   the form's labels). A text value holds no second value
 //!   ([`Hold::SeveralValues`]: two phone numbers; two dates or amounts not
-//!   joined by a range mark; or a phone number, date or amount right after
-//!   a word that follows other text, as in `山田 太郎 生年月日 1990年1月1日`).
+//!   joined by a range mark; a phone number, date or amount right after a
+//!   word that follows other text, as in `山田 太郎 生年月日 1990年1月1日`; a
+//!   later word that is one of the form's labels, as in `山田 太郎 所属
+//!   経理部`; or a word with its own value after a phone number, date or
+//!   amount, as in `03-1234-5678 担当 山田`).
 //! - (d) Type: date, amount and number values match the type's grammar as a
 //!   whole (otherwise the field is `invalid`). Amounts and numbers are not
 //!   normalized when the label states a scale unit (`売上高（千円）`) or
@@ -242,8 +245,10 @@ pub enum Hold {
     /// The value spans more than one line.
     MultiLine,
     /// A text value holds more than one value: two phone numbers, two dates
-    /// or amounts not joined by a range mark, or a phone number, date or
-    /// amount after a word that follows other text (a second label).
+    /// or amounts not joined by a range mark, a phone number, date or
+    /// amount after a word that follows other text (a second label), a
+    /// later word that is a form label, or a word with its own value after
+    /// a phone number, date or amount.
     SeveralValues,
 }
 
@@ -628,12 +633,13 @@ impl Context<'_> {
             .map(|e| e.text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        // Join, label normalization, NFKC and the value-shape scan.
-        budget.spend(4 * raw.len() as u64)?;
+        // Join, label normalization, NFKC, the form-label check of each
+        // word and the value-shape scan.
+        budget.spend(5 * raw.len() as u64)?;
         if self.labels.contains(&normalize_label(&raw).stem) {
             return Ok(rejected(false));
         }
-        let several = several_values(&raw.nfkc().collect::<String>(), budget)?;
+        let several = several_values(&raw.nfkc().collect::<String>(), self.labels, budget)?;
         let scaled =
             states_scale(&self.index.groups[*group].0) || self.scaled_pages.contains(&pair.page);
         Ok(Prepared {
@@ -1340,11 +1346,29 @@ const RANGE_MARKS: [&str; 6] = ["〜", "~", "-", "\u{2212}", "\u{2013}", "\u{201
 ///   spaces, currency marks and signs between them ignored) that itself
 ///   follows other text: a second label with its value, as in `山田 太郎
 ///   生年月日 1990年1月1日`. A word at the very start (`TEL 03-1234-5678`)
-///   is not a second label.
+///   is not a second label;
+/// - a word after whitespace that reads as one of the form's labels or
+///   hints (`labels`, as [`Label::stem`]): a second field without a
+///   delimiter, as in `山田 太郎 所属 経理部` when the form has `所属`;
+/// - a phone number, date or amount followed by whitespace, a word,
+///   whitespace and more text: a second label with its value, as in
+///   `03-1234-5678 担当 山田` or `03-1234-5678 内線 123` (an extension
+///   cannot be told apart from another label's value).
 ///
 /// The scan is linear in the text; phone number scans are charged to
 /// `budget` as they run (see [`phone_at`]), so a deadline stops it.
-fn several_values(text: &str, budget: &mut Budget) -> Result<bool, BudgetError> {
+fn several_values(
+    text: &str,
+    labels: &BTreeSet<String>,
+    budget: &mut Budget,
+) -> Result<bool, BudgetError> {
+    let second_field = text
+        .split_whitespace()
+        .skip(1)
+        .any(|word| labels.contains(&normalize_label(word).stem));
+    if second_field {
+        return Ok(true);
+    }
     let mut tokens = value_shapes(text, budget)?;
     tokens.sort_by_key(|&(_, start, _)| start);
     let range = |end: usize, start: usize| {
@@ -1364,7 +1388,31 @@ fn several_values(text: &str, budget: &mut Budget) -> Result<bool, BudgetError> 
                 .windows(2)
                 .any(|pair| shape == Shape::Phone || !range(pair[0].2, pair[1].1))
         });
-    Ok(two_of_a_kind || tokens.iter().any(|&(_, start, _)| after_label(text, start)))
+    Ok(two_of_a_kind
+        || tokens
+            .iter()
+            .any(|&(kind, start, end)| after_label(text, start) || labelled_after(text, kind, end)))
+}
+
+/// Whether the text after a phone number, date or amount ending at byte
+/// `end` (and an amount's `円`) is whitespace, a word (letters only),
+/// whitespace and more text: a second label with its own value.
+fn labelled_after(text: &str, kind: Shape, end: usize) -> bool {
+    let mut rest = &text[end..];
+    if kind == Shape::Amount {
+        rest = rest.trim_start().strip_prefix('円').unwrap_or(rest);
+    }
+    let Some(word) = rest
+        .strip_prefix(char::is_whitespace)
+        .map(|r| r.trim_start())
+    else {
+        return false;
+    };
+    let after = word.trim_start_matches(char::is_alphabetic);
+    after.len() < word.len()
+        && after
+            .strip_prefix(char::is_whitespace)
+            .is_some_and(|value| !value.trim_start().is_empty())
 }
 
 /// Whether the text before byte `start` ends with a word that follows other
@@ -2375,7 +2423,7 @@ mod tests {
 
     /// [`several_values`] with an unlimited budget.
     fn holds_several(text: &str) -> bool {
-        several_values(text, &mut Budget::new(u64::MAX, None)).unwrap()
+        several_values(text, &BTreeSet::new(), &mut Budget::new(u64::MAX, None)).unwrap()
     }
 
     #[test]
@@ -2387,7 +2435,7 @@ mod tests {
         let text = "(1".repeat(200_000);
         let mut budget = Budget::new(u64::MAX, None);
         let started = Instant::now();
-        assert!(!several_values(&text, &mut budget).unwrap());
+        assert!(!several_values(&text, &BTreeSet::new(), &mut budget).unwrap());
         let used = u64::MAX - budget.remaining();
         assert!(
             used <= 2 * MAX_PHONE_CHARS as u64 * text.len() as u64,
@@ -2398,7 +2446,7 @@ mod tests {
         // The scan checks the deadline while it runs.
         let mut late = Budget::new(u64::MAX, Some(Instant::now()));
         assert_eq!(
-            several_values(&text, &mut late),
+            several_values(&text, &BTreeSet::new(), &mut late),
             Err(BudgetError::DeadlineExceeded)
         );
         // And the whole fill stops at its deadline instead of after the scan.
@@ -2498,6 +2546,68 @@ mod tests {
         ] {
             assert_eq!(holds_several(text), several, "{text}");
         }
+    }
+
+    #[test]
+    fn a_second_field_without_a_delimiter_is_several_values() {
+        let labels: BTreeSet<String> = ["氏名", "所属", "電話"]
+            .iter()
+            .map(|l| normalize_label(l).stem)
+            .collect();
+        let check =
+            |text: &str| several_values(text, &labels, &mut Budget::new(u64::MAX, None)).unwrap();
+        for (text, several) in [
+            // Before: false (one value). A later word is a form label, or a
+            // word with its own value follows a phone number, date or amount.
+            ("山田 太郎 所属 経理部", true),
+            ("山田 太郎 所属", true),
+            ("経理部 電話 03-1234-5678", true),
+            ("03-1234-5678 担当 山田", true),
+            ("03-1234-5678 内線 123", true),
+            ("2026年11月8日 午前 10時", true),
+            ("1,000円 送料 500", true),
+            // One value: no form label after the first word, nothing after
+            // the word, or no word.
+            ("山田 太郎", false),
+            ("所属 経理部", false),
+            ("株式会社 サンプル 商事", false),
+            ("03-1234-5678 代表", false),
+            ("03-1234-5678 (代表)", false),
+            ("2026年11月8日 (日)", false),
+            ("¥12,100 (税込)", false),
+            ("1,000円 税込", false),
+            ("お支払いは11月30日まで 有効", false),
+        ] {
+            assert_eq!(check(text), several, "{text}");
+        }
+        let fragments = [
+            frag(
+                "a",
+                "氏名：山田 太郎 所属 経理部",
+                [60.0, 100.0, 200.0, 110.0],
+            ),
+            frag(
+                "b",
+                "電話：03-1234-5678 担当 山田",
+                [60.0, 124.0, 220.0, 134.0],
+            ),
+            frag("c", "担当者：佐藤 花子", [60.0, 148.0, 150.0, 158.0]),
+        ];
+        let result = fill(
+            "doc",
+            &fragments,
+            &form(json!({"fields":[
+                {"id":"name","label":"氏名"},
+                {"id":"department","label":"所属"},
+                {"id":"tel","label":"電話"},
+                {"id":"person","label":"担当者"}
+            ]})),
+        );
+        // Before: name = "山田 太郎 所属 経理部", tel = "03-1234-5678 担当 山田".
+        assert_eq!(held(&result, "name"), Some(Hold::SeveralValues));
+        assert_eq!(held(&result, "tel"), Some(Hold::SeveralValues));
+        assert_eq!(result.fields["department"].status, FillStatus::NotFound);
+        assert_eq!(result.fields["person"].raw.as_deref(), Some("佐藤 花子"));
     }
 
     #[test]
