@@ -39,7 +39,11 @@
 //! `/V`. Text field values stored as streams are not decoded. A password text
 //! field must not store its value; any `/V` or `/DV` found on one is withheld.
 //! An entry that cannot be decoded exactly yields `None` plus a
-//! [`FieldIssue`], never a partial or repaired string.
+//! [`FieldIssue`], never a partial or repaired string. A text or choice `/V`
+//! read as PDFDocEncoding (no byte order mark) with any byte at or above
+//! `0x80` is still reported, with [`FieldIssue::PdfDocHighBytes`]: such bytes
+//! may be text in another encoding (for example Shift_JIS) that
+//! PDFDocEncoding misreads.
 //!
 //! # Text-string decoding
 //!
@@ -76,7 +80,10 @@
 //! Encrypted PDFs are rejected with [`AcroFormError::Encrypted`]. Besides the
 //! trailer `/Encrypt` check of [`crate::inspect`], this also rejects documents
 //! that `lopdf` decrypted with an empty password while loading, because their
-//! strings may be only partially decrypted.
+//! strings may be only partially decrypted. A catalog without `/AcroForm` is
+//! reported as [`AcroForm::present`] `false` before this check and before the
+//! page tree is read, so an encrypted document or a page-limit failure never
+//! turns a document without a form into an AcroForm error.
 //!
 //! # XFA
 //!
@@ -289,6 +296,11 @@ pub enum FieldIssue {
     InvalidMaxLen,
     /// A partial name contains `.`, so the qualified name is ambiguous.
     PeriodInPartialName,
+    /// The text or choice `/V` is a PDFDocEncoding string (no byte order
+    /// mark) with a byte at or above `0x80`. The decoded value is still
+    /// reported, but the bytes may be text in another encoding (for example
+    /// Shift_JIS) that PDFDocEncoding misreads.
+    PdfDocHighBytes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -352,13 +364,6 @@ pub fn fields(bytes: &[u8], limits: AcroFormLimits) -> Result<AcroForm, AcroForm
 /// `limits.max_bytes` is not applied here.
 pub fn fields_in(doc: &Document, limits: AcroFormLimits) -> Result<AcroForm, AcroFormError> {
     limits.validate()?;
-    if doc.trailer.has(b"Encrypt") || doc.was_encrypted() {
-        return Err(AcroFormError::Encrypted);
-    }
-    let tree = metadata::page_tree(doc, limits.max_pages).map_err(|fault| match fault {
-        metadata::Fault::PageLimit => AcroFormError::LimitExceeded(AcroFormLimit::Pages),
-        _ => AcroFormError::InvalidPageTree,
-    })?;
     let catalog = doc
         .trailer
         .get(b"Root")
@@ -366,6 +371,8 @@ pub fn fields_in(doc: &Document, limits: AcroFormLimits) -> Result<AcroForm, Acr
         .and_then(|root| resolve(doc, root))
         .and_then(|root| root.as_dict().ok())
         .ok_or(AcroFormError::InvalidPageTree)?;
+    // A document without an AcroForm reports none, whatever else fails
+    // below, so its fill output stays that of the text layer alone.
     let Some(form) = entry(doc, catalog, b"AcroForm") else {
         return Ok(AcroForm {
             present: false,
@@ -374,6 +381,13 @@ pub fn fields_in(doc: &Document, limits: AcroFormLimits) -> Result<AcroForm, Acr
             skipped: Vec::new(),
         });
     };
+    if doc.trailer.has(b"Encrypt") || doc.was_encrypted() {
+        return Err(AcroFormError::Encrypted);
+    }
+    let tree = metadata::page_tree(doc, limits.max_pages).map_err(|fault| match fault {
+        metadata::Fault::PageLimit => AcroFormError::LimitExceeded(AcroFormLimit::Pages),
+        _ => AcroFormError::InvalidPageTree,
+    })?;
     let Object::Dictionary(form) = form else {
         return Err(AcroFormError::InvalidFieldTree);
     };
@@ -782,6 +796,11 @@ impl<'a> Walker<'a> {
                     None
                 }
             };
+            if matches!(value, Some(FieldValue::Text(_) | FieldValue::Choice(_)))
+                && self.pdf_doc_high_bytes(scope.v)
+            {
+                issues.push(FieldIssue::PdfDocHighBytes);
+            }
             let default_value = match self.value(kind, scope.dv, opt)? {
                 Outcome::Absent => None,
                 Outcome::Value(value) => Some(value),
@@ -1021,6 +1040,25 @@ impl<'a> Walker<'a> {
                 issues.push(WidgetIssue::AmbiguousOnState);
                 Ok(None)
             }
+        }
+    }
+
+    /// Whether a decoded text or choice `/V` holds a PDFDocEncoding string
+    /// with a byte at or above `0x80` ([`FieldIssue::PdfDocHighBytes`]).
+    fn pdf_doc_high_bytes(&self, raw: Option<&'a Object>) -> bool {
+        let high = |object: &Object| {
+            matches!(
+                resolve(self.doc, object),
+                Some(Object::String(bytes, _))
+                    if !bytes.starts_with(b"\xFE\xFF")
+                        && !bytes.starts_with(b"\xEF\xBB\xBF")
+                        && bytes.iter().any(|byte| *byte >= 0x80)
+            )
+        };
+        match raw.and_then(|raw| resolve(self.doc, raw)) {
+            Some(Object::Array(items)) => items.iter().any(high),
+            Some(value) => high(value),
+            None => false,
         }
     }
 

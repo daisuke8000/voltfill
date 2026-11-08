@@ -82,6 +82,7 @@
 //! font, which carries no rotation and no vertical CMap. True vertical
 //! writing (a vertical writing mode font) is not read yet: it needs
 //! pdf-inspector to lay vertical glyphs out vertically.
+use crate::acroform::{self, AcroForm, AcroFormError, AcroFormLimits};
 use crate::metadata;
 use crate::source::{Orientation, PageDiagnostic, Quality, SourceFragment};
 
@@ -183,6 +184,36 @@ pub struct DocumentSnapshot {
 /// Vertical text set glyph by glyph in a horizontal font is not detected;
 /// true vertical writing is not read yet.
 pub fn inspect(bytes: &[u8], limits: PdfLimits) -> Result<DocumentSnapshot, PdfError> {
+    inspect_inner(bytes, limits, None).map(|(snapshot, _)| snapshot)
+}
+
+/// [`inspect`], plus the document's AcroForm fields read from the same
+/// metadata load with [`acroform::fields_in`] before upstream loads the PDF.
+/// The AcroForm limits take `max_bytes` and `max_pages` from `limits` and
+/// the [`AcroFormLimits`] defaults otherwise. An AcroForm error (a limit, an
+/// encrypted document `lopdf` decrypted while loading, an invalid field
+/// tree) is returned beside the snapshot and never fails the inspection.
+pub fn inspect_with_acroform(
+    bytes: &[u8],
+    limits: PdfLimits,
+) -> Result<(DocumentSnapshot, Result<AcroForm, AcroFormError>), PdfError> {
+    let acroform = AcroFormLimits {
+        max_bytes: limits.max_bytes,
+        max_pages: limits.max_pages,
+        ..AcroFormLimits::default()
+    };
+    let (snapshot, form) = inspect_inner(bytes, limits, Some(acroform))?;
+    Ok((
+        snapshot,
+        form.unwrap_or(Err(AcroFormError::InvalidContainer)),
+    ))
+}
+
+fn inspect_inner(
+    bytes: &[u8],
+    limits: PdfLimits,
+    acroform: Option<AcroFormLimits>,
+) -> Result<(DocumentSnapshot, Option<Result<AcroForm, AcroFormError>>), PdfError> {
     use sha2::{Digest, Sha256};
 
     let start = Instant::now();
@@ -248,6 +279,7 @@ pub fn inspect(bytes: &[u8], limits: PdfLimits) -> Result<DocumentSnapshot, PdfE
         });
     }
     timings.metadata_ms = elapsed_ms(parse_start);
+    let form = acroform.map(|limits| acroform::fields_in(&doc, limits));
     // Drop the metadata document before upstream loads its own representation.
     drop(doc);
     let analyze_start = Instant::now();
@@ -503,13 +535,16 @@ pub fn inspect(bytes: &[u8], limits: PdfLimits) -> Result<DocumentSnapshot, PdfE
         page.reason_codes.dedup();
     }
     timings.total_ms = elapsed_ms(start);
-    Ok(DocumentSnapshot {
-        document_id,
-        fragments,
-        pages,
-        geometries,
-        timings,
-    })
+    Ok((
+        DocumentSnapshot {
+            document_id,
+            fragments,
+            pages,
+            geometries,
+            timings,
+        },
+        form,
+    ))
 }
 
 fn elapsed_ms(start: Instant) -> f64 {

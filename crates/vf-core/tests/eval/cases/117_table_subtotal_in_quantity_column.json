@@ -1,0 +1,30 @@
+{
+  "description": "明細行（ぶどう ¥900）の数量の列に小計がある。小計がフォームの数量の列で明細のセルの位置を占め、1列目の品名と合わせて明細行として読めるため、小計の行として表を閉じない（ぶどうを落とした2行を確定しない）",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "品名"},
+    {"x": 300, "y": 100, "text": "数量"},
+    {"right": 560, "y": 100, "text": "金額"},
+    {"x": 60, "y": 118, "text": "りんご"},
+    {"x": 300, "y": 118, "text": "3"},
+    {"right": 560, "y": 118, "text": "¥300"},
+    {"x": 60, "y": 136, "text": "みかん"},
+    {"x": 300, "y": 136, "text": "2"},
+    {"right": 560, "y": 136, "text": "¥500"},
+    {"x": 60, "y": 154, "text": "ぶどう"},
+    {"x": 300, "y": 154, "text": "小計"},
+    {"right": 560, "y": 154, "text": "¥900"},
+    {"x": 300, "y": 172, "text": "合計"},
+    {"right": 560, "y": 172, "text": "¥1,700"}
+  ],
+  "form": {"fields": [
+    {"id": "items", "label": "明細", "type": "table", "columns": [
+      {"id": "name", "label": "品名"},
+      {"id": "qty", "label": "数量", "type": "number"},
+      {"id": "amount", "label": "金額", "type": "amount"}
+    ]}
+  ]},
+  "expect": {
+    "items": {"abstain": "ambiguous", "hold": "irregular_table"}
+  }
+}

@@ -102,7 +102,9 @@ use std::time::Instant;
 
 mod orient;
 mod table;
-pub use table::{MAX_TABLE_COLUMNS, MAX_TABLE_ROWS, Table, TableEnd, Totals, read_table};
+pub use table::{
+    ColumnRole, MAX_TABLE_COLUMNS, MAX_TABLE_ROWS, Table, TableEnd, Totals, read_table,
+};
 
 /// Most lines one value may span: its first line plus continuation lines.
 /// A value that would run longer is dropped, not truncated.
@@ -183,6 +185,9 @@ pub enum Precision {
     Run,
     /// A part of a fragment, positioned by character-class width estimates.
     Estimated,
+    /// An AcroForm widget's rectangle: where a field value is shown, not
+    /// the geometry of any glyph. Layout never produces it.
+    Widget,
 }
 
 /// An exact byte range of one source fragment with its box.
@@ -222,6 +227,9 @@ pub enum Placement {
     /// row, at most [`MAX_COLUMN_ROWS`]. A column never determines a single
     /// value on its own.
     Column,
+    /// An AcroForm field value bound to its label by the field's name, not
+    /// by position. Layout never produces it.
+    Widget,
 }
 
 /// How a pair's value is tied to its label.
