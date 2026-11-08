@@ -32,7 +32,12 @@
 //!   value to the right start within half a line height of the value's left
 //!   edge. Continuation lines of an inline value start anywhere from the
 //!   fragment's left edge (a value wrapped back under its label) to 1.5 line
-//!   heights right of the value's estimated start.
+//!   heights right of the value's estimated start. A continuation line may
+//!   share its line with other fragments (the other column of a two-column
+//!   layout): its first fragment in the value's column continues the value,
+//!   so the value is never cut at such a line. For a value to the right of
+//!   its label, a fragment in the label's column before that one starts the
+//!   next row instead (stacked `小計` / `合計` rows).
 //! - A value directly below a label is taken only when the cells to the
 //!   right of the label and of the value (if any) line up as one column, so
 //!   the label cell of the next row (`役職` with its own value `課長`) is not
@@ -253,6 +258,7 @@ pub fn analyze_within(
             let column = Column {
                 from: fragments[f].bbox.left - 0.5 * height,
                 to: first.bbox.left + 1.5 * height,
+                label: None,
             };
             if let Some(value) = page.value(i, first, column, budget)? {
                 pairs.push(Pair {
@@ -275,6 +281,7 @@ pub fn analyze_within(
             let column = Column {
                 from: left - half,
                 to: left + half,
+                label: Some(fragments[label].bbox),
             };
             if let Some(value) = page.value(i, first, column, budget)? {
                 let binding = if measures[label].kind == Kind::Label {
@@ -465,6 +472,9 @@ enum Cell {
 struct Column {
     from: f64,
     to: f64,
+    /// The label's box for a value to its right: a line with a fragment in
+    /// the label's column before the value column starts the next row.
+    label: Option<Rect>,
 }
 
 /// The analyzed fragments with their measurements and lines.
@@ -524,11 +534,15 @@ impl Page<'_> {
         })
     }
 
-    /// The value starting with `first` on line `line`, with follow-on lines
-    /// whose single plain fragment starts in `column`. A line is merged only
-    /// when it has a single plain fragment, so stacked label rows (小計 /
-    /// 合計) and `label：` lines stay separate. `None` when the value would
-    /// exceed [`MAX_VALUE_LINES`].
+    /// The value starting with `first` on line `line`, with follow-on lines.
+    /// A follow-on line continues the value when its first fragment starting
+    /// in `column` is plain, whatever other fragments share the line: in a
+    /// two-column layout the next line also holds the other column's text.
+    /// The value ends at a line without a fragment in `column`, at a
+    /// `label：` or `label：value` fragment there, and (for a value to the
+    /// right of its label) at a line with a fragment in the label's column
+    /// before the value column: the next row (小計 / 合計). `None` when the
+    /// value would exceed [`MAX_VALUE_LINES`].
     fn value(
         &self,
         line: usize,
@@ -541,29 +555,49 @@ impl Page<'_> {
         let mut value = vec![first];
         for next_line in &self.lines[line + 1..] {
             budget.spend(1)?;
-            if next_line.page != page {
+            let height = last.height();
+            if next_line.page != page || next_line.bbox.top - last.bottom > height {
                 break;
             }
-            let height = last.height();
-            let [next] = next_line.fragments[..] else {
+            let Some(next) = self.continuation(next_line, column, height, budget)? else {
                 break;
             };
-            let next_fragment = &self.fragments[next];
-            let left = next_fragment.bbox.left;
-            if next_line.bbox.top - last.bottom > height
-                || left < column.from
-                || left > column.to
-                || self.kind(next) != Kind::Plain
-            {
-                break;
-            }
             if value.len() >= MAX_VALUE_LINES {
                 return Ok(None);
             }
             value.push(self.span(next, START, END, budget)?);
-            last = next_fragment.bbox;
+            last = self.fragments[next].bbox;
         }
         Ok(Some(value))
+    }
+
+    /// The plain fragment of `line` that continues a value in `column`, if
+    /// any (see [`Page::value`]). Fragments are sorted by left edge, so the
+    /// first one starting at or after `column.from` is the only candidate.
+    fn continuation(
+        &self,
+        line: &Line,
+        column: Column,
+        tolerance: f64,
+        budget: &mut Budget,
+    ) -> Result<Option<usize>, BudgetError> {
+        let at = line
+            .fragments
+            .partition_point(|&f| self.fragments[f].bbox.left < column.from);
+        let Some(&next) = line.fragments.get(at) else {
+            return Ok(None);
+        };
+        if self.fragments[next].bbox.left > column.to || self.kind(next) != Kind::Plain {
+            return Ok(None);
+        }
+        if let Some(label) = column.label
+            && let Cell::Found(row) = self.column_cell(line, label, 0.5 * tolerance, budget)?
+            && row != next
+            && self.fragments[row].bbox.left < self.fragments[next].bbox.left
+        {
+            return Ok(None);
+        }
+        Ok(Some(next))
     }
 
     /// Below (or Column) hypotheses for the label at `position` on line `index`.
@@ -1196,6 +1230,60 @@ mod tests {
             columns(&table, &["金額", "数量"]),
             [vec!["¥300"], vec!["3", "2"]]
         );
+    }
+
+    #[test]
+    fn continuation_lines_may_share_their_line_with_another_column() {
+        // A two-column layout: the left value continues on a line that also
+        // holds the right column's `請求番号：INV-1`. Before: the line had two
+        // fragments, so the value ended after its first line (truncated).
+        let fragments = [
+            frag("a", "住所：東京都千代田区", [60.0, 100.0, 160.0, 110.0]),
+            frag("b", "請求日：2026/11/08", [300.0, 100.0, 390.0, 110.0]),
+            frag("c", "丸の内1-1-1 サンプルビル", [90.0, 112.0, 210.0, 122.0]),
+            frag("d", "請求番号：INV-1", [300.0, 112.0, 375.0, 122.0]),
+            frag("e", "担当", [60.0, 150.0, 80.0, 160.0]),
+            frag("f", "山田 太郎", [200.0, 150.0, 250.0, 160.0]),
+            frag("g", "経理部", [360.0, 150.0, 390.0, 160.0]),
+            frag("h", "営業部", [20.0, 162.0, 50.0, 172.0]),
+            frag("i", "佐藤 花子", [200.0, 162.0, 250.0, 172.0]),
+        ];
+        let layout = analyze(&fragments);
+        let address = find(&layout, &fragments, "住所");
+        assert_eq!(
+            texts(&fragments, &address[0].value),
+            ["東京都千代田区", "丸の内1-1-1 サンプルビル"]
+        );
+        // The right column's value ends at its own column's next label.
+        let issued = find(&layout, &fragments, "請求日");
+        assert_eq!(texts(&fragments, &issued[0].value), ["2026/11/08"]);
+        // A right value continues past text left of its label's column.
+        let person = find(&layout, &fragments, "担当")
+            .into_iter()
+            .find(|p| p.placement == Placement::Right)
+            .unwrap();
+        assert_eq!(texts(&fragments, &person.value), ["山田 太郎", "佐藤 花子"]);
+        // A line with a fragment in the label's column is the next row, even
+        // when its value lines up with this one (equal-width amounts).
+        let rows = [
+            frag("a", "小計", [330.0, 100.0, 352.0, 110.0]),
+            frag("b", "¥11,000", [480.2, 100.0, 520.0, 110.0]),
+            frag("c", "合計", [330.0, 112.0, 352.0, 122.0]),
+            frag("d", "¥12,100", [480.2, 112.0, 520.0, 122.0]),
+            // Right-aligned labels share the label column by their right edge.
+            frag("e", "住所：", [70.0, 140.0, 100.0, 150.0]),
+            frag("f", "東京都架空区1-2-3", [200.0, 140.0, 290.0, 150.0]),
+            frag("g", "電話番号", [60.0, 152.0, 100.0, 162.0]),
+            frag("h", "03-1234-5678", [200.0, 152.0, 260.0, 162.0]),
+        ];
+        let layout = analyze(&rows);
+        for (label, value) in [("小計", "¥11,000"), ("住所", "東京都架空区1-2-3")] {
+            let right = find(&layout, &rows, label)
+                .into_iter()
+                .find(|p| p.placement == Placement::Right)
+                .unwrap();
+            assert_eq!(texts(&rows, &right.value), [value], "{label}");
+        }
     }
 
     #[test]
