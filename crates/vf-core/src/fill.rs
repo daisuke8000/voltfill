@@ -69,7 +69,8 @@ const MAX_DIGITS: usize = 15;
 /// [`layout::analyze_within`]) plus matching, which spends one unit per byte
 /// of text scanned for unit notes, per byte of form label compared with each
 /// distinct document label, per byte of value text examined or normalized,
-/// and per byte copied into the result.
+/// per character read by phone number scans (at most [`MAX_PHONE_CHARS`]
+/// plus one from each start) and per byte copied into the result.
 pub const DEFAULT_MAX_WORK: u64 = 200_000_000;
 
 /// Resource limits for [`fill_with_limits`].
@@ -632,7 +633,7 @@ impl Context<'_> {
         if self.labels.contains(&normalize_label(&raw).stem) {
             return Ok(rejected(false));
         }
-        let several = several_values(&raw.nfkc().collect::<String>());
+        let several = several_values(&raw.nfkc().collect::<String>(), budget)?;
         let scaled =
             states_scale(&self.index.groups[*group].0) || self.scaled_pages.contains(&pair.page);
         Ok(Prepared {
@@ -1340,8 +1341,11 @@ const RANGE_MARKS: [&str; 6] = ["〜", "~", "-", "\u{2212}", "\u{2013}", "\u{201
 ///   follows other text: a second label with its value, as in `山田 太郎
 ///   生年月日 1990年1月1日`. A word at the very start (`TEL 03-1234-5678`)
 ///   is not a second label.
-fn several_values(text: &str) -> bool {
-    let mut tokens = value_shapes(text);
+///
+/// The scan is linear in the text; phone number scans are charged to
+/// `budget` as they run (see [`phone_at`]), so a deadline stops it.
+fn several_values(text: &str, budget: &mut Budget) -> Result<bool, BudgetError> {
+    let mut tokens = value_shapes(text, budget)?;
     tokens.sort_by_key(|&(_, start, _)| start);
     let range = |end: usize, start: usize| {
         let between = text.get(end..start).unwrap_or_default();
@@ -1360,7 +1364,7 @@ fn several_values(text: &str) -> bool {
                 .windows(2)
                 .any(|pair| shape == Shape::Phone || !range(pair[0].2, pair[1].1))
         });
-    two_of_a_kind || tokens.iter().any(|&(_, start, _)| after_label(text, start))
+    Ok(two_of_a_kind || tokens.iter().any(|&(_, start, _)| after_label(text, start)))
 }
 
 /// Whether the text before byte `start` ends with a word that follows other
@@ -1370,11 +1374,15 @@ fn after_label(text: &str, start: usize) -> bool {
         c.is_whitespace() || CURRENCY_PREFIXES.contains(&c) || AMOUNT_SIGNS.contains(&c)
     });
     let rest = before.trim_end_matches(char::is_alphabetic);
-    rest.len() < before.len() && !rest.trim().is_empty()
+    // `rest` starts at the (trimmed) text start: only its end needs trimming.
+    rest.len() < before.len() && !rest.trim_end().is_empty()
 }
 
 /// Phone numbers, dates and currency amounts in `text` with their byte ranges.
-fn value_shapes(text: &str) -> Vec<(Shape, usize, usize)> {
+fn value_shapes(
+    text: &str,
+    budget: &mut Budget,
+) -> Result<Vec<(Shape, usize, usize)>, BudgetError> {
     let chars: Vec<(usize, char)> = text.char_indices().collect();
     let at = |i: usize| chars.get(i).map_or(text.len(), |&(at, _)| at);
     let mut tokens = Vec::new();
@@ -1386,7 +1394,7 @@ fn value_shapes(text: &str) -> Vec<(Shape, usize, usize)> {
         let boundary = i == 0 || !chars[i - 1].1.is_ascii_digit();
         if boundary
             && (c.is_ascii_digit() || c == '(')
-            && let Some(end) = phone_at(&chars, i)
+            && let Some(end) = phone_at(&chars, i, budget)?
         {
             tokens.push((Shape::Phone, at(i), at(end)));
             i = end;
@@ -1477,7 +1485,7 @@ fn value_shapes(text: &str) -> Vec<(Shape, usize, usize)> {
         }
         tokens.push((Shape::Date, at(start), at(j + 1)));
     }
-    tokens
+    Ok(tokens)
 }
 
 /// A numeric date such as `2026/11/08`, `R8.11.8` (from its digits) or
@@ -1496,6 +1504,13 @@ fn numeric_date(run: &str) -> bool {
     digits(year, 4) && digits(month, 2) && digits(day, 2) && (separator != '-' || year.len() == 4)
 }
 
+/// Most digits in a phone number ([`is_phone`]).
+const MAX_PHONE_DIGITS: usize = 13;
+/// Most characters in a phone number: [`MAX_PHONE_DIGITS`] digits joined by
+/// a hyphen between every two of them. A scan from any start stops after
+/// this many characters (plus one), so scanning a text is linear.
+const MAX_PHONE_CHARS: usize = 2 * MAX_PHONE_DIGITS - 1;
+
 /// The end (char index) of a phone number starting at char `i`, which is
 /// a digit or `(` not preceded by a digit. The number is the longest run of
 /// digits, `-`, `(` and `)` (one space allowed after `)`), without trailing
@@ -1505,25 +1520,42 @@ fn numeric_date(run: &str) -> bool {
 /// - 10 or 11 digits starting with `0` (`0312345678`);
 /// - an area code starting with `0` in brackets, then the rest
 ///   (`(03)1234-5678`, `03(1234)5678`), with 10 or 11 digits in all.
-fn phone_at(chars: &[(usize, char)], i: usize) -> Option<usize> {
+///
+/// A run with more than [`MAX_PHONE_DIGITS`] digits or more than
+/// [`MAX_PHONE_CHARS`] characters is no phone number; the scan stops there
+/// instead of reading the rest of the run, and every character it reads is
+/// charged to `budget`. Before, every start re-read the whole run, so a
+/// value like `(1(1(1…` took quadratic time without checking the deadline.
+fn phone_at(
+    chars: &[(usize, char)],
+    i: usize,
+    budget: &mut Budget,
+) -> Result<Option<usize>, BudgetError> {
     let mut run = String::new();
+    let mut digits = 0;
     let mut end = i;
     while let Some(&(_, c)) = chars.get(end) {
         let digit_next = chars.get(end + 1).is_some_and(|&(_, n)| n.is_ascii_digit());
         if c.is_ascii_digit() || matches!(c, '-' | '(' | ')') {
             run.push(c);
+            digits += usize::from(c.is_ascii_digit());
         } else if !(c == ' ' && run.ends_with(')') && digit_next) {
             break;
         }
         end += 1;
+        if digits > MAX_PHONE_DIGITS || end - i > MAX_PHONE_CHARS {
+            budget.spend((end - i) as u64)?;
+            return Ok(None);
+        }
     }
+    budget.spend((end - i + 1) as u64)?;
     // Trailing separators are never part of the number (spaces were only
     // taken before a digit).
     while run.ends_with(|c: char| !c.is_ascii_digit()) {
         run.pop();
         end -= 1;
     }
-    is_phone(&run).then_some(end)
+    Ok(is_phone(&run).then_some(end))
 }
 
 /// See [`phone_at`].
@@ -2341,6 +2373,55 @@ mod tests {
         assert_eq!(result.fields["d"].status, FillStatus::Ambiguous);
     }
 
+    /// [`several_values`] with an unlimited budget.
+    fn holds_several(text: &str) -> bool {
+        several_values(text, &mut Budget::new(u64::MAX, None)).unwrap()
+    }
+
+    #[test]
+    fn value_shape_scans_are_linear_and_charged() {
+        // Before: from every digit after `(`, the phone scan re-read the rest
+        // of the run (quadratic) and charged nothing: a 960,000-character
+        // value took 348 s in release past a 1 s deadline. Now each scan
+        // stops after MAX_PHONE_CHARS characters and is charged.
+        let text = "(1".repeat(200_000);
+        let mut budget = Budget::new(u64::MAX, None);
+        let started = Instant::now();
+        assert!(!several_values(&text, &mut budget).unwrap());
+        let used = u64::MAX - budget.remaining();
+        assert!(
+            used <= 2 * MAX_PHONE_CHARS as u64 * text.len() as u64,
+            "{used}"
+        );
+        assert!(used >= text.len() as u64 / 2, "{used}");
+        assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+        // The scan checks the deadline while it runs.
+        let mut late = Budget::new(u64::MAX, Some(Instant::now()));
+        assert_eq!(
+            several_values(&text, &mut late),
+            Err(BudgetError::DeadlineExceeded)
+        );
+        // And the whole fill stops at its deadline instead of after the scan.
+        let fragments = [frag(
+            "a",
+            &format!("電話：{text}"),
+            [60.0, 100.0, 500.0, 110.0],
+        )];
+        let tel = form(json!({"fields":[{"id":"tel","label":"電話"}]}));
+        let unlimited = FillLimits {
+            max_work: u64::MAX,
+            ..FillLimits::default()
+        };
+        let started = Instant::now();
+        let result = fill_with_limits("doc", &fragments, &tel, &unlimited).unwrap();
+        assert!(started.elapsed().as_secs() < 10, "{:?}", started.elapsed());
+        assert_eq!(result.fields["tel"].raw.as_deref(), Some(text.as_str()));
+        // Phone numbers at the cap are still found; longer runs are not numbers.
+        assert!(holds_several("0-1-2-3-4-5-6-7-8-9-0-1-2 03-1234-5678"));
+        assert!(!holds_several("0-1-2-3-4-5-6-7-8-9-0-1-2-3 03-1234-5678"));
+        assert!(holds_several("12-03-1234-5678 FAX 03-1234-5679"));
+    }
+
     #[test]
     fn several_values_in_one_text_value_are_held() {
         let fragments = [
@@ -2415,7 +2496,7 @@ mod tests {
             ("お支払いは11月30日まで", false),
             ("1234567890", false),
         ] {
-            assert_eq!(several_values(text), several, "{text}");
+            assert_eq!(holds_several(text), several, "{text}");
         }
     }
 
