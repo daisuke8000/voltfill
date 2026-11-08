@@ -961,8 +961,8 @@ fn label_score(a: &Label, b: &Label) -> Match {
 /// Scales of a unit note or a label unit.
 const NOTE_SCALES: [char; 6] = ['十', '百', '千', '万', '億', '兆'];
 
-/// Units after `単位` that leave values as they are: plain yen and count
-/// units (`単位：円`, `単位：個`, `（単位：kg）`).
+/// Units after `単位` that leave values as they are: plain yen (first) and
+/// count units (`単位：円`, `単位：個`, `（単位：kg）`).
 const PLAIN_UNITS: [&str; 30] = [
     "円",
     "個",
@@ -998,12 +998,15 @@ const PLAIN_UNITS: [&str; 30] = [
 
 /// A unit note, whitespace ignored and NFKC applied:
 /// - `単位` followed by optional `:`, `：` or `は` and a scale (`十` `百`
-///   `千` `万` `億` `兆`) or a number other than 1 (`（単位：千円）`,
-///   `単位 百万円`, `（単位は千円）`, `（単位：1,000円）`, `単位:1000`);
+///   `千` `万` `億` `兆`) or a number other than 1 not followed by a count
+///   unit (`（単位：千円）`, `単位 百万円`, `（単位は千円）`,
+///   `（単位：1,000円）`, `単位:1000`). A quantity (`発注単位：100個`,
+///   `最小単位：10枚`) is not a note;
 /// - `単位` after `(` or followed by `:`, `：` or `は`, then anything but a
-///   plain unit ([`PLAIN_UNITS`]) and the end of the note (`）`, `)`, `、`
-///   or the end of the text): `（単位：ドル）`, `単位：千ドル`. A plain unit
-///   (`単位：円`, `（単位：個）`) and `単位` followed by other text
+///   plain unit ([`PLAIN_UNITS`], optionally after the number 1) and the
+///   end of the note (`）`, `)`, `、`, `。` or the end of the text):
+///   `（単位：ドル）`, `単位：千ドル`. A plain unit (`単位：円`,
+///   `（単位：個）`, `単位：1円`) and `単位` followed by other text
 ///   (`単位当たり`, `数量単位`) are not notes;
 /// - `単位` preceded by a scale and an optional `円` (`（千円単位）`).
 ///
@@ -1018,15 +1021,27 @@ fn unit_note(text: &str) -> bool {
         let opened = before.ends_with('(');
         let before = before.strip_suffix('円').unwrap_or(before);
         let marked = opened || after.len() < rest.len();
-        // `単位：1円` is plain yen.
-        let unit = after
-            .strip_prefix('1')
-            .filter(|u| !u.starts_with(|c: char| c.is_ascii_digit() || c == ','))
-            .unwrap_or(after);
-        after.starts_with(NOTE_SCALES)
-            || scale_number(after)
-            || before.ends_with(NOTE_SCALES)
-            || (marked && !unit.is_empty() && !plain_unit(unit))
+        if after.starts_with(NOTE_SCALES) || before.ends_with(NOTE_SCALES) {
+            return true;
+        }
+        let digits_end = after
+            .find(|c: char| !(c.is_ascii_digit() || c == ','))
+            .unwrap_or(after.len());
+        let (number, unit) = after.split_at(digits_end);
+        let digits: String = number.chars().filter(char::is_ascii_digit).collect();
+        if digits.is_empty() {
+            return marked && !unit.is_empty() && !plain_unit(unit);
+        }
+        // A quantity (`100個`), not a scale.
+        let count = PLAIN_UNITS[1..].iter().any(|u| {
+            unit.get(..u.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(u))
+        });
+        if count {
+            return false;
+        }
+        // `単位：1円` is plain yen; any other number scales (`1,000円`).
+        digits.trim_start_matches('0') != "1" || (marked && !unit.is_empty() && !plain_unit(unit))
     })
 }
 
@@ -1071,16 +1086,6 @@ fn split_unit_note(
     Ok(false)
 }
 
-/// Whether `text` starts with a number other than 1 (`1,000円`, `1000`).
-fn scale_number(text: &str) -> bool {
-    let digits: String = text
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == ',')
-        .filter(char::is_ascii_digit)
-        .collect();
-    !digits.is_empty() && digits.trim_start_matches('0') != "1"
-}
-
 /// Whether `text` is a plain unit ([`PLAIN_UNITS`]) up to the end of the
 /// note.
 fn plain_unit(text: &str) -> bool {
@@ -1090,7 +1095,7 @@ fn plain_unit(text: &str) -> bool {
             && text[unit.len()..]
                 .chars()
                 .next()
-                .is_none_or(|c| matches!(c, ')' | '、' | ',' | '/'))
+                .is_none_or(|c| matches!(c, ')' | '、' | '。' | ',' | '/'))
     })
 }
 
@@ -2213,6 +2218,12 @@ mod tests {
             "単位：kg",
             "（単位：式）",
             "単位：円、個",
+            "単位：円。",
+            // Quantities, not scales.
+            "発注単位：100個",
+            "ロット単位：500個",
+            "最小単位：10枚",
+            "単位：12本",
         ] {
             assert!(!unit_note(text), "{text}");
         }
