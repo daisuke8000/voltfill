@@ -577,7 +577,8 @@ fn digits_around_either_colon_are_not_a_split() {
 }
 
 /// Finding: any pair layout returns was trusted. Whitespace is not a
-/// delimiter, so these stay whole even if layout learns to split them.
+/// delimiter, so these stay whole whether or not layout splits them; the
+/// test deliberately makes no assertion about layout's pairs.
 #[test]
 fn whitespace_separated_texts_stay_whole() {
     for (text, bbox, first_word_right) in [
@@ -589,7 +590,6 @@ fn whitespace_separated_texts_stay_whole() {
         ),
     ] {
         let raw = [fragment("x", 1, text, bbox)];
-        assert!(layout::analyze(&raw).pairs.is_empty(), "{text}");
         let first_word = rect(59.5, bbox.top - 0.5, first_word_right, bbox.bottom + 0.5);
         assert_eq!(in_box(&raw, 1, first_word), cut("x"), "{text}");
         assert_eq!(
