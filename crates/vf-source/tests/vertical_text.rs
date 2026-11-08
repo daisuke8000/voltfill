@@ -2,7 +2,7 @@
 //! PDFs are built with lopdf; Type3 glyphs need no font program.
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, StringFormat, dictionary};
-use vf_source::layout::analyze;
+use vf_source::layout::{Layout, LayoutLimits, analyze};
 use vf_source::{DocumentSnapshot, PdfLimits, Quality, SourceFragment, inspect};
 
 /// One text show: font resource tag, text matrix and the shown string.
@@ -225,9 +225,14 @@ fn has_reason(snapshot: &DocumentSnapshot, page: u32, code: &str) -> bool {
     reasons(snapshot, page).iter().any(|r| r == code)
 }
 
+/// Layout with the default limits, which these small pages never reach.
+fn layout(fragments: &[SourceFragment]) -> Layout {
+    analyze(fragments, &LayoutLimits::default()).expect("layout within the default limits")
+}
+
 /// Layout pairs whose label or value spans name one of `ids`.
 fn pairs_touching(snapshot: &DocumentSnapshot, ids: &[&str]) -> usize {
-    analyze(&snapshot.fragments)
+    layout(&snapshot.fragments)
         .pairs
         .iter()
         .filter(|pair| {
@@ -382,7 +387,7 @@ fn horizontal_pages_keep_their_snapshot() {
             page.page
         );
     }
-    assert!(!analyze(&snapshot.fragments).pairs.is_empty());
+    assert!(!layout(&snapshot.fragments).pairs.is_empty());
 }
 
 /// Upright body text plus runs turned a quarter and a half turn, and a page
@@ -571,7 +576,7 @@ fn a_rebased_frame_matching_page_rotate_reads_like_an_upright_page() {
         }
     }
     let pairs = |s: &DocumentSnapshot| {
-        analyze(&s.fragments)
+        layout(&s.fragments)
             .pairs
             .iter()
             .map(|p| (p.label.start, p.label.end, p.value.len(), p.placement))
@@ -620,7 +625,7 @@ fn assert_page_unknown(snapshot: &DocumentSnapshot, code: &str, case: &str) {
     );
     assert_ne!(snapshot.pages[0].quality, Quality::Usable, "{case}");
     assert!(!snapshot.pages[0].text_available, "{case}");
-    assert!(analyze(&snapshot.fragments).pairs.is_empty(), "{case}");
+    assert!(layout(&snapshot.fragments).pairs.is_empty(), "{case}");
 }
 
 #[test]
@@ -786,5 +791,5 @@ fn upright_content_on_a_rotated_page_is_unknown() {
     assert!(!has_reason(&snapshot, 1, "page_text_rotated"));
     assert_eq!(snapshot.pages[0].quality, Quality::Unknown);
     assert!(!snapshot.pages[0].text_available);
-    assert!(analyze(&snapshot.fragments).pairs.is_empty());
+    assert!(layout(&snapshot.fragments).pairs.is_empty());
 }
