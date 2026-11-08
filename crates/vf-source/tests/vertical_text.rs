@@ -749,3 +749,42 @@ fn self_referencing_form_resources_finish_the_scan() {
             .all(|f| f.quality == Quality::Usable)
     );
 }
+
+#[test]
+fn upright_content_on_a_rotated_page_is_unknown() {
+    // Upright on the sheet, so pdf-inspector does not re-base the page; the
+    // renderer turns it by /Rotate 90 and every run reads top to bottom.
+    let bytes = document(|doc| {
+        let f1 = type3_font(doc);
+        let mut page = Page::new(
+            dictionary! {"F1" => f1},
+            &[
+                upright(80.0, 700.0, "Invoice No: A-1"),
+                upright(80.0, 660.0, "Total"),
+                upright(200.0, 660.0, "1000"),
+            ],
+        );
+        page.rotate = Some(90);
+        vec![page]
+    });
+    let (_, turns) = pdf_inspector::extract_text_with_positions_and_rotations_mem_in_frame(
+        &bytes,
+        None,
+        pdf_inspector::PositionFrame::Display,
+    )
+    .expect("synthetic PDF must extract");
+    assert!(turns.is_empty(), "{turns:?}");
+    let snapshot = snapshot(&bytes);
+    let page = on_page(&snapshot, 1);
+    assert_eq!(page.len(), 3, "{page:?}");
+    assert!(
+        page.iter().all(|f| f.quality == Quality::Unknown),
+        "{page:?}"
+    );
+    assert!(has_reason(&snapshot, 1, "rotated_text_present"));
+    assert!(has_reason(&snapshot, 1, "no_usable_source_runs"));
+    assert!(!has_reason(&snapshot, 1, "page_text_rotated"));
+    assert_eq!(snapshot.pages[0].quality, Quality::Unknown);
+    assert!(!snapshot.pages[0].text_available);
+    assert!(analyze(&snapshot.fragments).pairs.is_empty());
+}

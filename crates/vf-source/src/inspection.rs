@@ -2,8 +2,8 @@
 //!
 //! # Vertical and rotated text
 //!
-//! Layout reads only horizontal text, so text that a renderer does not draw
-//! left to right never becomes `Usable`:
+//! Layout reads only horizontal text. Rotated runs, re-based pages and
+//! vertical writing mode fonts are detected and kept out of `Usable`:
 //!
 //! - A run whose rendered baseline (pdf-inspector's `TextItem::rotation` in
 //!   the Display frame, where any re-basing of the page frame is already
@@ -29,9 +29,12 @@
 //!   page's and a Form XObject's resources, and misplaced vertical glyphs
 //!   can be merged into neighbouring runs. A scan stopped by its bounds also
 //!   leaves the page `Unknown` (`writing_mode_scan_incomplete`) and never
-//!   fails the inspection.
+//!   fails the inspection. A vertical-mode font listed in the resources
+//!   counts as used.
 //!
-//! Vertical layout itself is not supported yet.
+//! Not detected: vertical text set glyph by glyph in an upright horizontal
+//! font, which carries no rotation and no vertical CMap. Vertical layout
+//! itself is not supported yet.
 use crate::metadata;
 use crate::source::{PageDiagnostic, Quality, SourceFragment};
 
@@ -118,15 +121,17 @@ pub struct DocumentSnapshot {
 /// Limits bound application work and input; they do not sandbox the parser or
 /// bound all allocations inside upstream. No OCR or renderer is invoked.
 ///
-/// Vertical and rotated text never becomes `Usable`: a run whose rendered
-/// baseline is more than 1° from horizontal is `Unknown`
-/// (`rotated_text_present`); an oblique run (`oblique_text_present`), a page
-/// re-based for mostly vertical text unless the turn equals its `/Rotate`
-/// (`page_text_rotated`), a page whose resources hold a vertical writing
-/// mode font (`vertical_writing_mode_unsupported`) and a page whose font
-/// scan hit its bounds (`writing_mode_scan_incomplete`) are `Unknown` as a
-/// whole. The font scan reuses the metadata load and is bounded per page and
-/// per document. Vertical layout itself is not supported yet.
+/// Rotated runs, re-based pages and vertical writing mode fonts are kept out
+/// of `Usable`: a run whose rendered baseline is more than 1° from
+/// horizontal is `Unknown` (`rotated_text_present`); an oblique run
+/// (`oblique_text_present`), a page re-based for mostly vertical text unless
+/// the turn equals its `/Rotate` (`page_text_rotated`), a page whose
+/// resources hold a vertical writing mode font
+/// (`vertical_writing_mode_unsupported`) and a page whose font scan hit its
+/// bounds (`writing_mode_scan_incomplete`) are `Unknown` as a whole. The font
+/// scan reuses the metadata load and is bounded per page and per document.
+/// Vertical text set glyph by glyph in a horizontal font is not detected;
+/// vertical layout itself is not supported yet.
 pub fn inspect(bytes: &[u8], limits: PdfLimits) -> Result<DocumentSnapshot, PdfError> {
     use sha2::{Digest, Sha256};
 
