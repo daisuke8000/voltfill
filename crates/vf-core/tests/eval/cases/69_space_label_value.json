@@ -1,0 +1,24 @@
+{
+  "description": "区切り記号のない「ラベル 値」（1つのラン、全角空白、0.5em以下の間隔で抽出時に空白付きで結合される2つのラン）。フォームのラベルと完全に一致する先頭の語と空白の後ろを値とする候補（no_delimiter）にとどめ、オフラインでは埋めない",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "発行日 2026年11月8日"},
+    {"x": 60, "y": 124, "text": "合計 ¥12,100"},
+    {"x": 60, "y": 148, "text": "請求番号"},
+    {"x": 104, "y": 148, "text": "INV-0012"},
+    {"x": 60, "y": 172, "text": "納品日　2026年11月10日"}
+  ],
+  "fragments": ["発行日 2026年11月8日", "合計 ¥12,100", "請求番号 INV-0012", "納品日　2026年11月10日"],
+  "form": {"fields": [
+    {"id": "issued", "label": "発行日", "type": "date"},
+    {"id": "total", "label": "合計", "type": "amount"},
+    {"id": "invoice_no", "label": "請求番号"},
+    {"id": "delivered", "label": "納品日", "type": "date"}
+  ]},
+  "expect": {
+    "issued": {"abstain": "ambiguous", "hold": "no_delimiter", "candidate": "2026年11月8日"},
+    "total": {"abstain": "ambiguous", "hold": "no_delimiter", "candidate": "¥12,100"},
+    "invoice_no": {"abstain": "ambiguous", "hold": "no_delimiter", "candidate": "INV-0012"},
+    "delivered": {"abstain": "ambiguous", "hold": "no_delimiter", "candidate": "2026年11月10日"}
+  }
+}

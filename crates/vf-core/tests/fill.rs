@@ -115,8 +115,19 @@ fn turned_words_drawn_one_by_one_never_fill_a_piece_of_their_phrase() {
     let number = &upright.fields["number"];
     assert_eq!(number.status, FillStatus::Filled, "{number:?}");
     assert_eq!(number.raw.as_deref(), Some("INV-001"));
+    // The merged upright runs `Invoice No A-1` and `Name Alice Smith` start
+    // with a form label and a space: candidates held for the missing
+    // delimiter, never filled.
     for id in ["invoice", "name"] {
-        assert_eq!(upright.fields[id].status, FillStatus::NotFound, "{id}");
+        let field = &upright.fields[id];
+        assert_eq!(field.status, FillStatus::Ambiguous, "{id}: {field:?}");
+        assert!(
+            field
+                .candidates
+                .iter()
+                .all(|c| c.holds == [fill::Hold::NoDelimiter]),
+            "{id}: {field:?}"
+        );
     }
     let turned = [
         ("90°", [0.0, 1.0, -1.0, 0.0], (440.0, 150.0), (40.0, 0.0)),

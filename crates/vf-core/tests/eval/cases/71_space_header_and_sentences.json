@@ -1,0 +1,29 @@
+{
+  "description": "1つのランの表見出し（品名 数量 単価 金額）と、ラベルの語で始まる文。見出しは値の先頭の語もフォームのラベルなので分けない。日付・金額の後ろに文が続く値は型の書式に合わないため候補にしない。文字列項目の文は候補（no_delimiter）にとどまり、埋めない",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "品名 数量 単価 金額"},
+    {"x": 60, "y": 118, "text": "USBケーブル 2 ¥1,200 ¥2,400"},
+    {"x": 60, "y": 148, "text": "合計 金額は別紙のとおりです"},
+    {"x": 60, "y": 172, "text": "発行日 2026年11月8日以前の請求書は無効です"},
+    {"x": 60, "y": 196, "text": "氏名 は楷書で記入してください"}
+  ],
+  "form": {"fields": [
+    {"id": "item", "label": "品名"},
+    {"id": "quantity", "label": "数量", "type": "number"},
+    {"id": "unit_price", "label": "単価", "type": "amount"},
+    {"id": "amount", "label": "金額", "type": "amount"},
+    {"id": "total", "label": "合計", "type": "amount"},
+    {"id": "issued", "label": "発行日", "type": "date"},
+    {"id": "name", "label": "氏名"}
+  ]},
+  "expect": {
+    "item": {"abstain": "not_found"},
+    "quantity": {"abstain": "not_found"},
+    "unit_price": {"abstain": "not_found"},
+    "amount": {"abstain": "not_found"},
+    "total": {"abstain": "not_found"},
+    "issued": {"abstain": "not_found"},
+    "name": {"abstain": "ambiguous", "hold": "no_delimiter", "candidate": "は楷書で記入してください"}
+  }
+}
