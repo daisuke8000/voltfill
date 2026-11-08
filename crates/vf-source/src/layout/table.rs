@@ -4,8 +4,8 @@
 //! labels); every fragment of that line is a column. [`read_table`] reads
 //! the lines below it as rows of cells aligned to those columns and reports
 //! why the rows ended ([`TableEnd`]). It never decides whether a table may
-//! be used: that is the caller's policy, and so is the vocabulary of totals
-//! labels ([`Totals`]).
+//! be used: that is the caller's policy, and so are the vocabulary of totals
+//! labels ([`Totals`]) and the role of each header column ([`ColumnRole`]).
 //!
 //! Rules ("a wrong value is worse than an empty one"):
 //! - A fragment is in a column when its left edges, right edges or centres
@@ -24,7 +24,19 @@
 //!   precedes its amounts, so fragments left of it are not totals; with two
 //!   or more of them in columns (an item row with a totals block beside it,
 //!   `ぶどう 1 ¥900 … 合計 ¥1,700`) the line is irregular and may be an item
-//!   row. A note in the first column beside `小計` stays a totals line.
+//!   row. A totals line is also irregular when the line as a whole reads as
+//!   an item row: two or more of its fragments are item cells, one of them
+//!   in a [`ColumnRole::Key`] column. An item cell is a plain fragment that
+//!   is not a totals label in a key or [`ColumnRole::Item`] column, or a
+//!   totals label in an item or [`ColumnRole::Amount`] column and in no key
+//!   column (it takes an item's place); a fragment counts once. Amounts in
+//!   amount columns, which a totals line carries, and totals labels in a key
+//!   column or outside every column, which name the line, are not item
+//!   cells. So `合計` in the left margin before `ぶどう 1 ¥900` and
+//!   `ぶどう 小計 ¥900` with `小計` in the `数量` column are irregular, while a
+//!   note in the first column beside `小計` in a column the caller does not
+//!   read ([`ColumnRole::Other`]) and `合計 5 ¥800` with `合計` in the first
+//!   column stay totals lines.
 //! - Otherwise a line is a row when each of its fragments is plain (no
 //!   `label：` delimiter) and in exactly one column, no column has two
 //!   fragments, and at least two columns have a cell. Blank cells are `None`.
@@ -75,7 +87,9 @@
 //! of a line fragment's text (the caller's totals check and the delimiter
 //! check) and one per byte of a header fragment's, one per column compared
 //! with a fragment, one per row for the pitch, and the cost of
-//! [`super::fragment_span`] per cell.
+//! [`super::fragment_span`] per cell. A totals line not held by the
+//! fragments left of its first label is read once more for item cells: one
+//! unit per fragment, one per byte of its text and one per column compared.
 use super::{Kind, Line, Span, classify, fragment_span};
 use crate::budget::{Budget, BudgetError};
 use crate::geometry::Rect;
@@ -95,6 +109,22 @@ pub enum Totals {
     Subtotal,
     /// A closing total or end mark (`合計`, `以下余白`): the items end.
     Total,
+}
+
+/// How the caller reads a header column, to tell an item row from a totals
+/// line (see the module documentation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnRole {
+    /// Names an item: the header's first column, or a text column the caller
+    /// reads (`品名`).
+    Key,
+    /// Another column of an item row that a totals line does not carry
+    /// (`数量`, `日付`).
+    Item,
+    /// Amounts, which a totals line carries as well (`金額`).
+    Amount,
+    /// A column the caller does not read.
+    Other,
 }
 
 /// Why the rows of a table ended.
@@ -150,9 +180,11 @@ enum Read {
 }
 
 /// Read the rows under line `header` of `lines` (as built by
-/// [`super::analyze`] from `fragments`). `totals` tells whether a fragment
-/// is a totals label (`小計`, `合計`, …) and of which kind; a line with one
-/// ends the rows.
+/// [`super::analyze`] from `fragments`). `roles` gives the role of each
+/// header fragment's column, left to right (missing entries are
+/// [`ColumnRole::Other`]). `totals` tells whether a fragment is a totals
+/// label (`小計`, `合計`, …) and of which kind; a line with one ends the
+/// rows unless it also reads as an item row.
 ///
 /// # Errors
 /// As [`Budget::spend`].
@@ -163,6 +195,7 @@ pub fn read_table(
     fragments: &[SourceFragment],
     lines: &[Line],
     header: usize,
+    roles: &[ColumnRole],
     budget: &mut Budget,
     mut totals: impl FnMut(&SourceFragment) -> Option<Totals>,
 ) -> Result<Table, BudgetError> {
@@ -189,6 +222,7 @@ pub fn read_table(
     let reader = Reader {
         fragments,
         columns: &columns,
+        roles,
         page: head.page,
         // Rows are open: the region reaches the page bottom.
         region: Rect {
@@ -284,6 +318,8 @@ struct Reader<'a> {
     fragments: &'a [SourceFragment],
     /// Header fragment boxes, left to right.
     columns: &'a [Rect],
+    /// The caller's role of each column (missing: [`ColumnRole::Other`]).
+    roles: &'a [ColumnRole],
     page: u32,
     /// The table's region for turned lines: the columns' left to right, the
     /// header's top to the page bottom (rows open) or to the last row's
@@ -336,27 +372,74 @@ impl Reader<'_> {
         {
             return Ok(Read::Irregular { row_like: true });
         }
-        // The strongest totals label, and the position of the first one.
+        // The strongest totals label, and which fragments are labels.
         let mut kind = None;
-        let mut first = None;
-        for (n, &f) in line.fragments.iter().enumerate() {
+        let mut labels = Vec::with_capacity(line.fragments.len());
+        for &f in &line.fragments {
             let fragment = &self.fragments[f];
             budget.spend_bytes(&fragment.raw_text)?;
-            if let Some(found) = totals(fragment) {
-                kind = kind.max(Some(found));
-                first.get_or_insert(n);
-            }
+            let found = totals(fragment);
+            kind = kind.max(found);
+            labels.push(found.is_some());
         }
-        let (Some(kind), Some(first)) = (kind, first) else {
+        let (Some(kind), Some(first)) = (kind, labels.iter().position(|&l| l)) else {
             return self.cells(&line.fragments, budget);
         };
         // A totals label precedes its amounts: the fragments left of the
         // first label are not totals. When they may be an item row (a
         // totals block beside the last row), the line is irregular.
-        Ok(match self.cells(&line.fragments[..first], budget)? {
-            Read::Row(_) | Read::Irregular { row_like: true } => Read::Irregular { row_like: true },
-            _ => Read::Totals(kind),
-        })
+        if matches!(
+            self.cells(&line.fragments[..first], budget)?,
+            Read::Row(_) | Read::Irregular { row_like: true }
+        ) || self.item_like(&line.fragments, &labels, budget)?
+        {
+            return Ok(Read::Irregular { row_like: true });
+        }
+        Ok(Read::Totals(kind))
+    }
+
+    /// Whether a totals line (fragments `line`, left to right; `labels`
+    /// marks its totals labels) reads as an item row as a whole: two or
+    /// more item cells, one of them in a key column (see the module
+    /// documentation).
+    fn item_like(
+        &self,
+        line: &[usize],
+        labels: &[bool],
+        budget: &mut Budget,
+    ) -> Result<bool, BudgetError> {
+        budget.spend(line.len() as u64)?;
+        let mut cells = 0usize;
+        let mut key = false;
+        for (&f, &label) in line.iter().zip(labels) {
+            let fragment = &self.fragments[f];
+            budget.spend_bytes(&fragment.raw_text)?;
+            if !label && classify(fragment) != Kind::Plain {
+                continue;
+            }
+            budget.spend(self.columns.len() as u64)?;
+            let (mut in_key, mut in_item, mut in_amount) = (false, false, false);
+            for (n, column) in self.columns.iter().enumerate() {
+                if in_column(*column, fragment.bbox) {
+                    match self.roles.get(n).copied().unwrap_or(ColumnRole::Other) {
+                        ColumnRole::Key => in_key = true,
+                        ColumnRole::Item => in_item = true,
+                        ColumnRole::Amount => in_amount = true,
+                        ColumnRole::Other => {}
+                    }
+                }
+            }
+            let cell = if label {
+                !in_key && (in_item || in_amount)
+            } else {
+                in_key || in_item
+            };
+            if cell {
+                cells += 1;
+                key |= in_key;
+            }
+        }
+        Ok(cells >= 2 && key)
     }
 
     /// How fragments `line` (indexes, left to right) read as cells, with no
@@ -529,11 +612,23 @@ mod tests {
         }
     }
 
+    /// The roles of [`table`]'s columns (`品名 / 数量 / 金額`); further
+    /// columns are not read.
+    const ROLES: [ColumnRole; 3] = [ColumnRole::Key, ColumnRole::Item, ColumnRole::Amount];
+
     /// Read the table under the first line; rows as text (`""` for blank).
     fn read(fragments: &[SourceFragment]) -> (Vec<Vec<String>>, TableEnd) {
+        read_roles(fragments, &ROLES)
+    }
+
+    /// [`read`] with the columns' `roles`.
+    fn read_roles(
+        fragments: &[SourceFragment],
+        roles: &[ColumnRole],
+    ) -> (Vec<Vec<String>>, TableEnd) {
         let lines = analyze(fragments, &LayoutLimits::default()).unwrap().lines;
         let mut budget = Budget::new(u64::MAX, None);
-        let table = read_table(fragments, &lines, 0, &mut budget, totals).unwrap();
+        let table = read_table(fragments, &lines, 0, roles, &mut budget, totals).unwrap();
         let rows = table
             .rows
             .iter()
@@ -571,7 +666,7 @@ mod tests {
         let fragments = table(&rows);
         let lines = analyze(&fragments, &LayoutLimits::default()).unwrap().lines;
         let mut budget = Budget::new(u64::MAX, None);
-        let read = read_table(&fragments, &lines, 0, &mut budget, totals).unwrap();
+        let read = read_table(&fragments, &lines, 0, &ROLES, &mut budget, totals).unwrap();
         let cell = read.rows[0][0].as_ref().unwrap();
         assert_eq!(cell.precision, super::super::Precision::Run);
         assert_eq!(cell.bbox, fragments[3].bbox);
@@ -593,14 +688,21 @@ mod tests {
         ]);
         assert_eq!(read(&fragments), (texts(&rows), TableEnd::Total));
         // Any fragment of a line may be the totals label: a note in the
-        // first column beside 小計 does not make the line a row.
+        // first column beside 小計 in a column the caller does not read does
+        // not make the line a row.
         let mut fragments = table(&rows);
         fragments.extend([
             at("n", "※は軽減税率", 60.0, 154.0),
             at("t", "小計", 300.0, 154.0),
             at("tv", "¥800", 440.0, 154.0),
         ]);
-        assert_eq!(read(&fragments), (texts(&rows), TableEnd::Subtotal));
+        let other = [ColumnRole::Key, ColumnRole::Other, ColumnRole::Amount];
+        assert_eq!(
+            read_roles(&fragments, &other),
+            (texts(&rows), TableEnd::Subtotal)
+        );
+        // In the `数量` column 小計 takes an item's place (`ぶどう 小計 ¥900`).
+        assert_eq!(read(&fragments), (texts(&rows), TableEnd::Irregular));
         // `label：value` within the row pitch is not a row.
         let mut fragments = table(&rows);
         fragments.push(at("n", "備考：午前着", 60.0, 154.0));
@@ -810,14 +912,22 @@ mod tests {
             at("gv", "¥800", 440.0, 154.0),
         ]);
         assert_eq!(read(&fragments), (texts(&rows), TableEnd::Total));
-        // One fragment left of the label (a note) is not an item row.
+        // One fragment left of the label (a note) is not an item row while
+        // the label is in a column the caller does not read.
         let mut fragments = table(&rows);
         fragments.extend([
             at("n", "※軽減税率", 60.0, 154.0),
             at("g", "合計", 300.0, 154.0),
             at("gv", "¥800", 440.0, 154.0),
         ]);
-        assert_eq!(read(&fragments), (texts(&rows), TableEnd::Total));
+        let other = [ColumnRole::Key, ColumnRole::Other, ColumnRole::Amount];
+        assert_eq!(
+            read_roles(&fragments, &other),
+            (texts(&rows), TableEnd::Total)
+        );
+        // In the `数量` column the label takes an item's place: the line may
+        // be an item row (`ぶどう 小計 ¥900`, see below).
+        assert_eq!(read(&fragments), (texts(&rows), TableEnd::Irregular));
         // Two fragments in columns left of the label may be an item row,
         // even when they are a count (`点数 5 合計 ¥800` is held).
         let mut fragments = vec![
@@ -833,11 +943,89 @@ mod tests {
             at("p3", "合計", 380.0, 136.0),
             at("p4", "¥300", 440.0, 136.0),
         ];
-        let (read_rows, end) = read(&fragments);
+        let roles = [
+            ColumnRole::Key,
+            ColumnRole::Item,
+            ColumnRole::Other,
+            ColumnRole::Amount,
+        ];
+        let (read_rows, end) = read_roles(&fragments, &roles);
         assert_eq!((read_rows.len(), end), (1, TableEnd::Irregular));
         // Without the count the line is a closing total.
         fragments.remove(8);
-        assert_eq!(read(&fragments).1, TableEnd::Total);
+        assert_eq!(read_roles(&fragments, &roles).1, TableEnd::Total);
+    }
+
+    #[test]
+    fn a_totals_line_that_reads_as_an_item_row_is_irregular() {
+        let rows = [["りんご", "3", "¥300"], ["みかん", "2", "¥500"]];
+        let closed = (texts(&rows), TableEnd::Total);
+        let held = (texts(&rows), TableEnd::Irregular);
+        // `合計` in the left margin, outside every column, before an item row.
+        let mut fragments = table(&rows);
+        fragments.extend([
+            at("g", "合計", 10.0, 154.0),
+            at("m1", "ぶどう", 60.0, 154.0),
+            at("m2", "1", 300.0, 154.0),
+            at("m3", "¥900", 440.0, 154.0),
+        ]);
+        assert_eq!(read(&fragments), held);
+        // Without the quantity only the name is an item cell (a known limit:
+        // `合計 ぶどう ¥900` cannot be told from a note beside a total).
+        fragments.retain(|f| f.id != "m2");
+        assert_eq!(read(&fragments), closed);
+        // `小計` in the `数量` column of an item row.
+        let mut fragments = table(&rows);
+        fragments.extend([
+            at("m1", "ぶどう", 60.0, 154.0),
+            at("g", "小計", 300.0, 154.0),
+            at("m3", "¥900", 440.0, 154.0),
+        ]);
+        assert_eq!(read(&fragments), (texts(&rows), TableEnd::Irregular));
+        // Below a stop the same line holds the table.
+        let mut fragments = table(&rows);
+        fragments.extend([
+            at("t", "小計", 300.0, 154.0),
+            at("tv", "¥800", 440.0, 154.0),
+            at("m1", "ぶどう", 60.0, 172.0),
+            at("g", "小計", 300.0, 172.0),
+            at("m3", "¥900", 440.0, 172.0),
+        ]);
+        assert_eq!(read(&fragments), held);
+        // A label in the first column names the line: a total with a count.
+        let mut fragments = table(&rows);
+        fragments.extend([
+            at("g", "合計", 60.0, 154.0),
+            at("gq", "5", 300.0, 154.0),
+            at("gv", "¥800", 440.0, 154.0),
+        ]);
+        assert_eq!(read(&fragments), closed);
+        // So does one outside every column, with an amount only.
+        let mut fragments = table(&rows);
+        fragments.extend([at("g", "合計", 10.0, 154.0), at("gv", "¥800", 440.0, 154.0)]);
+        assert_eq!(read(&fragments), closed);
+        // Amounts in amount columns are not item cells: a note beside a
+        // label in an unread column with its amount closes the rows.
+        let roles = [ColumnRole::Key, ColumnRole::Other, ColumnRole::Amount];
+        let mut fragments = table(&rows);
+        fragments.extend([
+            at("n", "※軽減税率", 60.0, 154.0),
+            at("g", "小計", 300.0, 154.0),
+            at("gv", "¥800", 440.0, 154.0),
+        ]);
+        assert_eq!(
+            read_roles(&fragments, &roles),
+            (texts(&rows), TableEnd::Subtotal)
+        );
+        // Without roles no column names an item: the line closes the rows.
+        let mut fragments = table(&rows);
+        fragments.extend([
+            at("g", "合計", 10.0, 154.0),
+            at("m1", "ぶどう", 60.0, 154.0),
+            at("m2", "1", 300.0, 154.0),
+            at("m3", "¥900", 440.0, 154.0),
+        ]);
+        assert_eq!(read_roles(&fragments, &[]), closed);
     }
 
     #[test]
@@ -1000,7 +1188,7 @@ mod tests {
         let lines = analyze(&upright, &LayoutLimits::default()).unwrap().lines;
         let read_with = |fragments: &[SourceFragment]| {
             let mut budget = Budget::new(u64::MAX, None);
-            read_table(fragments, &lines, 0, &mut budget, totals).unwrap()
+            read_table(fragments, &lines, 0, &ROLES, &mut budget, totals).unwrap()
         };
         assert_eq!(read_with(&upright).rows.len(), 2);
         // Lines are read along x and y: a turned header or a turned
@@ -1099,17 +1287,17 @@ mod tests {
         let fragments = table(&[["りんご", "3", "¥300"], ["みかん", "2", "¥500"]]);
         let lines = analyze(&fragments, &LayoutLimits::default()).unwrap().lines;
         let mut budget = Budget::new(u64::MAX, None);
-        read_table(&fragments, &lines, 0, &mut budget, totals).unwrap();
+        read_table(&fragments, &lines, 0, &ROLES, &mut budget, totals).unwrap();
         let used = u64::MAX - budget.remaining();
         assert!(used > 0);
         let mut short = Budget::new(used - 1, None);
         assert_eq!(
-            read_table(&fragments, &lines, 0, &mut short, totals),
+            read_table(&fragments, &lines, 0, &ROLES, &mut short, totals),
             Err(BudgetError::WorkExceeded)
         );
         let mut late = Budget::new(u64::MAX, Some(Instant::now()));
         assert_eq!(
-            read_table(&fragments, &lines, 0, &mut late, totals),
+            read_table(&fragments, &lines, 0, &ROLES, &mut late, totals),
             Err(BudgetError::DeadlineExceeded)
         );
     }

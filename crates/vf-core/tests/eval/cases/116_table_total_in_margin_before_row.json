@@ -1,0 +1,29 @@
+{
+  "description": "最後の明細行（ぶどう 1 ¥900）の左の余白（どの列にもそろわない位置）に合計がある。合計系のラベルより右の片が1列目と数量の列にそろい明細行として読めるため、合計の行として表を閉じない（2行だけを確定しない）",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "品名"},
+    {"x": 300, "y": 100, "text": "数量"},
+    {"right": 560, "y": 100, "text": "金額"},
+    {"x": 60, "y": 118, "text": "りんご"},
+    {"x": 300, "y": 118, "text": "3"},
+    {"right": 560, "y": 118, "text": "¥300"},
+    {"x": 60, "y": 136, "text": "みかん"},
+    {"x": 300, "y": 136, "text": "2"},
+    {"right": 560, "y": 136, "text": "¥500"},
+    {"x": 10, "y": 154, "text": "合計"},
+    {"x": 60, "y": 154, "text": "ぶどう"},
+    {"x": 300, "y": 154, "text": "1"},
+    {"right": 560, "y": 154, "text": "¥900"}
+  ],
+  "form": {"fields": [
+    {"id": "items", "label": "明細", "type": "table", "columns": [
+      {"id": "name", "label": "品名"},
+      {"id": "qty", "label": "数量", "type": "number"},
+      {"id": "amount", "label": "金額", "type": "amount"}
+    ]}
+  ]},
+  "expect": {
+    "items": {"abstain": "ambiguous", "hold": "irregular_table"}
+  }
+}
