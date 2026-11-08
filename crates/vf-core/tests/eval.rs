@@ -79,6 +79,15 @@ struct Expect {
     /// The field must stay empty.
     #[serde(default)]
     abstain: Option<Abstain>,
+    /// With `abstain`: the `hold` reason of the first (best) candidate, or
+    /// `"none"` when that candidate has none. Unset, the reason is not checked.
+    #[serde(default)]
+    hold: Option<String>,
+    /// With `abstain`: the exact `raw` text of the first (best) candidate,
+    /// for example the true value of a field that may not be committed
+    /// offline. Unset, the candidates are not checked.
+    #[serde(default)]
+    candidate: Option<String>,
     /// Unsupported cases only: the current code fills this value correctly,
     /// so a regression to empty is reported (as a note, not a failure).
     #[serde(default)]
@@ -165,6 +174,8 @@ struct Check<'a> {
     want: Want,
     known: Option<(Output, &'a str)>,
     currently_correct: bool,
+    hold: Option<&'a str>,
+    candidate: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -292,6 +303,10 @@ fn resolve<'a>(at: &str, case: &'a Case, field: &FormField) -> Check<'a> {
         }
         _ => panic!("{at}: set either raw (with value and source) or abstain"),
     };
+    assert!(
+        expect.hold.is_none() && expect.candidate.is_none() || expect.abstain.is_some(),
+        "{at}: hold and candidate are checked for abstentions only"
+    );
     let known = expect
         .known_wrong
         .as_ref()
@@ -314,6 +329,8 @@ fn resolve<'a>(at: &str, case: &'a Case, field: &FormField) -> Check<'a> {
         want,
         known,
         currently_correct: expect.currently_correct,
+        hold: expect.hold.as_deref(),
+        candidate: expect.candidate.as_deref(),
     }
 }
 
@@ -523,6 +540,17 @@ fn check_evidence(
             ));
         }
     }
+}
+
+/// The `hold` reason of the field's first candidate (`"none"` without one;
+/// `None` without candidates).
+fn first_hold(got: &FieldFill) -> Option<String> {
+    got.candidates.first().map(|c| {
+        serde_json::to_value(c.hold)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "none".into())
+    })
 }
 
 /// Unfilled fields carry no value; only `invalid` may keep the raw text, and
@@ -735,6 +763,26 @@ fn evaluation_set_has_no_unexpected_wrong_fills() {
 
             let now = record(got);
             let want = wanted(&check.want);
+            if let Some(hold) = check.hold
+                && got.status != FillStatus::Filled
+                && first_hold(got).as_deref() != Some(hold)
+            {
+                all_pass = false;
+                problems.push(format!(
+                    "{at}: first candidate hold {:?}, expected {hold:?}",
+                    first_hold(got)
+                ));
+            }
+            let first = got.candidates.first().map(|c| c.raw.as_str());
+            if let Some(candidate) = check.candidate
+                && got.status != FillStatus::Filled
+                && first != Some(candidate)
+            {
+                all_pass = false;
+                problems.push(format!(
+                    "{at}: first candidate {first:?}, expected {candidate:?}"
+                ));
+            }
             if let Some((recorded, _)) = check.known.as_ref().filter(|_| outcome != Outcome::Known)
             {
                 all_pass = false;

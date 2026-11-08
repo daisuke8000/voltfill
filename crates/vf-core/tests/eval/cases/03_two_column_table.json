@@ -1,5 +1,5 @@
 {
-  "description": "2列のラベル・値の表（行間18pt）。表の全ラベルがフォームにある",
+  "description": "2列のラベル・値の表（行間18pt、区切り記号なし）。表の全ラベルがフォームにある。右隣の値は位置だけの結び付きのため、すべて候補止まりで空欄（ambiguous・geometric_only）。候補の1位は正しい値",
   "support": "supported",
   "runs": [
     {"x": 60, "y": 100, "text": "会社名"},
@@ -21,10 +21,10 @@
     {"id": "email", "label": "メールアドレス", "hints": ["メール"]}
   ]},
   "expect": {
-    "company": {"raw": "株式会社サンプル商事"},
-    "department": {"raw": "経理部"},
-    "person": {"raw": "佐藤 花子"},
-    "phone": {"raw": "03-5555-0100"},
-    "email": {"raw": "keiri@example.com"}
+    "company": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "株式会社サンプル商事"},
+    "department": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "経理部"},
+    "person": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "佐藤 花子"},
+    "phone": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "03-5555-0100"},
+    "email": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "keiri@example.com"}
   }
 }

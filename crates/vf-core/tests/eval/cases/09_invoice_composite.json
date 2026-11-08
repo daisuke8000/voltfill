@@ -1,5 +1,5 @@
 {
-  "description": "実在しない請求書の全体（宛名・発行元・明細表・合計欄・支払情報）。フォームは見出し項目のみ。消費税は文書のラベル「消費税（10%）」の補足がフォームにないため空欄（ambiguous）",
+  "description": "実在しない請求書の全体（宛名・発行元・明細表・合計欄・支払情報）。フォームは見出し項目のみ。「ラベル：値」の項目は埋め、区切り記号のない合計欄の金額は候補止まり（geometric_only）。消費税は文書のラベル「消費税（10%）」の補足がフォームにないため one_sided_qualifier",
   "support": "supported",
   "runs": [
     {"x": 250, "y": 60, "size": 18, "text": "請求書"},
@@ -50,9 +50,9 @@
     "invoice_no": {"raw": "INV-2026-0042"},
     "issued": {"raw": "2026年11月8日", "value": "2026-11-08"},
     "due": {"raw": "2026年12月31日", "value": "2026-12-31"},
-    "total": {"raw": "¥132,000", "value": 132000, "source": ["billed_amount"]},
-    "subtotal": {"raw": "¥120,000", "value": 120000},
-    "tax": {"abstain": "ambiguous"},
+    "total": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "¥132,000"},
+    "subtotal": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "¥120,000"},
+    "tax": {"abstain": "ambiguous", "hold": "one_sided_qualifier"},
     "registration": {"raw": "T1234567890123"},
     "phone": {"raw": "03-1234-5678"},
     "bank": {"raw": "架空銀行 本店営業部 普通 1234567"}

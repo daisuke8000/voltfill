@@ -16,7 +16,7 @@
     {"id": "person", "label": "担当者"}
   ]},
   "expect": {
-    "phone": {"abstain": "ambiguous"},
-    "person": {"abstain": "ambiguous"}
+    "phone": {"abstain": "ambiguous", "hold": "none"},
+    "person": {"abstain": "ambiguous", "hold": "partial_label"}
   }
 }

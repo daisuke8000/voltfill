@@ -1,5 +1,5 @@
 {
-  "description": "「合計」と「合計（税込）」が並ぶ。補足が同じラベルは片側だけに補足のあるラベルより高く評価され、それぞれの項目に一意に決まる",
+  "description": "「合計」と「合計（税込）」が並ぶ（区切り記号なし）。補足が同じラベルは片側だけに補足のあるラベルより高く評価され、それぞれの項目の候補の1位になる。位置だけの結び付きのため候補止まり（geometric_only）",
   "support": "supported",
   "runs": [
     {"x": 330, "y": 100, "text": "合計"},
@@ -12,7 +12,7 @@
     {"id": "gross", "label": "合計（税込）", "type": "amount"}
   ]},
   "expect": {
-    "total": {"raw": "¥10,000", "value": 10000},
-    "gross": {"raw": "¥11,000", "value": 11000}
+    "total": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "¥10,000"},
+    "gross": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "¥11,000"}
   }
 }

@@ -14,7 +14,7 @@
     {"id": "item", "label": "品名"}
   ]},
   "expect": {
-    "amount": {"abstain": "ambiguous"},
-    "item": {"abstain": "ambiguous"}
+    "amount": {"abstain": "ambiguous", "hold": "geometric_only"},
+    "item": {"abstain": "ambiguous", "hold": "geometric_only"}
   }
 }

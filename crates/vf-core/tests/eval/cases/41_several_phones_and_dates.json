@@ -1,0 +1,28 @@
+{
+  "description": "1つの値に電話番号が2つある（ハイフンなし、市外局番の括弧、「、」「／」でつなぐ）、または日付が「、」で2つ並ぶ。文字列項目でも候補止まり（ambiguous・several_values）。電話番号が1つだけの値は埋める",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "電話番号：0312345678 FAX 0312345679"},
+    {"x": 60, "y": 124, "text": "TEL：(03)1234-5678 FAX (03)1234-5679"},
+    {"x": 60, "y": 148, "text": "連絡先：03-1234-5678、03-1234-5679"},
+    {"x": 60, "y": 172, "text": "代表電話：03-1234-5678／03-1234-5679"},
+    {"x": 60, "y": 196, "text": "納品日：2026年11月8日、2026年12月1日"},
+    {"id": "desk", "x": 60, "y": 220, "text": "窓口：(03)1234-5678"}
+  ],
+  "form": {"fields": [
+    {"id": "phone", "label": "電話番号"},
+    {"id": "tel", "label": "TEL"},
+    {"id": "contact", "label": "連絡先"},
+    {"id": "main", "label": "代表電話"},
+    {"id": "delivered", "label": "納品日"},
+    {"id": "desk", "label": "窓口"}
+  ]},
+  "expect": {
+    "phone": {"abstain": "ambiguous", "hold": "several_values", "candidate": "0312345678 FAX 0312345679"},
+    "tel": {"abstain": "ambiguous", "hold": "several_values", "candidate": "(03)1234-5678 FAX (03)1234-5679"},
+    "contact": {"abstain": "ambiguous", "hold": "several_values", "candidate": "03-1234-5678、03-1234-5679"},
+    "main": {"abstain": "ambiguous", "hold": "several_values", "candidate": "03-1234-5678／03-1234-5679"},
+    "delivered": {"abstain": "ambiguous", "hold": "several_values", "candidate": "2026年11月8日、2026年12月1日"},
+    "desk": {"raw": "(03)1234-5678", "source": ["desk"]}
+  }
+}

@@ -1,5 +1,5 @@
 {
-  "description": "実在しない入会申込書の全体（2列の記入欄・複数行の住所・記載のない項目）",
+  "description": "実在しない入会申込書の全体（2列の記入欄・複数行の住所・記載のない項目）。区切り記号のない記入欄の値は位置だけの結び付きのため候補止まり（geometric_only）。候補の1位は正しい値",
   "support": "supported",
   "runs": [
     {"x": 230, "y": 60, "size": 16, "text": "入会申込書"},
@@ -40,15 +40,15 @@
   ]},
   "expect": {
     "applied": {"raw": "2026年11月1日", "value": "2026-11-01"},
-    "kana": {"raw": "ヤマダ タロウ"},
-    "name": {"raw": "山田 太郎"},
-    "birth": {"raw": "1990年4月1日", "value": "1990-04-01"},
-    "zip": {"raw": "〒150-0001"},
-    "address": {"raw": "東京都渋谷区架空1-2-3\nサンプルマンション101号室"},
-    "phone": {"raw": "090-1234-5678"},
-    "email": {"raw": "taro.yamada@example.com"},
-    "employer": {"raw": "株式会社サンプル"},
-    "course": {"raw": "スタンダード（月額¥5,500）"},
+    "kana": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "ヤマダ タロウ"},
+    "name": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "山田 太郎"},
+    "birth": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "1990年4月1日"},
+    "zip": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "〒150-0001"},
+    "address": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "東京都渋谷区架空1-2-3\nサンプルマンション101号室"},
+    "phone": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "090-1234-5678"},
+    "email": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "taro.yamada@example.com"},
+    "employer": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "株式会社サンプル"},
+    "course": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "スタンダード（月額¥5,500）"},
     "emergency": {"abstain": "not_found"}
   }
 }

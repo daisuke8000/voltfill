@@ -1,35 +1,40 @@
 //! Form fill (L3/L4): match layout pairs to form fields by label and type.
 //!
-//! Deterministic and offline. Offline fill is a whitelist: a field is
-//! filled only when the evidence is unambiguous ("a wrong value is worse
-//! than an empty one"); everything else stays empty (`ambiguous`, `invalid`
-//! or `not_found`) with its candidates, for later model assistance. Values
-//! are exact source text; `value` is a deterministic normalization of it.
-//! Results are evaluation-only and carry no calibrated probability.
+//! Deterministic and offline. Offline fill follows a strict commit policy
+//! ("a wrong value is worse than an empty one"): a field is filled only from
+//! candidates that meet every condition below. Every other candidate is
+//! kept, with a [`Hold`] reason, for later model assistance, and the field
+//! stays empty (`ambiguous`, `invalid` or `not_found`). Values are exact
+//! source text; `value` is a deterministic normalization of it. Results are
+//! evaluation-only and carry no calibrated probability.
 //!
-//! A field is filled only when all of these hold:
-//! - Only the best-scoring candidates decide (exact label over partial
-//!   match). Every one of them must agree; a lower-scoring candidate never
-//!   fills the field when a better one is unusable.
-//! - Labels compare by base text and bracketed qualifiers. Equal qualifiers
-//!   match; different ones never do (`金額（税込）` vs `金額（税抜）`). A
-//!   qualifier on one side only (`消費税（10%）` vs `消費税`, `住所（旧）` vs
-//!   `住所`) scores lower by the qualifier's share of the label and is kept
-//!   as a candidate only ([`Hold::OneSidedQualifier`]): if it is among the
-//!   best candidates the field is ambiguous.
-//! - None of the best candidates is a row of a table or list with two or more
-//!   data rows ([`Placement::Column`]). A column whose first row reads as one
-//!   of the form's labels is a label column of a label/value grid and is
-//!   ignored.
-//! - Text values: the value holds no two values of one kind (phone numbers,
-//!   dates, amounts) separated by words, as in `03-1234-5678 FAX
-//!   03-1234-5679` ([`Hold::SeveralValues`]). A multi-line value ends before
-//!   a line that reads as one of the form's labels.
-//! - Typed values: the whole value matches the type's grammar (one date
-//!   with at most its own bracketed weekday, one amount, one number with an
-//!   optional unit); otherwise the field is `invalid`. Amounts and
-//!   numbers whose label states a scale unit (`売上高（千円）`, `金額（万円）`)
-//!   are not normalized.
+//! A candidate may be committed only when all of these hold:
+//! - (a) Label: the document label equals the form label or one of its
+//!   hints after normalization (NFKC, no whitespace, no trailing delimiter,
+//!   lowercase, bracketed text as qualifiers); one leading honorific `ご`,
+//!   `御` or `お` is ignored. A label that only contains the form label or is
+//!   contained in it ([`Hold::PartialLabel`]) or has a bracketed qualifier on
+//!   one side only ([`Hold::OneSidedQualifier`]) is a candidate only;
+//!   different qualifiers on both sides never match.
+//! - (b) Binding: the value is tied to the label by a delimiter
+//!   ([`Binding::Delimiter`]): `label：value` in one fragment, or a `label：`
+//!   fragment followed by the value fragment to its right on the same line.
+//!   Right neighbours without a delimiter, values below labels, table and
+//!   list columns are [`Hold::GeometricOnly`].
+//! - (c) One value: the value is a single line ([`Hold::MultiLine`]
+//!   otherwise; a multi-line value ends before a line that reads as one of
+//!   the form's labels). A text value holds no second value
+//!   ([`Hold::SeveralValues`], see [`several_values`]).
+//! - (d) Type: date, amount and number values match the type's grammar as a
+//!   whole (otherwise the field is `invalid`). Amounts and numbers are not
+//!   normalized when the label states a scale unit (`売上高（千円）`) or
+//!   any text on the page is a unit note (`（単位：千円）`).
+//!
+//! Only the best-scoring candidates decide (an exact label over a partial
+//! one). The field is filled only when every one of them may be committed
+//! and they agree; a held candidate among them leaves the field ambiguous,
+//! and a lower-scoring candidate never fills the field. A [`Hold`] states
+//! the first failed condition, in the order above.
 //!
 //! Work is bounded by [`FillLimits`]: layout hypotheses per document, work
 //! units over layout and matching (see [`DEFAULT_MAX_WORK`]), and an
@@ -44,7 +49,7 @@ use unicode_normalization::UnicodeNormalization;
 use vf_source::SourceFragment;
 use vf_source::budget::{Budget, BudgetError};
 use vf_source::geometry::Rect;
-use vf_source::layout::{self, LayoutError, Pair, Placement, Precision};
+use vf_source::layout::{self, Binding, LayoutError, Pair, Placement, Precision};
 
 pub const MAX_FORM_BYTES: usize = 1024 * 1024;
 pub const MAX_FIELDS: usize = 512;
@@ -59,8 +64,9 @@ const MIN_PARTIAL: f64 = 0.5;
 const MAX_DIGITS: usize = 15;
 /// Default work units for one document: layout analysis (see
 /// [`layout::analyze_within`]) plus matching, which spends one unit per byte
-/// of form label compared with each distinct document label, per byte of
-/// value text examined or normalized, and per byte copied into the result.
+/// of text scanned for unit notes, per byte of form label compared with each
+/// distinct document label, per byte of value text examined or normalized,
+/// and per byte copied into the result.
 pub const DEFAULT_MAX_WORK: u64 = 200_000_000;
 
 /// Resource limits for [`fill_with_limits`].
@@ -200,8 +206,7 @@ pub fn parse_form(bytes: &[u8]) -> Result<Form, FormError> {
 #[serde(rename_all = "snake_case")]
 pub enum FillStatus {
     Filled,
-    /// Candidates disagree, or the best ones may not be filled offline
-    /// (a table or list column, or a [`Hold`]).
+    /// Candidates disagree, or one of the best is held ([`Hold`]).
     Ambiguous,
     /// No value candidate for the field's labels.
     NotFound,
@@ -214,15 +219,23 @@ pub enum FillStatus {
     LimitExceeded,
 }
 
-/// Why a candidate may not be filled offline.
+/// Why a candidate may not be committed offline: the first failed
+/// condition of the commit policy (see the module documentation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Hold {
+    /// The document label contains the form label or is contained in it
+    /// (`再発行日` for `発行日`).
+    PartialLabel,
     /// The document label or the form label has a bracketed qualifier the
     /// other lacks (`消費税（10%）` for `消費税`).
     OneSidedQualifier,
-    /// A text value holds several values of one kind separated by words
-    /// (`03-1234-5678 FAX 03-1234-5679`).
+    /// The value is tied to its label by position only: a right neighbour
+    /// without a delimiter, a value below the label, or a table or list row.
+    GeometricOnly,
+    /// The value spans more than one line.
+    MultiLine,
+    /// A text value holds more than one value (see [`several_values`]).
     SeveralValues,
 }
 
@@ -326,6 +339,14 @@ pub fn fill_with_limits(
     budget.spend(fragments.len() as u64)?;
     let texts: HashMap<&str, &SourceFragment> =
         fragments.iter().map(|f| (f.id.as_str(), f)).collect();
+    // A unit note anywhere on a page scales the amounts and numbers on it.
+    let mut scaled_pages = BTreeSet::new();
+    for fragment in fragments {
+        budget.spend_bytes(&fragment.raw_text)?;
+        if unit_note(&fragment.raw_text) {
+            scaled_pages.insert(fragment.page);
+        }
+    }
     // A value that reads as one of the form's own labels is a neighbouring label, not a value.
     let mut labels = BTreeSet::new();
     for name in form
@@ -334,7 +355,7 @@ pub fn fill_with_limits(
         .flat_map(|f| std::iter::once(&f.label).chain(&f.hints))
     {
         budget.spend_bytes(name)?;
-        labels.insert(normalize_label(name).base);
+        labels.insert(normalize_label(name).stem);
     }
     let index = PairLabels::new(&pairs, &texts, &mut budget)?;
     let context = Context {
@@ -342,6 +363,7 @@ pub fn fill_with_limits(
         index: &index,
         texts: &texts,
         labels: &labels,
+        scaled_pages: &scaled_pages,
     };
     let mut cache = Cache {
         slots: (0..pairs.len()).map(|_| None).collect(),
@@ -424,9 +446,10 @@ struct Prepared {
 struct PreparedValue {
     raw: String,
     evidence: Vec<FillEvidence>,
-    /// Several values of one kind separated by words.
+    /// More than one value in the text ([`several_values`]).
     several: bool,
-    /// The pair label states a scale unit (`千円`, `万円`).
+    /// The pair label states a scale unit (`千円`, `万円`) or the page has a
+    /// unit note (`（単位：千円）`).
     scaled: bool,
     /// Normalized values for date, amount and number fields, on first use.
     typed: [Option<Option<Value>>; 3],
@@ -449,7 +472,10 @@ struct Context<'a> {
     pairs: &'a [Pair],
     index: &'a PairLabels,
     texts: &'a HashMap<&'a str, &'a SourceFragment>,
+    /// The form's labels and hints ([`Label::stem`]).
     labels: &'a BTreeSet<String>,
+    /// Pages with a unit note ([`unit_note`]).
+    scaled_pages: &'a BTreeSet<u32>,
 }
 
 impl Context<'_> {
@@ -499,13 +525,13 @@ impl Context<'_> {
             let Some(value) = prepared.value.as_ref() else {
                 continue;
             };
-            let hold = if found.one_sided {
-                Some(Hold::OneSidedQualifier)
-            } else if field.field_type == FieldType::Text && value.several {
-                Some(Hold::SeveralValues)
-            } else {
-                None
-            };
+            // The first failed condition of the commit policy, in order.
+            let hold = found
+                .hold
+                .or((pair.binding == Binding::Geometric).then_some(Hold::GeometricOnly))
+                .or((value.evidence.len() > 1).then_some(Hold::MultiLine))
+                .or((field.field_type == FieldType::Text && value.several)
+                    .then_some(Hold::SeveralValues));
             let value = self.typed_value(index, field.field_type, cache, budget)?;
             candidates.push(Candidate {
                 pair: index,
@@ -559,7 +585,7 @@ impl Context<'_> {
             };
             // Copy and label normalization.
             budget.spend(2 * text.len() as u64)?;
-            if self.labels.contains(&normalize_label(&text).base) {
+            if self.labels.contains(&normalize_label(&text).stem) {
                 // A first line that reads as a form label is a neighbouring
                 // label; a later one starts the next field's block.
                 if line == 0 {
@@ -584,11 +610,12 @@ impl Context<'_> {
             .join("\n");
         // Join, label normalization, NFKC and the value-shape scan.
         budget.spend(4 * raw.len() as u64)?;
-        if self.labels.contains(&normalize_label(&raw).base) {
+        if self.labels.contains(&normalize_label(&raw).stem) {
             return Ok(rejected(false));
         }
         let several = several_values(&raw.nfkc().collect::<String>());
-        let scaled = states_scale(&self.index.groups[*group].0);
+        let scaled =
+            states_scale(&self.index.groups[*group].0) || self.scaled_pages.contains(&pair.page);
         Ok(Prepared {
             first_is_label: false,
             value: Some(PreparedValue {
@@ -631,7 +658,7 @@ impl Context<'_> {
     }
 
     /// Fill, leave ambiguous or report invalid. Only the best-scoring
-    /// candidates decide, and all of them must allow the same value.
+    /// candidates decide: all of them must be unheld and allow the same value.
     fn decide(
         &self,
         field: &FormField,
@@ -655,13 +682,9 @@ impl Context<'_> {
                 .and_then(|p| p.value.as_ref())
                 .map_or("", |v| v.raw.as_str())
         };
-        // A row of a table or list never determines one value, even when the
-        // rows agree or only one row fits the type.
-        let column_rows = top
-            .iter()
-            .filter(|c| self.pairs[c.pair].placement == Placement::Column)
-            .count();
-        let held = column_rows >= 1 || top.iter().any(|c| c.hold.is_some());
+        // A held candidate (for example a table row) never determines one
+        // value, even when the candidates agree or only one fits the type.
+        let held = top.iter().any(|c| c.hold.is_some());
         let status = if held {
             FillStatus::Ambiguous
         } else if field.field_type == FieldType::Text {
@@ -748,6 +771,8 @@ fn slice(texts: &HashMap<&str, &SourceFragment>, span: &layout::Span) -> Option<
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Label {
     base: String,
+    /// The base without one leading honorific (`ご`, `御`, `お`).
+    stem: String,
     qualifiers: Vec<String>,
     base_chars: usize,
     qualifier_chars: usize,
@@ -761,7 +786,8 @@ impl Label {
 }
 
 /// NFKC, drop whitespace and trailing delimiters, lowercase; bracketed text
-/// becomes qualifiers. A label that is only bracketed text keeps it as base.
+/// becomes qualifiers. A label that is only bracketed text keeps it as base
+/// (`【住所】` = `住所`).
 fn normalize_label(s: &str) -> Label {
     let nfkc: String = s.nfkc().collect();
     let mut base = String::new();
@@ -790,31 +816,42 @@ fn normalize_label(s: &str) -> Label {
         base = qualifiers.concat();
         qualifiers.clear();
     }
+    let stem = base
+        .strip_prefix(HONORIFICS)
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(&base)
+        .to_owned();
     Label {
         base_chars: base.chars().count(),
         qualifier_chars: qualifiers.iter().map(|q| q.chars().count()).sum(),
         base,
+        stem,
         qualifiers,
     }
 }
 
-/// A label comparison: its score and whether a bracketed qualifier is on
-/// one side only.
+/// Leading honorifics ignored when labels are compared (`ご請求額` = `請求額`).
+const HONORIFICS: [char; 3] = ['ご', '御', 'お'];
+
+/// A label comparison: its score and why it may not be committed
+/// ([`Hold::PartialLabel`] or [`Hold::OneSidedQualifier`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Match {
     score: f64,
-    one_sided: bool,
+    hold: Option<Hold>,
 }
 
 impl Match {
     const NONE: Self = Self {
         score: 0.0,
-        one_sided: false,
+        hold: None,
     };
 
-    /// The higher score; at equal scores, a match with equal qualifiers.
+    /// The higher score; at equal scores, a match without a hold.
     fn better(self, other: Self) -> Self {
-        if other.score > self.score || other.score == self.score && self.one_sided {
+        if other.score > self.score
+            || other.score == self.score && self.hold.is_some() && other.hold.is_none()
+        {
             other
         } else {
             self
@@ -822,30 +859,35 @@ impl Match {
     }
 }
 
-/// Base similarity, then qualifiers: equal qualifiers keep the score,
-/// different ones on both sides never match, and a qualifier on one side
-/// scales the score by that label's base share and marks the match one-sided.
+/// Base similarity, then qualifiers. Equal bases (or equal bases without a
+/// leading honorific) score 1; a base contained in the other scores
+/// short/long and is [`Hold::PartialLabel`]. Equal qualifiers keep the
+/// score, different ones on both sides never match, and a qualifier on one
+/// side scales the score by that label's base share and is
+/// [`Hold::OneSidedQualifier`] (unless the base is already partial).
 fn label_score(a: &Label, b: &Label) -> Match {
-    let (short, long) = if a.base_chars <= b.base_chars {
-        (a, b)
-    } else {
-        (b, a)
-    };
-    // Containment scores short/long, so shorter ratios never reach MIN_PARTIAL.
-    if short.base_chars == 0 || (short.base_chars as f64) < MIN_PARTIAL * long.base_chars as f64 {
-        return Match::NONE;
-    }
-    let base = if a.base == b.base {
+    let base = if a.base == b.base || a.stem == b.stem {
         1.0
-    } else if long.base.contains(short.base.as_str()) {
-        short.base_chars as f64 / long.base_chars as f64
     } else {
-        return Match::NONE;
+        let (short, long) = if a.base_chars <= b.base_chars {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        // Containment scores short/long, so shorter ratios never reach MIN_PARTIAL.
+        if short.base_chars == 0
+            || (short.base_chars as f64) < MIN_PARTIAL * long.base_chars as f64
+            || !long.base.contains(short.base.as_str())
+        {
+            return Match::NONE;
+        }
+        short.base_chars as f64 / long.base_chars as f64
     };
+    let partial = (base < 1.0).then_some(Hold::PartialLabel);
     if a.qualifiers == b.qualifiers {
         return Match {
             score: base,
-            one_sided: false,
+            hold: partial,
         };
     }
     let share = match (a.qualifiers.is_empty(), b.qualifiers.is_empty()) {
@@ -855,8 +897,20 @@ fn label_score(a: &Label, b: &Label) -> Match {
     };
     Match {
         score: base * share,
-        one_sided: true,
+        hold: partial.or(Some(Hold::OneSidedQualifier)),
     }
+}
+
+/// A page-wide unit note (`（単位：千円）`, `単位：万円`, `単位 百万円`): `単位`,
+/// optional spaces or a colon, then a scale (`十` `百` `千` `万` `億` `兆`).
+fn unit_note(text: &str) -> bool {
+    text.match_indices("単位").any(|(at, unit)| {
+        let rest = text[at + unit.len()..]
+            .trim_start_matches(|c: char| c.is_whitespace() || matches!(c, ':' | '：'));
+        ["十", "百", "千", "万", "億", "兆"]
+            .iter()
+            .any(|scale| rest.starts_with(scale))
+    })
 }
 
 /// Scale units that make a label's amounts and numbers multiples
@@ -1094,8 +1148,9 @@ const AMOUNT_SIGNS: [char; 4] = ['-', '\u{2212}', '△', '▲'];
 
 /// The whole text as exactly one amount:
 /// `[sign] [currency] [sign] number [円] [tax note]`, where
-/// - sign is one of `-`, `−` (U+2212), `△`, `▲`, or the amount is enclosed in
-///   parentheses; any of them makes it negative, and at most one is allowed;
+/// - sign is one of `-`, `−` (U+2212), `△`, `▲`; it makes the amount
+///   negative, and at most one is allowed. Enclosing parentheses are not a
+///   sign in Japanese documents (`（1,000円）` is invalid);
 /// - currency is one of `¥` `￥` `$` `€` before the number, or `円` after
 ///   it, never both;
 /// - number is digits with valid thousands separators (`12,100`), no
@@ -1110,10 +1165,6 @@ fn parse_amount(text: &str) -> Option<Value> {
         rest = stripped.trim_end();
     }
     let mut signs = 0;
-    if let Some(inner) = rest.strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
-        rest = inner.trim();
-        signs += 1;
-    }
     if let Some(stripped) = rest.strip_prefix(AMOUNT_SIGNS) {
         rest = stripped.trim_start();
         signs += 1;
@@ -1177,8 +1228,12 @@ fn parse_number(text: &str) -> Option<Value> {
 }
 
 /// ASCII digits with optional thousands separators (a group of one to three
-/// digits, then groups of three) and an optional fraction of one to
-/// `max_fraction` digits; at most [`MAX_DIGITS`] digits in all.
+/// digits not starting with `0`, then groups of three) and an optional
+/// fraction of one to `max_fraction` digits; at most [`MAX_DIGITS`] digits in
+/// all. An integer part other than `0` has no leading zero (`007`, `0,123`).
+/// A fraction of exactly three digits after an ungrouped integer of one to
+/// three digits other than `0` (`1.000`, `12.500`) is refused: it may be a
+/// European thousands separator.
 fn parse_decimal(text: &str, max_fraction: usize) -> Option<Value> {
     let (integer, fraction) = match text.split_once('.') {
         Some((integer, fraction)) => (integer, Some(fraction)),
@@ -1190,15 +1245,24 @@ fn parse_decimal(text: &str, max_fraction: usize) -> Option<Value> {
     if integer.contains(',') {
         let mut groups = integer.split(',');
         let head = groups.next().unwrap_or_default();
-        if !(1..=3).contains(&head.len()) || !groups.all(|group| group.len() == 3) {
+        if !(1..=3).contains(&head.len())
+            || head.starts_with('0')
+            || !groups.all(|group| group.len() == 3)
+        {
             return None;
         }
+    } else if integer.len() > 1 && integer.starts_with('0') {
+        return None;
     }
     let digits = integer.replace(',', "");
     if let Some(fraction) = fraction
         && (fraction.is_empty()
             || fraction.len() > max_fraction
-            || !fraction.chars().all(|c| c.is_ascii_digit()))
+            || !fraction.chars().all(|c| c.is_ascii_digit())
+            || fraction.len() == 3
+                && !integer.contains(',')
+                && integer.len() <= 3
+                && integer != "0")
     {
         return None;
     }
@@ -1232,14 +1296,33 @@ enum Shape {
     Amount,
 }
 
-/// Whether NFKC `text` holds two values of one kind (phone numbers, dates
-/// or currency amounts) with a word between them, as in `03-1234-5678 FAX
-/// 03-1234-5679`. Values joined only by spaces or punctuation (a range such
-/// as `2026年11月8日〜2026年12月8日`) are one value.
+/// Marks that join two dates or amounts into one range (after NFKC).
+const RANGE_MARKS: [&str; 6] = ["〜", "~", "-", "\u{2212}", "\u{2013}", "\u{2014}"];
+
+/// Whether NFKC `text` holds more than one value ([`Hold::SeveralValues`]).
+/// Phone numbers, dates and currency amounts are found by [`value_shapes`];
+/// the text holds several values when it has
+/// - two phone numbers, whatever joins them (`03-1234-5678 FAX
+///   03-1234-5679`, `03-1234-5678、03-1234-5679`);
+/// - two dates or two amounts not joined by a range mark alone: a word,
+///   `、`, `/` or a space between them (`1,000円 と 500円`); a range such as
+///   `2026年11月8日〜2026年12月8日` or `¥1,000-¥2,000` is one value;
+/// - a phone number, date or amount right after a word (letters, with
+///   spaces, currency marks and signs between them ignored) that itself
+///   follows other text: a second label with its value, as in `山田 太郎
+///   生年月日 1990年1月1日`. A word at the very start (`TEL 03-1234-5678`)
+///   is not a second label.
 fn several_values(text: &str) -> bool {
     let mut tokens = value_shapes(text);
     tokens.sort_by_key(|&(_, start, _)| start);
-    [Shape::Phone, Shape::Date, Shape::Amount]
+    let range = |end: usize, start: usize| {
+        let between = text.get(end..start).unwrap_or_default();
+        let between = between
+            .trim_start_matches(|c: char| c.is_whitespace() || c == '円')
+            .trim_end_matches(|c: char| c.is_whitespace() || CURRENCY_PREFIXES.contains(&c));
+        RANGE_MARKS.contains(&between)
+    };
+    let two_of_a_kind = [Shape::Phone, Shape::Date, Shape::Amount]
         .iter()
         .any(|&shape| {
             tokens
@@ -1247,13 +1330,19 @@ fn several_values(text: &str) -> bool {
                 .filter(|(kind, _, _)| *kind == shape)
                 .collect::<Vec<_>>()
                 .windows(2)
-                .any(|pair| {
-                    let (_, _, end) = *pair[0];
-                    let (_, start, _) = *pair[1];
-                    text.get(end..start)
-                        .is_some_and(|between| between.chars().any(char::is_alphabetic))
-                })
-        })
+                .any(|pair| shape == Shape::Phone || !range(pair[0].2, pair[1].1))
+        });
+    two_of_a_kind || tokens.iter().any(|&(_, start, _)| after_label(text, start))
+}
+
+/// Whether the text before byte `start` ends with a word that follows other
+/// text (spaces, currency marks and signs before `start` ignored).
+fn after_label(text: &str, start: usize) -> bool {
+    let before = text[..start].trim_end_matches(|c: char| {
+        c.is_whitespace() || CURRENCY_PREFIXES.contains(&c) || AMOUNT_SIGNS.contains(&c)
+    });
+    let rest = before.trim_end_matches(char::is_alphabetic);
+    rest.len() < before.len() && !rest.trim().is_empty()
 }
 
 /// Phone numbers, dates and currency amounts in `text` with their byte ranges.
@@ -1261,10 +1350,21 @@ fn value_shapes(text: &str) -> Vec<(Shape, usize, usize)> {
     let chars: Vec<(usize, char)> = text.char_indices().collect();
     let at = |i: usize| chars.get(i).map_or(text.len(), |&(at, _)| at);
     let mut tokens = Vec::new();
-    // Runs of digits and separators: numeric dates, phone numbers, amounts.
+    // Phone numbers ([`phone_at`]), then runs of digits and separators:
+    // numeric dates and amounts.
     let mut i = 0;
     while i < chars.len() {
-        if !chars[i].1.is_ascii_digit() {
+        let c = chars[i].1;
+        let boundary = i == 0 || !chars[i - 1].1.is_ascii_digit();
+        if boundary
+            && (c.is_ascii_digit() || c == '(')
+            && let Some(end) = phone_at(&chars, i)
+        {
+            tokens.push((Shape::Phone, at(i), at(end)));
+            i = end;
+            continue;
+        }
+        if !c.is_ascii_digit() {
             i += 1;
             continue;
         }
@@ -1286,8 +1386,6 @@ fn value_shapes(text: &str) -> Vec<(Shape, usize, usize)> {
             .trim_end();
         let shape = if numeric_date(run) {
             Some(Shape::Date)
-        } else if phone(run) {
-            Some(Shape::Phone)
         } else if before.ends_with(CURRENCY_PREFIXES)
             || text[at(end)..].trim_start().starts_with('円')
         {
@@ -1370,16 +1468,64 @@ fn numeric_date(run: &str) -> bool {
     digits(year, 4) && digits(month, 2) && digits(day, 2) && (separator != '-' || year.len() == 4)
 }
 
-/// Three or more digit groups joined by hyphens with 9 to 13 digits in all
-/// (`03-1234-5678`, `0120-123-456`).
-fn phone(run: &str) -> bool {
-    let groups: Vec<&str> = run.split('-').collect();
-    let digits: usize = groups.iter().map(|g| g.len()).sum();
-    groups.len() >= 3
-        && groups
+/// The end (char index) of a phone number starting at char `i`, which is
+/// a digit or `(` not preceded by a digit. The number is the longest run of
+/// digits, `-`, `(` and `)` (one space allowed after `)`), without trailing
+/// separators, and one of:
+/// - three or more digit groups joined by hyphens with 9 to 13 digits in
+///   all (`03-1234-5678`, `0120-123-456`);
+/// - 10 or 11 digits starting with `0` (`0312345678`);
+/// - an area code starting with `0` in brackets, then the rest
+///   (`(03)1234-5678`, `03(1234)5678`), with 10 or 11 digits in all.
+fn phone_at(chars: &[(usize, char)], i: usize) -> Option<usize> {
+    let mut run = String::new();
+    let mut end = i;
+    while let Some(&(_, c)) = chars.get(end) {
+        let digit_next = chars.get(end + 1).is_some_and(|&(_, n)| n.is_ascii_digit());
+        if c.is_ascii_digit() || matches!(c, '-' | '(' | ')') {
+            run.push(c);
+        } else if !(c == ' ' && run.ends_with(')') && digit_next) {
+            break;
+        }
+        end += 1;
+    }
+    // Trailing separators are never part of the number (spaces were only
+    // taken before a digit).
+    while run.ends_with(|c: char| !c.is_ascii_digit()) {
+        run.pop();
+        end -= 1;
+    }
+    is_phone(&run).then_some(end)
+}
+
+/// See [`phone_at`].
+fn is_phone(run: &str) -> bool {
+    let digits = run.chars().filter(char::is_ascii_digit).count();
+    let groups_ok = |groups: &[&str]| {
+        groups
             .iter()
             .all(|g| !g.is_empty() && g.chars().all(|c| c.is_ascii_digit()))
-        && (9..=13).contains(&digits)
+    };
+    if run.chars().all(|c| c.is_ascii_digit()) {
+        return (10..=11).contains(&digits) && run.starts_with('0');
+    }
+    if !run.contains(['(', ')']) {
+        let groups: Vec<&str> = run.split('-').collect();
+        return groups.len() >= 3 && groups_ok(&groups) && (9..=13).contains(&digits);
+    }
+    let bracketed = match run.strip_prefix('(') {
+        Some(rest) => rest.split_once(')').and_then(|(area, local)| {
+            let (exchange, line) = local.split_once('-')?;
+            Some([area, exchange, line])
+        }),
+        None => run.split_once('(').and_then(|(area, rest)| {
+            let (exchange, line) = rest.split_once(')')?;
+            Some([area, exchange, line])
+        }),
+    };
+    bracketed.is_some_and(|groups| {
+        groups_ok(&groups) && groups[0].starts_with('0') && (10..=11).contains(&digits)
+    })
 }
 
 #[cfg(test)]
@@ -1412,9 +1558,9 @@ mod tests {
         vec![
             frag("a", "請求番号：INV-0012", [60.0, 119.0, 161.4, 130.0]),
             frag("b", "発行日：2026年11月8日", [60.0, 139.0, 179.8, 150.0]),
-            frag("c", "小計", [330.0, 219.0, 352.0, 230.0]),
+            frag("c", "小計：", [330.0, 219.0, 363.0, 230.0]),
             frag("d", "¥11,000", [480.2, 219.0, 520.0, 230.0]),
-            frag("e", "合計", [330.0, 259.0, 352.0, 270.0]),
+            frag("e", "合計：", [330.0, 259.0, 363.0, 270.0]),
             frag("f", "¥12,100", [480.2, 259.0, 520.0, 270.0]),
             frag("g", "住所", [60.0, 319.0, 82.0, 330.0]),
             frag(
@@ -1446,15 +1592,167 @@ mod tests {
         assert_eq!(f["no"].evidence[0].precision, Precision::Estimated);
         assert_eq!(f["issued"].value, Some(json!("2026-11-08")));
         assert_eq!(f["issued"].raw.as_deref(), Some("2026年11月8日"));
+        // `合計：` and the amount to its right on the same line: delimiter-bound.
         assert_eq!(f["total"].status, FillStatus::Filled);
         assert_eq!(f["total"].value, Some(json!(12100)));
         assert_eq!(f["total"].evidence[0].fragment_id, "f");
+        // Changed (strict policy): 住所 has no delimiter, so its right value
+        // (two lines) is a candidate only. Before: filled with both lines.
+        let address = &f["address"];
+        assert_eq!(address.status, FillStatus::Ambiguous);
+        assert_eq!(address.candidates[0].hold, Some(Hold::GeometricOnly));
         assert_eq!(
-            f["address"].raw.as_deref(),
-            Some("東京都架空区サンプル町1-2-3\nテストビル5階")
+            address.candidates[0].raw,
+            "東京都架空区サンプル町1-2-3\nテストビル5階"
         );
-        assert_eq!(f["address"].evidence.len(), 2);
         assert_eq!(f["person"].status, FillStatus::NotFound);
+    }
+
+    fn held(result: &FillResult, id: &str) -> Option<Hold> {
+        let field = &result.fields[id];
+        assert_eq!(field.status, FillStatus::Ambiguous, "{id}");
+        assert!(field.value.is_none() && field.evidence.is_empty(), "{id}");
+        field.candidates[0].hold
+    }
+
+    #[test]
+    fn only_delimiter_bound_single_values_commit() {
+        let fragments = [
+            frag("a", "請求日：", [60.0, 100.0, 100.0, 110.0]),
+            frag("b", "2026/11/08", [200.0, 100.0, 250.0, 110.0]),
+            frag("c", "支払期限", [60.0, 130.0, 100.0, 140.0]),
+            frag("d", "2026/11/30", [200.0, 130.0, 250.0, 140.0]),
+            frag("e", "住所：", [60.0, 160.0, 90.0, 170.0]),
+            frag("f", "東京都架空区1-2-3", [200.0, 160.0, 290.0, 170.0]),
+            frag("g", "テストビル5階", [200.0, 172.0, 270.0, 182.0]),
+            frag("h", "備考：東京都架空区4-5-6", [60.0, 200.0, 185.0, 210.0]),
+            frag("i", "テストビル6階", [90.0, 212.0, 160.0, 222.0]),
+            frag("j", "注文番号", [60.0, 240.0, 100.0, 250.0]),
+            frag("k", "ORD-1", [60.0, 254.0, 85.0, 264.0]),
+        ];
+        let result = fill(
+            "doc",
+            &fragments,
+            &form(json!({"fields":[
+                {"id":"issued","label":"請求日","type":"date"},
+                {"id":"due","label":"支払期限","type":"date"},
+                {"id":"address","label":"住所"},
+                {"id":"note","label":"備考"},
+                {"id":"order","label":"注文番号"}
+            ]})),
+        );
+        assert_eq!(result.fields["issued"].value, Some(json!("2026-11-08")));
+        // A right neighbour without a delimiter and a value below: geometric.
+        assert_eq!(held(&result, "due"), Some(Hold::GeometricOnly));
+        assert_eq!(held(&result, "order"), Some(Hold::GeometricOnly));
+        // A delimiter-bound value over two lines, right or inline.
+        assert_eq!(held(&result, "address"), Some(Hold::MultiLine));
+        assert_eq!(held(&result, "note"), Some(Hold::MultiLine));
+        assert_eq!(
+            result.fields["note"].candidates[0].raw,
+            "東京都架空区4-5-6\nテストビル6階"
+        );
+    }
+
+    #[test]
+    fn partial_labels_are_candidates_only() {
+        // Before: each of these filled the form field from the partial label.
+        let cases = [
+            ("再発行日：2026/11/08", "発行日", "date"),
+            ("未入金額：¥5,000", "入金額", "amount"),
+            ("非課税対象額：¥2,000", "課税対象額", "amount"),
+            // A tax-inclusive amount under a plain 金額 label.
+            ("金額：¥11,000（税込）", "税抜金額", "amount"),
+            ("前回請求額：¥8,800", "請求額", "amount"),
+            ("合計数量：12", "合計", "amount"),
+        ];
+        for (text, label, kind) in cases {
+            let fragments = [frag("a", text, [60.0, 100.0, 200.0, 110.0])];
+            let result = fill(
+                "doc",
+                &fragments,
+                &form(json!({"fields":[{"id":"x","label":label,"type":kind}]})),
+            );
+            assert_eq!(held(&result, "x"), Some(Hold::PartialLabel), "{text}");
+        }
+        // An exact label still wins over a partial one.
+        let fragments = [
+            frag("a", "再発行日：2026/11/08", [60.0, 100.0, 200.0, 110.0]),
+            frag("b", "発行日：2026/11/01", [60.0, 124.0, 200.0, 134.0]),
+        ];
+        let result = fill(
+            "doc",
+            &fragments,
+            &form(json!({"fields":[{"id":"x","label":"発行日","type":"date"}]})),
+        );
+        assert_eq!(result.fields["x"].value, Some(json!("2026-11-01")));
+    }
+
+    #[test]
+    fn a_leading_honorific_is_ignored_in_labels() {
+        assert_eq!(score("ご住所", "住所"), 1.0);
+        assert_eq!(score("お名前", "名前"), 1.0);
+        assert_eq!(score("御請求額", "ご請求額"), 1.0);
+        // Only one leading honorific (here the rest is a partial match), and
+        // never the whole label.
+        let twice = label_score(&normalize_label("ごご住所"), &normalize_label("住所"));
+        assert_eq!(twice.hold, Some(Hold::PartialLabel));
+        assert_eq!(normalize_label("ご").stem, "ご");
+        let fragments = [frag(
+            "a",
+            "ご住所：東京都架空区1-2-3",
+            [60.0, 100.0, 200.0, 110.0],
+        )];
+        let result = fill(
+            "doc",
+            &fragments,
+            &form(json!({"fields":[{"id":"x","label":"住所"}]})),
+        );
+        assert_eq!(result.fields["x"].raw.as_deref(), Some("東京都架空区1-2-3"));
+    }
+
+    #[test]
+    fn page_unit_notes_leave_amounts_unnormalized() {
+        let page = |page: u32, text: &str, top: f64| SourceFragment {
+            page,
+            ..frag(
+                &format!("{page}-{top}"),
+                text,
+                [60.0, top, 200.0, top + 10.0],
+            )
+        };
+        let fragments = [
+            page(1, "（単位：千円）", 80.0),
+            page(1, "売上高：1,234", 100.0),
+            page(2, "単位 万円", 80.0),
+            page(2, "予算：56", 100.0),
+            page(3, "経費：¥7,000", 100.0),
+        ];
+        let result = fill(
+            "doc",
+            &fragments,
+            &form(json!({"fields":[
+                {"id":"sales","label":"売上高","type":"amount"},
+                {"id":"sales_number","label":"売上高","type":"number"},
+                {"id":"budget","label":"予算","type":"amount"},
+                {"id":"cost","label":"経費","type":"amount"},
+                {"id":"sales_text","label":"売上高"}
+            ]})),
+        );
+        let f = &result.fields;
+        for id in ["sales", "sales_number", "budget"] {
+            assert_eq!(f[id].status, FillStatus::Invalid, "{id}");
+        }
+        // The note applies to its page only; text keeps the source text.
+        assert_eq!(f["cost"].value, Some(json!(7000)));
+        assert_eq!(f["sales_text"].raw.as_deref(), Some("1,234"));
+        for text in ["（単位：千円）", "単位:百万円", "(単位 億円)"] {
+            assert!(unit_note(&text.nfkc().collect::<String>()), "{text}");
+            assert!(unit_note(text), "{text}");
+        }
+        for text in ["単位：円", "単位：個", "単価：1,000円"] {
+            assert!(!unit_note(text), "{text}");
+        }
     }
 
     #[test]
@@ -1489,9 +1787,16 @@ mod tests {
                 {"id":"date","label":"お届け予定日","type":"date"}
             ]})),
         );
-        assert_eq!(result.fields["name"].status, FillStatus::Filled);
-        assert_eq!(result.fields["name"].raw.as_deref(), Some("佐藤 花子"));
-        assert_eq!(result.fields["date"].value, Some(json!("2026-12-01")));
+        // Changed (strict policy): values below their labels are candidates
+        // only (before: filled). The candidates are the values, not the
+        // neighbouring label.
+        assert_eq!(held(&result, "name"), Some(Hold::GeometricOnly));
+        assert_eq!(result.fields["name"].candidates[0].raw, "佐藤 花子");
+        assert_eq!(held(&result, "date"), Some(Hold::GeometricOnly));
+        assert_eq!(
+            result.fields["date"].candidates[0].value,
+            Some(json!("2026-12-01"))
+        );
     }
 
     #[test]
@@ -1535,7 +1840,8 @@ mod tests {
         assert_eq!(normalize_label("Invoice No:").base, "invoiceno");
         assert_eq!(normalize_label("請求　番号：").base, "請求番号");
         assert_eq!(normalize_label("【住所】").base, "住所");
-        assert_eq!(score("請求金額", "ご請求金額"), 0.8);
+        // Changed: a leading honorific is ignored (before: 0.8, a partial match).
+        assert_eq!(score("請求金額", "ご請求金額"), 1.0);
         // Below the partial-match threshold scores as no match.
         assert_eq!(score("金額", "ご請求金額"), 0.0);
     }
@@ -1568,11 +1874,11 @@ mod tests {
         assert_eq!(result.fields["address"].status, FillStatus::NotFound);
         // The matching qualifier wins over a one-sided one.
         let fragments = [
-            frag("a", "金額（税抜）", [60.0, 100.0, 120.0, 110.0]),
+            frag("a", "金額（税抜）：", [60.0, 100.0, 130.0, 110.0]),
             frag("b", "¥10,000", [200.0, 100.0, 240.0, 110.0]),
-            frag("c", "金額（税込）", [60.0, 130.0, 120.0, 140.0]),
+            frag("c", "金額（税込）：", [60.0, 130.0, 130.0, 140.0]),
             frag("d", "¥11,000", [200.0, 130.0, 240.0, 140.0]),
-            frag("e", "金額", [60.0, 160.0, 80.0, 170.0]),
+            frag("e", "金額：", [60.0, 160.0, 90.0, 170.0]),
             frag("f", "¥99", [200.0, 160.0, 220.0, 170.0]),
         ];
         let result = fill(
@@ -1739,8 +2045,8 @@ mod tests {
             ("△¥1,000", json!(-1000)),
             ("▲1,000円", json!(-1000)),
             ("−1,000円", json!(-1000)),
-            ("(¥1,000)", json!(-1000)),
-            ("（1,000円）（税込）", json!(-1000)),
+            ("¥0", json!(0)),
+            ("0.5円", json!(0.5)),
         ] {
             assert_eq!(amount(text), Some(value), "{text}");
         }
@@ -1772,6 +2078,16 @@ mod tests {
             "1,000円（税込）（税抜）",
             "1,000円(10%税込)",
             "1234567890123456",
+            // Changed: parentheses are not a negative sign in Japanese
+            // documents (before: -1000 each).
+            "(¥1,000)",
+            "（1,000円）（税込）",
+            "（1,000円）",
+            // Leading zeros and a first group with a leading zero.
+            "¥007",
+            "0,123円",
+            "¥000,000",
+            "00.5円",
         ] {
             assert_eq!(amount(text), None, "{text}");
         }
@@ -1785,6 +2101,10 @@ mod tests {
             ("-3", json!(-3)),
             ("+3", json!(3)),
             ("1,234.5678", json!(1234.5678)),
+            ("0", json!(0)),
+            ("0.125", json!(0.125)),
+            ("1234.567", json!(1234.567)),
+            ("1,234.567", json!(1234.567)),
         ] {
             assert_eq!(number(text), Some(value), "{text}");
         }
@@ -1798,6 +2118,13 @@ mod tests {
             "1〜3個",
             "約3個",
             "3個以上",
+            "0012",
+            "0,123",
+            "000,000",
+            // European grouping or three decimals: cannot be told apart.
+            "1.000",
+            "12.500 kg",
+            "-1.000",
         ] {
             assert_eq!(number(text), None, "{text}");
         }
@@ -1863,9 +2190,9 @@ mod tests {
     #[test]
     fn one_sided_qualifiers_are_candidates_only() {
         let fragments = [
-            frag("a", "消費税（10%）", [330.0, 100.0, 392.0, 110.0]),
+            frag("a", "消費税（10%）：", [330.0, 100.0, 402.0, 110.0]),
             frag("b", "¥1,000", [480.0, 100.0, 520.0, 110.0]),
-            frag("c", "消費税（8%）", [330.0, 120.0, 387.0, 130.0]),
+            frag("c", "消費税（8%）：", [330.0, 120.0, 397.0, 130.0]),
             frag("d", "¥160", [490.0, 120.0, 520.0, 130.0]),
             frag(
                 "e",
@@ -1970,7 +2297,8 @@ mod tests {
         assert_eq!(result.fields["when"].status, FillStatus::Ambiguous);
         for (text, several) in [
             ("03-1234-5678 FAX 03-1234-5679", true),
-            ("03-1234-5678 / 03-1234-5679", false),
+            // Changed: two phone numbers are two values, whatever joins them.
+            ("03-1234-5678 / 03-1234-5679", true),
             ("0120-123-456 または 03-1234-5678", true),
             ("令和8年11月8日 及び 令和8年12月1日", true),
             ("¥1,000（税込） 送料 ¥500", true),
@@ -1979,7 +2307,29 @@ mod tests {
             ("東京都渋谷区架空1-2-3 101号室", false),
             ("〒150-0001 東京都", false),
             ("架空銀行 本店営業部 普通 1234567", false),
-            ("INV-2026-0042 発行 2026/11/08", false),
+            // Changed: a date after a word that follows other text is a
+            // second label with its value.
+            ("INV-2026-0042 発行 2026/11/08", true),
+            // Before: false (phones without hyphens or with bracketed area
+            // codes were not recognized; `、` and `/` were not separators).
+            ("0312345678 FAX 0312345679", true),
+            ("(03)1234-5678 FAX (03)1234-5679", true),
+            ("03(1234)5678 03(1234)5679", true),
+            ("03-1234-5678、03-1234-5679", true),
+            ("03-1234-5678/03-1234-5679", true),
+            ("2026年11月8日、2026年12月1日", true),
+            ("¥1,000/¥2,000", true),
+            ("山田 太郎 生年月日 1990年1月1日", true),
+            ("東京都架空区1-2-3 TEL 03-1234-5678", true),
+            // One value: a range, a word at the start, a single number.
+            ("¥1,000〜¥2,000", false),
+            ("1,000円〜2,000円", false),
+            ("2026/11/08 - 2026/12/08", false),
+            ("TEL 03-1234-5678", false),
+            ("(03)1234-5678", false),
+            ("0312345678", false),
+            ("お支払いは11月30日まで", false),
+            ("1234567890", false),
         ] {
             assert_eq!(several_values(text), several, "{text}");
         }
@@ -2008,11 +2358,12 @@ mod tests {
         );
         // Before: department = 役職.
         assert_eq!(result.fields["department"].status, FillStatus::NotFound);
-        assert_eq!(
-            result.fields["company"].raw.as_deref(),
-            Some("株式会社サンプル")
-        );
-        assert_eq!(result.fields["person"].raw.as_deref(), Some("佐藤 花子"));
+        // Changed (strict policy): right values without a delimiter are
+        // candidates only (before: filled).
+        for (id, value) in [("company", "株式会社サンプル"), ("person", "佐藤 花子")] {
+            assert_eq!(held(&result, id), Some(Hold::GeometricOnly));
+            assert_eq!(result.fields[id].candidates[0].raw, value);
+        }
     }
 
     #[test]
@@ -2061,15 +2412,27 @@ mod tests {
                 .iter()
                 .all(|c| c.value == Some(json!(3)) && c.placement == Placement::Column)
         );
-        // One data row under the header is filled as before.
+        assert!(
+            result.fields["amount"]
+                .candidates
+                .iter()
+                .all(|c| c.hold == Some(Hold::GeometricOnly))
+        );
+        // Changed (strict policy): one data row under the header is a value
+        // below its label, a candidate only (before: filled).
         let result = fill("doc", &fragments[..6], &table);
-        assert_eq!(result.fields["item"].raw.as_deref(), Some("りんご"));
-        assert_eq!(result.fields["quantity"].value, Some(json!(3)));
-        assert_eq!(result.fields["amount"].value, Some(json!(300)));
+        for (id, raw) in [("item", "りんご"), ("quantity", "3"), ("amount", "¥300")] {
+            assert_eq!(held(&result, id), Some(Hold::GeometricOnly));
+            let candidate = &result.fields[id].candidates[0];
+            assert_eq!(
+                (candidate.raw.as_str(), candidate.placement),
+                (raw, Placement::Below)
+            );
+        }
     }
 
     #[test]
-    fn label_grid_with_a_subset_form_keeps_right_values() {
+    fn label_grid_with_a_subset_form_ignores_label_columns() {
         // A two-column label/value grid, rows 18 pt apart; the form lists only
         // some of its labels. The column below 担当者 starts with the form
         // label 電話番号, so it is a column of labels, not data rows.
@@ -2100,7 +2463,13 @@ mod tests {
                 {"id":"phone","label":"電話番号"}
             ]})),
         );
-        assert_eq!(result.fields["person"].raw.as_deref(), Some("佐藤 花子"));
+        // Changed (strict policy): the right value is a candidate only
+        // (before: filled). The label column below 担当者 adds no candidates.
+        let person = &result.fields["person"];
+        assert_eq!(held(&result, "person"), Some(Hold::GeometricOnly));
+        assert_eq!(person.candidates.len(), 1);
+        assert_eq!(person.candidates[0].raw, "佐藤 花子");
+        assert_eq!(person.candidates[0].placement, Placement::Right);
         // Rows below that are not form labels still compete: left empty.
         assert_eq!(result.fields["company"].status, FillStatus::Ambiguous);
         assert_eq!(result.fields["phone"].status, FillStatus::Ambiguous);
@@ -2176,7 +2545,10 @@ mod tests {
                 .iter()
                 .all(|c| c.placement == Placement::Column)
         );
-        assert_eq!(result.fields["phone"].raw.as_deref(), Some("03-1234-5678"));
+        // Changed (strict policy): 電話番号 has a single value below, a
+        // candidate only (before: filled).
+        assert_eq!(held(&result, "phone"), Some(Hold::GeometricOnly));
+        assert_eq!(result.fields["phone"].candidates[0].raw, "03-1234-5678");
     }
 
     /// `n` one-fragment lines stacked in one column with the same label text.
@@ -2283,7 +2655,7 @@ mod tests {
         // 40 s in debug, then Ok).
         let value = "あ".repeat(200_000);
         let fragments = [
-            frag("l", "備考", [60.0, 100.0, 80.0, 110.0]),
+            frag("l", "備考：", [60.0, 100.0, 90.0, 110.0]),
             frag("v", &value, [200.0, 100.0, 500.0, 110.0]),
         ];
         let fields: Vec<serde_json::Value> = (0..MAX_FIELDS)
@@ -2310,7 +2682,7 @@ mod tests {
     }
 
     #[test]
-    fn crowded_layouts_are_near_linear_and_stop_at_the_deadline() {
+    fn crowded_layouts_stay_bounded_and_stop_at_the_deadline() {
         // 40,000 plain fragments over 40,000 `い：` fragments at one x.
         // Before: 1.6e9 fragment checks in layout, which never checked the
         // deadline (1.8 s in release before DeadlineExceeded at 100 ms).

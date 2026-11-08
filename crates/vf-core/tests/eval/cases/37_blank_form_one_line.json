@@ -1,0 +1,14 @@
+{
+  "description": "記入前の様式で、ラベル「氏名」と「生年月日」だけが同じ行に離れて並び、フォームは氏名だけを持つ（生年月日はフォームのラベルではない）。氏名の右隣の「生年月日」は区切り記号がない位置だけの候補で、値として埋めない（ambiguous・geometric_only）",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "氏名"},
+    {"x": 300, "y": 100, "text": "生年月日"}
+  ],
+  "form": {"fields": [
+    {"id": "name", "label": "氏名"}
+  ]},
+  "expect": {
+    "name": {"abstain": "ambiguous", "hold": "geometric_only"}
+  }
+}

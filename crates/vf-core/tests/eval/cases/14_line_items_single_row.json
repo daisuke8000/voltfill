@@ -1,5 +1,5 @@
 {
-  "description": "明細表（1行のみ）。各列の値は見出しの真下の1行で一意に決まる",
+  "description": "明細表（1行のみ）。見出しの真下の1行は位置だけの結び付きのため候補止まり（ambiguous・geometric_only）。候補の1位は各列の値",
   "support": "supported",
   "runs": [
     {"x": 60, "y": 100, "text": "品名"},
@@ -18,9 +18,9 @@
     {"id": "amount", "label": "金額", "type": "amount"}
   ]},
   "expect": {
-    "item": {"raw": "USBケーブル Type-C 1m"},
-    "quantity": {"raw": "2", "value": 2, "source": ["quantity"]},
-    "unit_price": {"raw": "¥1,200", "value": 1200},
-    "amount": {"raw": "¥2,400", "value": 2400}
+    "item": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "USBケーブル Type-C 1m"},
+    "quantity": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "2"},
+    "unit_price": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "¥1,200"},
+    "amount": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "¥2,400"}
   }
 }

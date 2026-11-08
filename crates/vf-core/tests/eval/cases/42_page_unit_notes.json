@@ -1,0 +1,25 @@
+{
+  "description": "ページに単位の注記（（単位：千円）、単位：万円）があると、そのページの金額・数値は変換しない（invalid）。注記のないページの金額は変換する。文字列項目は原文のまま",
+  "support": "supported",
+  "runs": [
+    {"x": 400, "y": 80, "text": "（単位：千円）"},
+    {"x": 60, "y": 100, "text": "売上高：1,234"},
+    {"page": 2, "x": 400, "y": 80, "text": "単位：万円"},
+    {"page": 2, "x": 60, "y": 100, "text": "予算：56"},
+    {"page": 3, "x": 60, "y": 100, "text": "経費：¥7,000"}
+  ],
+  "form": {"fields": [
+    {"id": "sales", "label": "売上高", "type": "amount"},
+    {"id": "sales_number", "label": "売上高", "type": "number"},
+    {"id": "sales_text", "label": "売上高"},
+    {"id": "budget", "label": "予算", "type": "amount"},
+    {"id": "cost", "label": "経費", "type": "amount"}
+  ]},
+  "expect": {
+    "sales": {"abstain": "invalid"},
+    "sales_number": {"abstain": "invalid"},
+    "sales_text": {"raw": "1,234"},
+    "budget": {"abstain": "invalid"},
+    "cost": {"raw": "¥7,000", "value": 7000}
+  }
+}

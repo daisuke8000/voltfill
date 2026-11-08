@@ -1,5 +1,5 @@
 {
-  "description": "複数行の値（住所・備考）。次のラベル行は値に含めない",
+  "description": "複数行の値（住所・備考、区切り記号なし）。右の値は位置だけの結び付きのため候補止まり（geometric_only）。候補は次のラベル行を含まない",
   "support": "supported",
   "runs": [
     {"x": 60, "y": 100, "text": "住所"},
@@ -17,8 +17,8 @@
     {"id": "phone", "label": "電話番号"}
   ]},
   "expect": {
-    "address": {"raw": "東京都千代田区架空町1-2-3\nサンプルビル5階"},
-    "note": {"raw": "午前中の配達を希望。\n不在時は宅配ボックスへ。"},
-    "phone": {"raw": "03-1234-5678"}
+    "address": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "東京都千代田区架空町1-2-3\nサンプルビル5階"},
+    "note": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "午前中の配達を希望。\n不在時は宅配ボックスへ。"},
+    "phone": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "03-1234-5678"}
   }
 }

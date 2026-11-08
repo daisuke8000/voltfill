@@ -1,5 +1,5 @@
 {
-  "description": "ラベルの直下に値がある（2列並び）",
+  "description": "ラベルの直下に値がある（2列並び）。真下の値は位置だけの結び付きのため候補止まり（ambiguous・geometric_only）。候補の1位は正しい値",
   "support": "supported",
   "runs": [
     {"x": 60, "y": 100, "text": "お届け先氏名"},
@@ -15,8 +15,8 @@
     {"id": "order_no", "label": "ご注文番号"}
   ]},
   "expect": {
-    "recipient": {"raw": "佐藤 花子"},
-    "delivery": {"raw": "2026/12/01", "value": "2026-12-01"},
-    "order_no": {"raw": "ORD-55821"}
+    "recipient": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "佐藤 花子"},
+    "delivery": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "2026/12/01"},
+    "order_no": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "ORD-55821"}
   }
 }

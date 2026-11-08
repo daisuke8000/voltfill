@@ -18,8 +18,8 @@
     {"id": "amount", "label": "金額", "type": "amount"}
   ]},
   "expect": {
-    "item": {"abstain": "ambiguous"},
-    "quantity": {"abstain": "ambiguous"},
-    "amount": {"abstain": "ambiguous"}
+    "item": {"abstain": "ambiguous", "hold": "geometric_only"},
+    "quantity": {"abstain": "ambiguous", "hold": "geometric_only"},
+    "amount": {"abstain": "ambiguous", "hold": "geometric_only"}
   }
 }

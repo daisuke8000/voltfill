@@ -1,5 +1,5 @@
 {
-  "description": "行間の詰まったラベル表で値が空欄の行。次の行のラベル（フォームにない）を値として採らない",
+  "description": "行間の詰まったラベル表で値が空欄の行。次の行のラベル（フォームにない）を値の候補にしない（not_found）。右隣の値は区切り記号がないため候補止まり（geometric_only）",
   "support": "supported",
   "runs": [
     {"x": 60, "y": 100, "text": "会社名"},
@@ -16,8 +16,8 @@
     {"id": "person", "label": "担当者"}
   ]},
   "expect": {
-    "company": {"raw": "株式会社サンプル"},
+    "company": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "株式会社サンプル"},
     "department": {"abstain": "not_found"},
-    "person": {"raw": "佐藤 花子"}
+    "person": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "佐藤 花子"}
   }
 }

@@ -1,5 +1,5 @@
 {
-  "description": "括弧内の補足が文書のラベルにだけある（消費税（10%）と（8%）、お届け先住所（変更前）、住所（旧））。フォームの「消費税」「お届け先住所」「住所」は候補止まりで空欄（ambiguous）。補足まで同じ「消費税（10%）」は埋める",
+  "description": "括弧内の補足が文書のラベルにだけある（消費税（10%）と（8%）、お届け先住所（変更前）、住所（旧））。フォームの「消費税」「お届け先住所」「住所」は候補止まりで空欄（one_sided_qualifier）。補足まで同じ「消費税（10%）」の金額は候補の1位だが、区切り記号がないため候補止まり（geometric_only）",
   "support": "supported",
   "runs": [
     {"x": 330, "y": 100, "text": "消費税（10%）"},
@@ -16,9 +16,9 @@
     {"id": "address", "label": "住所"}
   ]},
   "expect": {
-    "tax": {"abstain": "ambiguous"},
-    "tax_10": {"raw": "¥1,000", "value": 1000},
-    "delivery_address": {"abstain": "ambiguous"},
-    "address": {"abstain": "ambiguous"}
+    "tax": {"abstain": "ambiguous", "hold": "one_sided_qualifier"},
+    "tax_10": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "¥1,000"},
+    "delivery_address": {"abstain": "ambiguous", "hold": "one_sided_qualifier"},
+    "address": {"abstain": "ambiguous", "hold": "one_sided_qualifier"}
   }
 }

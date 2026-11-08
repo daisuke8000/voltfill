@@ -11,7 +11,7 @@
     {"id": "period", "label": "受付期間"}
   ]},
   "expect": {
-    "phone": {"abstain": "ambiguous"},
+    "phone": {"abstain": "ambiguous", "hold": "several_values"},
     "fax": {"abstain": "not_found"},
     "period": {"raw": "2026年11月8日〜2026年12月8日"}
   }
