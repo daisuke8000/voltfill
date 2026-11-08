@@ -36,7 +36,7 @@ voltfill fill input.pdf examples/forms/invoice.json -o result.json
 
 項目は `id`・`label`・`type`（`text` / `date` / `amount` / `number`、既定 `text`）・`hints`（ラベルの別名）です。
 
-オフラインの照合は**厳格な確定方針**です。値を入れる（`filled`）のは、次の4条件をすべて満たす候補だけです。それ以外の候補は値を入れず、確定できない理由（`hold`）を付けて `candidates` で返します。誤って埋めるより空欄を優先し、オフラインで埋まる項目が減ることは許容します。候補は、Jevに候補から選ばせる、またはページ画像で位置を答えさせる補助で決める想定です（未実装）。
+オフラインの照合は**厳格な確定方針**です。値を入れる（`filled`）のは、次の4条件をすべて満たす候補だけです。それ以外の候補は値を入れず、確定できない理由（`hold`）を付けて `candidates` で返します。誤って埋めるより空欄を優先し、オフラインで埋まる項目が減ることは許容します。候補は、`--remote` を付けるとJevに候補から選ばせて決められます（[下記](#fill-remote)）。ページ画像で位置を答えさせる補助は未実装です。
 
 1. **ラベルが一致する**: 文書のラベルが、フォームの `label` か `hints` のどれかと正規化（全角半角などのNFKC・空白の除去・末尾の `：` `:` の除去・英字の小文字化）のうえで等しい。先頭の `ご`・`御`・`お` は1つだけ無視します（`ご住所` = `住所`）。括弧内は補足として扱い、補足まで等しいことが必要です（全体が括弧のラベル `【住所】` は中身 `住所` として扱います）。片方がもう片方を含むだけのラベル（文書の `再発行日` とフォームの `発行日`）と、片方にだけ補足があるラベル（文書の `消費税（10%）` とフォームの `消費税`）は候補止まりです。補足が異なるラベル（`金額（税込）` と `金額（税抜）`）は候補にもしません。補足まで同じラベル（`消費税（10%）`）を `label` か `hints` に書けば一致します。
 2. **区切り記号で結び付く**: 1つの片の中の `ラベル：値`・`ラベル: 値`、または `ラベル：` で終わる片と、同じ行のすぐ右の片。区切り記号のない右隣・ラベルの真下・表や一覧の列は、位置だけの結び付きなので候補止まりです。
@@ -96,9 +96,11 @@ voltfill fill input.pdf examples/forms/invoice.json -o result.json
 
 処理量には上限があります。1文書のラベル・値の候補は50,000件、作業量はレイアウト解析と照合の合計で200,000,000単位までです。単位は次の合計です: 原文のバイト数（レイアウト解析で片ごとに分類と寸法計算の2回、照合で単位の注記の確認に1回）、行の整理で並べ替えた比較の回数と片の数、探索で調べた行と片の数、候補に書き込む範囲ごとに1と片IDのバイト数、フォームのラベルと文書の各ラベルの比較で照合したバイト数、値の確認・正規化と結果への複製のバイト数。レイアウト解析では、片の原文は候補に何回使われても読み直しません（照合では候補ごとに値の原文を読み、その分を数えます）。真下や列の探索は1行あたり16片まで、値は5行まで、列は5行までです。1単位あたりの実時間は処理によって異なるため、作業量の上限は実行時間を保証しません。
 
-上限を超えた場合は部分的な結果を返さず、`{"error":"layout_limit_exceeded"}` または `{"error":"fill_budget_exceeded"}` を出して終了コード4で終わります。CLIの `voltfill fill` は、コマンドの開始から30秒の期限を既定で設け、`--deadline-ms`（1〜600000）で変えられます。期限を過ぎると `{"error":"fill_deadline_exceeded"}`（終了コード4）です。PDFの読み込みと解析（inspect）は `PdfLimits` の上限で止まり、期限では中断しません（その時間も期限に含めます）。ライブラリの既定（`vf_core::fill::FillLimits::default()`）は候補50,000件・200,000,000単位・期限なしで、`vf_core::fill::fill_with_limits` で上限と期限を指定できます。期限はレイアウト解析と照合の間、4,096単位ごと・項目ごと・長い原文を読む前に確認します。上限を指定しない `fill` は、超過時に全項目を `limit_exceeded` として返します。
+上限を超えた場合は部分的な結果を返さず、`{"error":"layout_limit_exceeded"}` または `{"error":"fill_budget_exceeded"}` を出して終了コード4で終わります。CLIの `voltfill fill` は、コマンドの開始から30秒の期限を既定で設け、`--deadline-ms`（1〜600000）で変えられます。`--remote` の有無にかかわらず使え、期限を過ぎると `{"error":"fill_deadline_exceeded"}`（終了コード4）です。PDFの読み込みと解析（inspect）は `PdfLimits` の上限で止まり、期限では中断しません（その時間も期限に含めます）。期限が制限するのはJevへの送信より前のオフラインの処理だけで、上限や期限を超えた場合は結果を書かず、何も送りません。送信は `--execution-config` の `total_deadline_ms` などで制限します。ライブラリの既定（`vf_core::fill::FillLimits::default()`）は候補50,000件・200,000,000単位・期限なしで、`vf_core::fill::fill_with_limits` で上限と期限を指定できます。期限はレイアウト解析と照合の間、4,096単位ごと・項目ごと・長い原文を読む前に確認します。上限を指定しない `fill` は、超過時に全項目を `limit_exceeded` として返します。
 
 区切り記号のない値・真下の値・表や一覧・複数行の値は、値を入れずに `hold` 付きの候補として返し、AcroForm・縦書き・区切り記号のない1つの片の中の「ラベル 値」（`発行日 2026年11月8日`）は候補にもなりません。対応していないレイアウトは誤った値ではなく候補か空欄になる、というのが確定方針の狙いですが、確かめたのは合成の評価セットだけで、実文書で誤入力がないことは保証しません。既知の限界として、`ラベル：` の同じ行のすぐ右に区切り記号のない別のラベルがある記入前の様式（`氏名：` の右の `生年月日` で、フォームに `生年月日` がない場合）は、そのラベルを値として埋めます。また、続きの行が上記の位置から外れる値（例: 値の推定開始位置より大きく右から続く行）は1行の値として扱います。スキャンPDFのOCRは行いません。結果は評価専用です。
+
+<a id="fill-remote"></a>
 
 `--remote` を付けると、`ambiguous` の項目だけをJevに送り、その項目の候補から選ばせます。接続先とキーは `run --remote` と同じく必要です（[実APIの利用](#environment)）。`--remote` なしでは認証情報を読まず、結果も変わりません。
 
@@ -106,13 +108,24 @@ voltfill fill input.pdf examples/forms/invoice.json -o result.json
 voltfill fill input.pdf examples/forms/invoice.json --remote -o result.json
 ```
 
-- 送るのは項目のラベル・型・別名と、候補ごとのページ・原文のラベルと値だけです。選択肢は候補の順に `c0`・`c1`…と `none` です。ページ画像・前後の行・ほかの項目は送りません。候補の文は選択対象の文書データで指示ではないと、要求に明記します。
+- 送るのは項目のラベル・型・別名と、選択肢にした候補ごとのページ・原文のラベルと値だけです。ページ画像・前後の行・ほかの項目は送りません。候補の文は選択対象の文書データで指示ではないと、要求に明記します。
+- 選択肢は、選べば1つの値になる候補と `none` です。`hold` が `partial_label`・`one_sided_qualifier`・`geometric_only` の候補は選択肢にします。選んでも1つの値にならない候補（`hold` が `several_values`・`multi_line` の候補と、日付・金額・数値の項目で正規化値のない候補）は選択肢にせず、送りもしません。キーは `candidates` での位置（`c0`・`c1`…）のままで、選択肢にしなかった候補のキーは不正な回答です。選択肢にできる候補がない項目は送らず、`ambiguous` のまま候補を返します。
 - 選ばれた候補が確率の単独最大で、確率の合計が1のときだけ `filled`（`method: "jev_choice"`）にし、`raw`・`value`・`evidence` はその候補の原文から取ります。`none` が単独最大なら `not_found`、同率・不正な回答（確率の合計が1でないものを含む）・送信失敗では `ambiguous` のままです。送った項目は `candidates` を残します。
 - 結果には `model`・`assist`（項目ごとの質問ID・`outcome`・選ばれたキー）・`usage`・`jev_responses` が加わります。`jev_responses` は再試行・エラー・不完全な本文を含む全試行の受信本文です。
 - `outcome` は、回答を得た場合が `selected`・`none_selected`・`not_unique_maximum` です。失敗には `answer_invalid`・`request_failed`・`budget_exhausted`（上限に達したか予算が停止していて、そのバッチかその再試行を送らなかった）・`usage_exceeded_budget`・`deadline_exceeded`・`request_too_large`・`cancelled` があります。`usage_exceeded_budget` は、受信して解析できた回答の使用量が予約か費用上限を超えた場合です。その回答は使わず（本文は残します）、以降のバッチも送りません。`cancelled` はライブラリの呼び出し側が中止させた場合で、CLIからは発生しません。
-- `--model`・`--max-attempts`・`--execution-config FILE` が使えます。バッチは1件ずつ送ります。送信回数（`max_requests`）・費用・本文量・期限の上限は全バッチと再試行の合計に適用します。試行回数（`--max-attempts`）はバッチごとで、各試行も送信回数に数えます。トークンの上限は1試行ごと（`input_tokens_per_attempt`）と1秒あたり（`input_tokens_per_second`）です。
+- `--model`・`--max-attempts`・`--execution-config FILE` が使えます（`--deadline-ms` も使えますが、制限するのは送信前のオフラインの処理だけです）。バッチは1件ずつ送ります。送信回数（`max_requests`）・費用・本文量・期限の上限は全バッチと再試行の合計に適用します。試行回数（`--max-attempts`）はバッチごとで、各試行も送信回数に数えます。トークンの上限は1試行ごと（`input_tokens_per_attempt`）と1秒あたり（`input_tokens_per_second`）です。
 - 送った項目がすべて失敗で終わった場合も、全受信本文を含む結果を書き出してから終了コード4（`fill_assist_all_failed`）を返します。書き出せないと事前に分かる出力先は送信前に止めます（[出力先](#output)）。項目が `ambiguous`・`not_found` のまま残っても終了コードは0です（送った項目がすべて `not_unique_maximum` の場合も含みます。`--remote` なしの `fill` と同じく、各項目の `status` で確認します）。
 - 模擬応答でのみ試験しており、実APIでの精度は未測定です。confidence・確率は校正済みの正答確率ではありません。
+
+`fill` の終了コードは次のとおりです。終了コード4は、結果を書く前の失敗と、結果を書いた後の `fill_assist_all_failed` があり、標準エラーのJSONの `error` で区別します。
+
+| 終了コード | 結果 | 主な `error` |
+|---|---|---|
+| 0 | 書く | — （`ambiguous`・`not_found` の項目が残る場合も含む。各項目の `status` で確認） |
+| 2 | 書かず、送らない | `invalid_arguments`・`invalid_deadline`・`invalid_form`・`input_read_failed`・`input_too_large`、`--remote` では `invalid_model`・`invalid_execution_config`・`api_key_required` など |
+| 4 | 書かず、送らない | `pdf_inspection_failed`・`layout_limit_exceeded`・`fill_budget_exceeded`・`fill_deadline_exceeded`、`--remote` では `transport_setup_failed` |
+| 4 | 全受信本文を含めて書く | `fill_assist_all_failed`（送った項目がすべて失敗） |
+| 5 | [出力先](#output)を参照 | `output_*`・`input_overwrite_refused` など |
 
 接続先とキーを設定し（[実APIの利用](#environment)）、PDFと抽出定義を渡します。
 

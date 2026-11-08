@@ -1768,6 +1768,43 @@ mod tests {
     }
 
     #[test]
+    fn the_fill_deadline_bounds_the_offline_step_before_any_send() {
+        let (dir, pdf, form) = fill_inputs("fill-remote-deadline");
+        let output = dir.join("result.json");
+        let sends = Arc::new(AtomicU32::new(0));
+        let result = run_with::<FixtureEvaluator, _, _>(
+            [
+                "fill".into(),
+                arg(&pdf),
+                arg(&form),
+                "--remote".into(),
+                "--deadline-ms".into(),
+                "1".into(),
+                "-o".into(),
+                arg(&output),
+            ],
+            |_, _| Ok(()),
+            || {
+                Ok(Secret::try_new("synthetic_secret_canary".into())
+                    .expect("the synthetic bearer is valid"))
+            },
+            |_, _, _| Err((9, "legacy_evaluator_unexpected")),
+            || {
+                // Inputs are read; the deadline passes before layout starts.
+                std::thread::sleep(Duration::from_millis(20));
+                Ok((Meddling(sends.clone(), None::<fn()>), FakeClock::default()))
+            },
+        );
+        // A limit error writes no result and sends nothing; unlike
+        // `fill_assist_all_failed`, the exit code 4 comes before any output.
+        assert_eq!(result, Err((4, "fill_deadline_exceeded").into()));
+        assert_eq!(sends.load(Ordering::SeqCst), 0);
+        assert!(temporaries(&dir).is_empty());
+        assert!(!output.exists());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn a_failed_rename_keeps_the_temporary_output_with_every_body() {
         let (dir, pdf, form) = fill_inputs("fill-remote-rename-failed");
         let output = dir.join("result.json");
