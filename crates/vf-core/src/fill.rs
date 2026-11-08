@@ -1446,33 +1446,74 @@ fn plain_unit(text: &str) -> bool {
 /// without `単位` (`（千円）`, `(百万円)`, `【万円】`, `（千）`): a unit note
 /// ([`unit_note`]).
 fn scale_only(compact: &str) -> bool {
-    const SCALES: [&str; 12] = [
-        "十", "百", "千", "万", "十万", "百万", "千万", "億", "十億", "百億", "千億", "兆",
-    ];
     [('(', ')'), ('[', ']'), ('【', '】'), ('〔', '〕')]
         .iter()
         .find_map(|&(open, close)| compact.strip_prefix(open)?.strip_suffix(close))
-        .is_some_and(|scale| SCALES.contains(&scale.strip_suffix('円').unwrap_or(scale)))
+        .is_some_and(|scale| SCALE_WORDS.contains(&scale.strip_suffix('円').unwrap_or(scale)))
 }
 
+/// Scale words of a bracketed scale ([`scale_only`]) and a label unit
+/// ([`states_scale`]). Each starts and ends with one of [`NOTE_SCALES`].
+const SCALE_WORDS: [&str; 12] = [
+    "十", "百", "千", "万", "十万", "百万", "千万", "億", "十億", "百億", "千億", "兆",
+];
+
 /// Scale units that make a label's amounts and numbers multiples
-/// (`売上高（千円）`, `金額（単位：万円）`, `売上高百万円`, `金額（単位は千円）`,
-/// `売上高（千円単位）`): a scaled yen unit in the base, a qualifier that
-/// starts with a scale (after `単位` and `:`, `：` or `は`), or a unit note
-/// ([`unit_note`]) in the base or a qualifier.
+/// (`売上高（千円）`, `売上高（十億円）`, `金額（百円）`, `金額（単位：万円）`,
+/// `売上高百万円`, `金額（単位は千円）`, `売上高（千円単位）`): a scaled yen
+/// unit (a scale word of [`SCALE_WORDS`] and `円`) in the base, a qualifier
+/// that starts with a scale word (after `単位` and `:`, `：` or `は`), or a
+/// unit note ([`unit_note`]) in the base or a qualifier. `（円）`, `（税込）`
+/// and `（10%）` are not scales.
 fn states_scale(label: &Label) -> bool {
-    const SCALES: [&str; 5] = ["千", "万", "百万", "億", "兆"];
-    let in_base = ["千円", "万円", "億円", "兆円"]
-        .iter()
-        .any(|unit| label.base.contains(unit));
+    // Every scale word ends with a scale character, so a scale word before
+    // `円` is a scale character before it.
+    let in_base = label
+        .base
+        .match_indices('円')
+        .any(|(at, _)| label.base[..at].ends_with(NOTE_SCALES));
     in_base
         || unit_note(&label.base)
-        || label.qualifiers.iter().any(|q| {
-            let scale = q
-                .trim_start_matches("単位")
-                .trim_start_matches([':', '：', 'は']);
-            SCALES.iter().any(|unit| scale.starts_with(unit)) || unit_note(q)
-        })
+        || label
+            .qualifiers
+            .iter()
+            .any(|q| qualifier_states_scale(q) || unit_note(q))
+}
+
+/// Whether one bracketed qualifier scales amounts: it contains a scale word
+/// followed by `円` anywhere (`（税込千円）`, `（税込；千円）`), or any of its
+/// parts (split at `・` `、` `,` `/` `:`; a comma between digits is kept;
+/// `normalize_label` has already removed spaces) starts with a scale word
+/// after an optional `単位` and `は` (`（千円）`, `（税込・千円）`,
+/// `（金額：千円）`, `（円、千円）`), or is a number other than 1 followed by
+/// `円` (`（1,000円）`, `（1000円）`).
+fn qualifier_states_scale(qualifier: &str) -> bool {
+    let chars: Vec<char> = qualifier.nfkc().collect();
+    let mut joined = String::with_capacity(qualifier.len());
+    for (i, &c) in chars.iter().enumerate() {
+        let digit = |j: usize| chars.get(j).is_some_and(char::is_ascii_digit);
+        if c == ',' && i > 0 && digit(i - 1) && digit(i + 1) {
+            continue;
+        }
+        joined.push(c);
+    }
+    if SCALE_WORDS
+        .iter()
+        .any(|word| joined.contains(&format!("{word}円")))
+    {
+        return true;
+    }
+    joined.split(['・', '、', ',', '/', ':']).any(|part| {
+        let part = part.trim_start_matches("単位").trim_start_matches('は');
+        if SCALE_WORDS.iter().any(|word| part.starts_with(word)) {
+            return true;
+        }
+        let digits = part
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(part.len());
+        let (number, rest) = part.split_at(digits);
+        !number.is_empty() && number.trim_start_matches('0') != "1" && rest.starts_with('円')
+    })
 }
 
 /// Deterministic whole-text normalization; `None` when the text is not
@@ -3292,6 +3333,73 @@ mod tests {
         assert_eq!(f["amount"].status, FillStatus::Ambiguous);
         // Text fields keep the exact source text.
         assert_eq!(f["sales_text"].raw.as_deref(), Some("1,234"));
+    }
+
+    #[test]
+    fn every_scale_word_in_the_label_leaves_numbers_unnormalized() {
+        // Before: only 千, 万, 百万, 億 and 兆 started a scaled qualifier and
+        // only 千円, 万円, 億円 and 兆円 scaled the base, so these filled.
+        for label in [
+            "売上高（十億円）",
+            "金額（百円）",
+            "金額（十万円）",
+            "金額（百億円）",
+            "金額（千億円）",
+            "金額（十円）",
+            "金額（百）",
+            "金額（単位：百円）",
+            "金額（十億円、税込）",
+            "金額百円",
+            "金額十円",
+            // Before: a scale after another word in the brackets, or a
+            // number of yen, was missed.
+            "売上高（税込・千円）",
+            "売上高（税抜、千円）",
+            "売上高（金額：千円）",
+            "売上高（円・千円）",
+            "売上高（1000円）",
+            "売上高（１，０００円）",
+            "売上高（1,000円）",
+            "金額（税込千円）",
+            "売上高（税込；千円）",
+            "売上高（税込-千円）",
+            "売上高（税込 千円）",
+        ] {
+            assert!(states_scale(&normalize_label(label)), "{label}");
+        }
+        for label in [
+            "金額（円）",
+            "金額（税込）",
+            "金額（税抜）",
+            "消費税（10%）",
+            "金額（1円）",
+            "金額（税込・円）",
+            "金額円",
+            "円",
+        ] {
+            assert!(!states_scale(&normalize_label(label)), "{label}");
+        }
+        let fragments = [
+            frag("a", "売上高（十億円）：1,234", [60.0, 100.0, 190.0, 110.0]),
+            frag("b", "手数料（百円）：1,000", [60.0, 124.0, 180.0, 134.0]),
+            frag("c", "請求額（税込）：2,000", [60.0, 148.0, 180.0, 158.0]),
+        ];
+        let result = fill(
+            "doc",
+            &fragments,
+            &form(json!({"fields":[
+                {"id":"sales","label":"売上高（十億円）","type":"amount"},
+                {"id":"fee","label":"手数料（百円）","type":"number"},
+                {"id":"billed","label":"請求額（税込）","type":"amount"}
+            ]})),
+        );
+        let f = &result.fields;
+        // Before: 1234 and 1000.
+        assert_eq!(f["sales"].status, FillStatus::Invalid);
+        assert_eq!(f["sales"].raw.as_deref(), Some("1,234"));
+        assert_eq!(f["fee"].status, FillStatus::Invalid);
+        assert_eq!(f["billed"].status, FillStatus::Filled);
+        assert_eq!(f["billed"].value, Some(json!(2000)));
     }
 
     #[test]
