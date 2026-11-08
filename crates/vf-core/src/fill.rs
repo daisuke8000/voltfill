@@ -36,8 +36,8 @@
 //!   whole (otherwise the field is `invalid`). Amounts and numbers are not
 //!   normalized when the label states a scale unit (`売上高（千円）`) or
 //!   any text on any page of the document is a unit note (`（単位：千円）`,
-//!   `（単位は千円）`, `（千円単位）`, `（単位：1,000円）`, `（単位：ドル）`):
-//!   which tables or pages a note covers cannot be told.
+//!   `（単位は千円）`, `（千円単位）`, `（単位：1,000円）`, `（単位：ドル）`,
+//!   also split over two or three adjacent fragments of a line): which tables or pages a note covers cannot be told.
 //!
 //! Only the best-scoring candidates decide (an exact label over a partial
 //! one). The field is filled only when every one of them may be committed
@@ -361,7 +361,8 @@ pub fn fill_with_limits(
                 .collect(),
         });
     }
-    let pairs = layout::analyze_within(fragments, limits.max_pairs, &mut budget)?.pairs;
+    let layout = layout::analyze_within(fragments, limits.max_pairs, &mut budget)?;
+    let pairs = layout.pairs;
     budget.spend(fragments.len() as u64)?;
     let texts: HashMap<&str, &SourceFragment> =
         fragments.iter().map(|f| (f.id.as_str(), f)).collect();
@@ -374,6 +375,9 @@ pub fn fill_with_limits(
             scaled_document = true;
             break;
         }
+    }
+    if !scaled_document {
+        scaled_document = split_unit_note(&layout.lines, fragments, &mut budget)?;
     }
     // A value that reads as one of the form's own labels is a neighbouring label, not a value.
     let mut labels = BTreeSet::new();
@@ -1025,10 +1029,45 @@ fn unit_note(text: &str) -> bool {
     })
 }
 
+/// Most adjacent fragments of one line joined to find a unit note split
+/// over runs ([`split_unit_note`]).
+const MAX_NOTE_FRAGMENTS: usize = 3;
+
 /// Work units for one [`unit_note`] match: whitespace removal, NFKC and the
 /// match each read the text once.
 fn note_cost(text: &str) -> u64 {
     3 * u64::try_from(text.len()).unwrap_or(u64::MAX / 3)
+}
+
+/// Whether two or three adjacent fragments of a line, joined, are a unit
+/// note split over runs (`（単位：` `千円）`, `（単位` `：` `千円）`). Each
+/// fragment is joined at most [`MAX_NOTE_FRAGMENTS`] times, so the work
+/// stays linear in the text and is charged to `budget`.
+fn split_unit_note(
+    lines: &[layout::Line],
+    fragments: &[SourceFragment],
+    budget: &mut Budget,
+) -> Result<bool, BudgetError> {
+    for line in lines {
+        for start in 0..line.fragments.len() {
+            let mut joined = String::new();
+            for (n, &f) in line.fragments[start..]
+                .iter()
+                .take(MAX_NOTE_FRAGMENTS)
+                .enumerate()
+            {
+                joined.push_str(&fragments[f].raw_text);
+                if n == 0 {
+                    continue;
+                }
+                budget.spend(note_cost(&joined))?;
+                if unit_note(&joined) {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// Whether `text` starts with a number other than 1 (`1,000円`, `1000`).
@@ -2116,6 +2155,46 @@ mod tests {
         ] {
             assert!(!unit_note(text), "{text}");
         }
+        // A note split over runs, 1 pt apart (before: not a note, so
+        // `売上高：1,234` was 1234).
+        for note in [
+            vec![("（単位：", 400.0, 440.0), ("千円）", 441.0, 470.0)],
+            vec![
+                ("（単位", 400.0, 430.0),
+                ("：", 431.0, 441.0),
+                ("千円）", 442.0, 472.0),
+            ],
+            vec![("（単位：", 400.0, 440.0), ("1,000円）", 441.0, 490.0)],
+        ] {
+            let mut fragments: Vec<SourceFragment> = note
+                .iter()
+                .enumerate()
+                .map(|(i, &(text, l, r))| frag(&format!("n{i}"), text, [l, 80.0, r, 90.0]))
+                .collect();
+            fragments.push(frag("s", "売上高：1,234", [60.0, 100.0, 140.0, 110.0]));
+            let result = fill(
+                "doc",
+                &fragments,
+                &form(json!({"fields":[{"id":"sales","label":"売上高","type":"amount"}]})),
+            );
+            assert_eq!(
+                result.fields["sales"].status,
+                FillStatus::Invalid,
+                "{note:?}"
+            );
+        }
+        // Fragments of different lines are not joined.
+        let apart = [
+            frag("a", "（単位：", [400.0, 80.0, 440.0, 90.0]),
+            frag("b", "千円）", [400.0, 120.0, 430.0, 130.0]),
+            frag("s", "売上高：1,234", [60.0, 100.0, 140.0, 110.0]),
+        ];
+        let result = fill(
+            "doc",
+            &apart,
+            &form(json!({"fields":[{"id":"sales","label":"売上高","type":"amount"}]})),
+        );
+        assert_eq!(result.fields["sales"].value, Some(json!(1234)));
     }
 
     #[test]

@@ -1,0 +1,20 @@
+{
+  "description": "単位の注記が同じ行の2つのランに分かれる（「（単位：」と「千円）」）。同じ行の隣り合う片をつなげて注記とみなし、金額・数値は変換しない（invalid）。以前は片ごとにしか見ず、「売上高：1,234」を1234に変換していた",
+  "support": "supported",
+  "runs": [
+    {"x": 400, "y": 80, "text": "（単位："},
+    {"x": 452, "y": 80, "text": "千円）"},
+    {"x": 60, "y": 100, "text": "売上高：1,234"},
+    {"x": 60, "y": 124, "text": "営業利益：56"}
+  ],
+  "form": {"fields": [
+    {"id": "sales", "label": "売上高", "type": "amount"},
+    {"id": "profit", "label": "営業利益", "type": "number"},
+    {"id": "sales_text", "label": "売上高"}
+  ]},
+  "expect": {
+    "sales": {"abstain": "invalid", "candidate": "1,234"},
+    "profit": {"abstain": "invalid", "candidate": "56"},
+    "sales_text": {"raw": "1,234"}
+  }
+}
