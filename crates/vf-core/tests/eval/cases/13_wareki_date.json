@@ -1,0 +1,22 @@
+{
+  "description": "未対応: 和暦の日付（令和・平成・元年・略記）",
+  "support": "unsupported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "発行日：令和8年11月8日"},
+    {"x": 60, "y": 124, "text": "生年月日：平成2年4月1日"},
+    {"x": 60, "y": 148, "text": "設立日：令和元年5月1日"},
+    {"x": 60, "y": 172, "text": "契約開始日：R8.4.1"}
+  ],
+  "form": {"fields": [
+    {"id": "issued", "label": "発行日", "type": "date"},
+    {"id": "birth", "label": "生年月日", "type": "date"},
+    {"id": "founded", "label": "設立日", "type": "date"},
+    {"id": "contract_start", "label": "契約開始日", "type": "date"}
+  ]},
+  "expect": {
+    "issued": {"raw": "令和8年11月8日", "value": "2026-11-08"},
+    "birth": {"raw": "平成2年4月1日", "value": "1990-04-01"},
+    "founded": {"raw": "令和元年5月1日", "value": "2019-05-01"},
+    "contract_start": {"raw": "R8.4.1", "value": "2026-04-01"}
+  }
+}

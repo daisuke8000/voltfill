@@ -1,0 +1,26 @@
+{
+  "description": "未対応: 明細表（1行のみ）。各列の値は一意に決まる",
+  "support": "unsupported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "品名"},
+    {"x": 300, "y": 100, "text": "数量"},
+    {"x": 360, "y": 100, "text": "単価"},
+    {"x": 440, "y": 100, "text": "金額"},
+    {"x": 60, "y": 118, "text": "USBケーブル Type-C 1m"},
+    {"x": 300, "y": 118, "text": "2"},
+    {"x": 360, "y": 118, "text": "¥1,200"},
+    {"x": 440, "y": 118, "text": "¥2,400"}
+  ],
+  "form": {"fields": [
+    {"id": "item", "label": "品名"},
+    {"id": "quantity", "label": "数量", "type": "number"},
+    {"id": "unit_price", "label": "単価", "type": "amount"},
+    {"id": "amount", "label": "金額", "type": "amount"}
+  ]},
+  "expect": {
+    "item": {"raw": "USBケーブル Type-C 1m"},
+    "quantity": {"raw": "2", "value": 2},
+    "unit_price": {"raw": "¥1,200", "value": 1200},
+    "amount": {"raw": "¥2,400", "value": 2400}
+  }
+}

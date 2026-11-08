@@ -1,0 +1,18 @@
+{
+  "description": "フォームのラベルが文書にない項目は空欄のまま",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "請求番号：INV-0099"},
+    {"x": 60, "y": 124, "text": "お支払期限：2026年12月31日"}
+  ],
+  "form": {"fields": [
+    {"id": "invoice_no", "label": "請求番号"},
+    {"id": "person", "label": "担当者"},
+    {"id": "payment_method", "label": "支払方法"}
+  ]},
+  "expect": {
+    "invoice_no": {"raw": "INV-0099"},
+    "person": {"abstain": "not_found"},
+    "payment_method": {"abstain": "not_found"}
+  }
+}

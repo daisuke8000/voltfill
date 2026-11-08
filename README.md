@@ -186,4 +186,26 @@ cargo test --workspace --locked
 
 `pdf-inspector` の `ttf-parser 0.25.1` に[RUSTSEC-2026-0192](https://rustsec.org/advisories/RUSTSEC-2026-0192.html)の保守警告があります。脆弱性の発見を示すものではないため、各検査で抑止せず警告として表示します。正式修正は原文・座標・Evidenceの回帰検証後に採用します。
 
+<a id="evaluation"></a>
+
+### フォーム入力の評価セット
+
+フォーム入力（fill）を合成PDFで評価します。フォントファイルなしで日本語のテキスト層を持つPDFを生成し（Type0・Identity-H、ToUnicode付き、グリフ非埋め込み）、ケースごとに項目の期待値（原文と正規化値）または「空欄のまま」と照合します。ネットワークは使いません。
+
+```sh
+cargo test -p vf-core --test eval -- --nocapture
+```
+
+| 指標 | 意味 |
+|---|---|
+| `correct` | 期待どおりの原文・正規化値で埋めた |
+| `wrong` | 埋めたが原文または正規化値が違う |
+| `empty` | 値を期待したが埋めなかった |
+| `abstain` | 空欄を期待し、空欄のままだった |
+| `unexpected` | 空欄を期待したが埋めた（誤入力として数える） |
+
+誤入力（`wrong`・`unexpected`）が1件でもあればテストは失敗します。対応済みのケースは空欄も回帰として失敗にし、未対応のケース（区切り記号のない「ラベル 値」・和暦・明細表など）は正しい値か空欄なら合格です。埋めた値はEvidenceが原文の切り出しで、配置した位置にあることも確認します。現行コードで再現する誤入力は、ケースに `known_failure` で理由を書いて表に残し、失敗にはしません。ケースは[tests/eval/cases](crates/vf-core/tests/eval/cases)のJSONです。
+
+合成した評価専用のデータで、実文書での精度や性能を示すものではありません。推定座標が正解位置と一致するのは、合成フォントの文字幅が推定の前提（全角1em・半角0.5em）と同じためです。描画時はグリフを代替するため、見た目の再現は対象外です。
+
 [アーキテクチャ・C4](https://daisuke8000.github.io/voltfill/)（[ソース](docs/architecture.html)） · [MITライセンス](LICENSE)

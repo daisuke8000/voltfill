@@ -1,0 +1,22 @@
+{
+  "description": "小計・消費税・合計の欄（右揃えの金額）。ご請求額は別名「合計」で探す",
+  "support": "supported",
+  "runs": [
+    {"x": 330, "y": 300, "text": "小計"},
+    {"right": 520, "y": 300, "text": "¥11,000"},
+    {"x": 330, "y": 320, "text": "消費税（10%）"},
+    {"right": 520, "y": 320, "text": "¥1,100"},
+    {"x": 330, "y": 340, "text": "合計"},
+    {"right": 520, "y": 340, "text": "¥12,100"}
+  ],
+  "form": {"fields": [
+    {"id": "subtotal", "label": "小計", "type": "amount"},
+    {"id": "tax", "label": "消費税", "type": "amount"},
+    {"id": "total", "label": "ご請求額", "type": "amount", "hints": ["合計"]}
+  ]},
+  "expect": {
+    "subtotal": {"raw": "¥11,000", "value": 11000},
+    "tax": {"raw": "¥1,100", "value": 1100},
+    "total": {"raw": "¥12,100", "value": 12100}
+  }
+}

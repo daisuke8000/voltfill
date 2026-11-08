@@ -1,0 +1,28 @@
+{
+  "description": "「ラベル：値」が1つのランにある（全角・半角コロン、時刻を含む値）",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "請求番号：INV-0012"},
+    {"x": 60, "y": 124, "text": "発行日：2026年11月8日"},
+    {"x": 60, "y": 148, "text": "Invoice No: AB-778"},
+    {"x": 60, "y": 172, "text": "お支払期限：2026/12/31"},
+    {"x": 60, "y": 196, "text": "ご請求金額：¥12,100（税込）"},
+    {"x": 60, "y": 220, "text": "受付時間：9:00〜18:00"}
+  ],
+  "form": {"fields": [
+    {"id": "invoice_no", "label": "請求番号"},
+    {"id": "issued", "label": "発行日", "type": "date"},
+    {"id": "invoice_no_en", "label": "Invoice No"},
+    {"id": "due", "label": "お支払期限", "type": "date"},
+    {"id": "amount", "label": "ご請求金額", "type": "amount"},
+    {"id": "hours", "label": "受付時間"}
+  ]},
+  "expect": {
+    "invoice_no": {"raw": "INV-0012"},
+    "issued": {"raw": "2026年11月8日", "value": "2026-11-08"},
+    "invoice_no_en": {"raw": "AB-778"},
+    "due": {"raw": "2026/12/31", "value": "2026-12-31"},
+    "amount": {"raw": "¥12,100（税込）", "value": 12100},
+    "hours": {"raw": "9:00〜18:00"}
+  }
+}

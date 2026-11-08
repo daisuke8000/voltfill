@@ -1,0 +1,22 @@
+{
+  "description": "ラベルの直下に値がある（2列並び）",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "お届け先氏名"},
+    {"x": 300, "y": 100, "text": "お届け予定日"},
+    {"x": 60, "y": 114, "text": "佐藤 花子"},
+    {"x": 300, "y": 114, "text": "2026/12/01"},
+    {"x": 60, "y": 150, "text": "ご注文番号"},
+    {"x": 60, "y": 164, "text": "ORD-55821"}
+  ],
+  "form": {"fields": [
+    {"id": "recipient", "label": "お届け先氏名"},
+    {"id": "delivery", "label": "お届け予定日", "type": "date"},
+    {"id": "order_no", "label": "ご注文番号"}
+  ]},
+  "expect": {
+    "recipient": {"raw": "佐藤 花子"},
+    "delivery": {"raw": "2026/12/01", "value": "2026-12-01"},
+    "order_no": {"raw": "ORD-55821"}
+  }
+}
