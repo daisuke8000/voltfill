@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use vf_source::geometry::Rect;
 use vf_source::select::{SelectError, in_box};
-use vf_source::{Quality, SourceFragment};
+use vf_source::{Orientation, Quality, SourceFragment};
 
 /// The per-page item limit of `PdfLimits::default()`.
 const COPIES: usize = 10_000;
@@ -26,6 +26,7 @@ fn copies(place: impl Fn(usize) -> (f64, f64)) -> Vec<SourceFragment> {
                 bbox: Rect::new(left, top, left + 46.4, top + 11.0)
                     .expect("fixture coordinates must form a positive finite rectangle"),
                 quality: Quality::Usable,
+                orientation: Orientation::Deg0,
             }
         })
         .collect()

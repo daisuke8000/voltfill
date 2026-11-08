@@ -279,7 +279,7 @@ use serde::Serialize;
 use crate::budget::{Budget, BudgetError};
 use crate::geometry::Rect;
 use crate::layout::{self, Binding, LayoutError, Placement, Precision, Span};
-use crate::source::{Quality, SourceFragment};
+use crate::source::{Orientation, Quality, SourceFragment};
 
 /// Edge slack, in Display units, for edges the extractor measured: fragment
 /// edges, and part edges where a part starts or ends the fragment. It absorbs
@@ -586,8 +586,13 @@ fn grow(r: Rect, by: f64) -> Rect {
     }
 }
 
+/// Upright (`Orientation::Deg0`) usable fragments only: coverage is measured
+/// along the horizontal advance, so a turned fragment is never selected.
 fn usable(f: &SourceFragment) -> bool {
-    f.quality == Quality::Usable && f.raw_text.chars().any(is_visible) && f.bbox.validate().is_ok()
+    f.quality == Quality::Usable
+        && f.orientation == Orientation::Deg0
+        && f.raw_text.chars().any(is_visible)
+        && f.bbox.validate().is_ok()
 }
 
 fn whole(f: &SourceFragment) -> Span {

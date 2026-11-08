@@ -9,7 +9,7 @@ use vf_source::select::{
     MEASURED_EDGE_SLACK, Role, SelectError, Selected, contains_label, in_box, in_box_within,
     overlapping, overlapping_within, starts_with_label,
 };
-use vf_source::{Quality, SourceFragment};
+use vf_source::{Orientation, Quality, SourceFragment};
 
 fn rect(left: f64, top: f64, right: f64, bottom: f64) -> Rect {
     Rect::new(left, top, right, bottom)
@@ -24,6 +24,7 @@ fn fragment(id: &str, page: u32, text: &str, bbox: Rect) -> SourceFragment {
         raw_text: text.into(),
         bbox,
         quality: Quality::Usable,
+        orientation: Orientation::Deg0,
     }
 }
 
@@ -1302,5 +1303,24 @@ fn select_work_is_charged_to_the_callers_budget() {
     assert_eq!(
         in_box_within(&raw, 1, invalid, &mut late),
         Err(SelectError::InvalidBox)
+    );
+}
+
+#[test]
+fn a_turned_fragment_is_never_selected() {
+    // Coverage is measured along the horizontal advance, so a fragment read
+    // in a turned frame is left out even when the box covers it entirely.
+    let mut turned = fragment("r", 1, "請求番号：INV-001", rect(60.0, 100.0, 71.0, 200.0));
+    turned.orientation = Orientation::Deg90;
+    let around = rect(50.0, 90.0, 80.0, 210.0);
+    assert!(
+        in_box(&[turned.clone()], 1, around)
+            .expect("within limits")
+            .is_empty()
+    );
+    assert!(
+        overlapping(&[turned], 1, around)
+            .expect("within limits")
+            .is_empty()
     );
 }
