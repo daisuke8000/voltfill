@@ -114,6 +114,63 @@ jobs:
       - name: Audit locked dependencies
         shell: bash
         run: '"$RUNNER_TEMP/cargo-audit/bin/cargo-audit" audit --file Cargo.lock --deny unsound'
+  osv:
+    name: OSV vulnerabilities
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned OSV-Scanner
+        env:
+          GOBIN: ${{ runner.temp }}/osv-bin
+          GOMODCACHE: ${{ runner.temp }}/osv-go-mod
+          GOCACHE: ${{ runner.temp }}/osv-go-build
+        run: go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.7.0
+      # Fail on vulnerabilities and unsound advisories, matching cargo-audit --deny unsound.
+      # Informational advisories such as unmaintained crates are reported as warnings,
+      # never suppressed and never counted as confirmed vulnerabilities.
+      - name: Scan locked dependencies
+        shell: bash
+        run: |
+          report="$RUNNER_TEMP/osv.json"
+          status=0
+          "$RUNNER_TEMP/osv-bin/osv-scanner" scan source --lockfile Cargo.lock --format json --output-file "$report" || status=$?
+          # Exit 1 means findings; anything else non-zero is a scanner error.
+          if [[ "$status" -ne 0 && "$status" -ne 1 ]]; then
+            echo "::error::osv-scanner failed with exit code $status"
+            exit "$status"
+          fi
+          findings='[.results[]?.packages[]?
+            | {name: .package.name, version: .package.version}
+              + (.vulnerabilities[]? | {id, summary,
+                 info: ([.affected[]?.database_specific.informational // empty] | first)})
+            | .blocking = ((.info == null) or (.info == "unsound"))]'
+          jq -r "$findings | .[] | \"\(if .blocking then \"::error\" else \"::warning\" end)::\(.id) \(.name) \(.version) (\(.info // \"vulnerability\")): \(.summary)\"" "$report"
+          blocking=$(jq "$findings | map(select(.blocking)) | length" "$report")
+          echo "Blocking OSV findings: $blocking"
+          test "$blocking" -eq 0
+  deny:
+    name: Licenses, bans and sources
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain and cargo-deny
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-deny-target
+        run: |
+          toolchain=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)
+          test -n "$toolchain"
+          rustup toolchain install "$toolchain" --profile minimal
+          cargo install cargo-deny --version 0.20.2 --locked --root "$RUNNER_TEMP/cargo-deny"
+      # Advisories are covered by the cargo-audit and OSV jobs.
+      - name: Check licenses, bans and sources
+        run: '"$RUNNER_TEMP/cargo-deny/bin/cargo-deny" --locked check bans licenses sources'
   secrets:
     name: Secret scanning
     runs-on: ubuntu-24.04
