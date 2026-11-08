@@ -142,6 +142,8 @@ voltfill fill input.pdf examples/forms/invoice.json --remote -o result.json
 | 4 | 全受信本文を含めて書く | `fill_assist_all_failed`（送った項目がすべて失敗） |
 | 5 | [出力先](#output)を参照 | `output_*`・`input_overwrite_refused` など |
 
+画像フォールバック（計画中・`fill` では未使用）の部品として、モデルが示した囲み（box）の内側の原文片を返す `vf_source::select::in_box` があります。片の一部を囲む場合は、レイアウト解析がその片の中の区切り記号でラベルと値を結び付けた（`binding: "delimiter"`）「ラベル：値」の分割位置でだけ切り出し、ラベルと値を分けられない片（`TEL：…　FAX：…`、`Total = 12000` など）は値にしない役割（`mixed`）で返します。作業量と期限は `vf_source::select::in_box_within` でレイアウト解析・照合と同じ予算（`Budget`）に計上できます。
+
 接続先とキーを設定し（[実APIの利用](#environment)）、PDFと抽出定義を渡します。
 
 ```sh
