@@ -2525,7 +2525,9 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower",
+ "vf-core",
  "vf-legacy",
+ "vf-source",
 ]
 
 [[package]]
