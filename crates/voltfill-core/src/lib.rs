@@ -3,6 +3,7 @@
 pub mod candidates;
 pub mod engine;
 pub mod evaluate;
+pub mod fill;
 pub use pdf_probe::geometry;
 pub mod jev;
 pub mod logging;

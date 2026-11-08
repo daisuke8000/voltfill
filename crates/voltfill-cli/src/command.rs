@@ -14,7 +14,7 @@ use voltfill_core::model::{JevResponse, Strategy};
 use voltfill_core::{pdf, schema};
 use voltfill_server::cli::settings;
 
-const HELP: &str = "VOLTFILL — PDF extraction\n\nvoltfill run --config voltfill.yaml (or voltfill.toml / voltfill.json)\nvoltfill serve --config voltfill.yaml\nvoltfill serve --help\nvoltfill run INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --mock ANSWERS.json\nvoltfill inspect INPUT.pdf\nvoltfill validate SCHEMA.json\n\n--strategy text|vision|hybrid (default: text)\n--model ID (default: jev-1.14.0); images require a pinned version >= 1.14.0.\n--renderer pdfium|hayro selects an enabled renderer; no automatic fallback.\n--pdfium-lib PATH or VOLTFILL_PDFIUM_LIB_PATH selects PDFium when --renderer is omitted\n--pixels-per-point NUMBER sets render scale (default: 1.5).\n--config FILE (or -c FILE, default VOLTFILL_CONFIG) loads YAML/TOML launch settings or legacy JSON execution limits.\nPrecedence: CLI > selected file > environment > defaults.\n--resource-config FILE (or VOLTFILL_RESOURCE_CONFIG) lowers PDF/render ceilings.\nVOLTFILL_EXECUTION_CONFIG selects execution JSON when no execution section/file is supplied.\nVOLTFILL_MODEL, VOLTFILL_STRATEGY, VOLTFILL_RENDERER, VOLTFILL_PIXELS_PER_POINT\nand VOLTFILL_LOG_LEVEL provide startup defaults.\n--max-concurrency N (default: 2, at least 1); rate limits may reduce concurrency.\n--max-attempts 1|2|3 includes the first attempt (default: 3).\n--log-level off|error|warn|info|debug (default: off) enables JSON Lines logs.\nLogs use stderr with JSON on stdout; with --output FILE (or -o FILE),\nlogs use stdout and results go to the file. Debug logs cover VOLTFILL only.\n--dry-run inspects the input without sending requests.\n--evaluation-profile synthetic enables confidence filtering for local synthetic examples.\nBy default, resolved values are returned without a confidence cutoff.\n\nRemote mode requires VOLTFILL_JEV_ENDPOINT (trusted HTTPS, no URL fallback) and\nVOLTFILL_JEV_API_KEY or VOLTFILL_JEV_API_KEY_FILE (one explicit credential file). Vision/Hybrid select image input;\nno additional image permission flag is required. Reports retain original\nresponse bodies regardless of log level and remain evaluation-only.\nLong-form --pdf, --schema, --allow-remote and --execution-config are also supported.\n";
+const HELP: &str = "VOLTFILL — PDF extraction\n\nvoltfill run --config voltfill.yaml (or voltfill.toml / voltfill.json)\nvoltfill serve --config voltfill.yaml\nvoltfill serve --help\nvoltfill run INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --mock ANSWERS.json\nvoltfill inspect INPUT.pdf\nvoltfill fill INPUT.pdf FORM.json (offline: match form labels to PDF text)\nvoltfill validate SCHEMA.json\n\n--strategy text|vision|hybrid (default: text)\n--model ID (default: jev-1.14.0); images require a pinned version >= 1.14.0.\n--renderer pdfium|hayro selects an enabled renderer; no automatic fallback.\n--pdfium-lib PATH or VOLTFILL_PDFIUM_LIB_PATH selects PDFium when --renderer is omitted\n--pixels-per-point NUMBER sets render scale (default: 1.5).\n--config FILE (or -c FILE, default VOLTFILL_CONFIG) loads YAML/TOML launch settings or legacy JSON execution limits.\nPrecedence: CLI > selected file > environment > defaults.\n--resource-config FILE (or VOLTFILL_RESOURCE_CONFIG) lowers PDF/render ceilings.\nVOLTFILL_EXECUTION_CONFIG selects execution JSON when no execution section/file is supplied.\nVOLTFILL_MODEL, VOLTFILL_STRATEGY, VOLTFILL_RENDERER, VOLTFILL_PIXELS_PER_POINT\nand VOLTFILL_LOG_LEVEL provide startup defaults.\n--max-concurrency N (default: 2, at least 1); rate limits may reduce concurrency.\n--max-attempts 1|2|3 includes the first attempt (default: 3).\n--log-level off|error|warn|info|debug (default: off) enables JSON Lines logs.\nLogs use stderr with JSON on stdout; with --output FILE (or -o FILE),\nlogs use stdout and results go to the file. Debug logs cover VOLTFILL only.\n--dry-run inspects the input without sending requests.\n--evaluation-profile synthetic enables confidence filtering for local synthetic examples.\nBy default, resolved values are returned without a confidence cutoff.\n\nRemote mode requires VOLTFILL_JEV_ENDPOINT (trusted HTTPS, no URL fallback) and\nVOLTFILL_JEV_API_KEY or VOLTFILL_JEV_API_KEY_FILE (one explicit credential file). Vision/Hybrid select image input;\nno additional image permission flag is required. Reports retain original\nresponse bodies regardless of log level and remain evaluation-only.\nLong-form --pdf, --schema, --allow-remote and --execution-config are also supported.\n";
 
 struct Args {
     command: String,
@@ -37,7 +37,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, (u8, &'sta
     } else {
         command
     };
-    if !["validate", "inspect", "extract"].contains(&command.as_str()) {
+    if !["validate", "inspect", "extract", "fill"].contains(&command.as_str()) {
         return Err(input_error());
     }
     let mut values = BTreeMap::new();
@@ -56,6 +56,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, (u8, &'sta
             }
         } else if [
             "--schema",
+            "--form",
             "--pdf",
             "--output",
             "--mock",
@@ -84,6 +85,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, (u8, &'sta
             let keys: &[&str] = match command.as_str() {
                 "extract" => &["--pdf", "--schema"],
                 "inspect" => &["--pdf"],
+                "fill" => &["--pdf", "--form"],
                 _ => &["--schema"],
             };
             let key = keys
@@ -98,6 +100,13 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, (u8, &'sta
     let allowed: Option<&[&str]> = match command.as_str() {
         "validate" => Some(&["--schema", "--log-level"]),
         "inspect" => Some(&["--pdf", "--output", "--log-level", "--resource-config"]),
+        "fill" => Some(&[
+            "--pdf",
+            "--form",
+            "--output",
+            "--log-level",
+            "--resource-config",
+        ]),
         _ => None,
     };
     if allowed.is_some_and(|keys| {
@@ -190,6 +199,7 @@ fn output(args: &Args, value: &impl serde::Serialize) -> Result<(), (u8, &'stati
         if [
             "--pdf",
             "--schema",
+            "--form",
             "--mock",
             "--execution-config",
             "--resource-config",
@@ -428,6 +438,19 @@ fn run_with<E: Evaluator>(
             &args,
             &json!({"valid":true,"schema_version":form.schema_version,"field_count":form.fields.len()}),
         )?;
+        return Ok(0);
+    }
+    if args.command == "fill" {
+        let form = voltfill_core::fill::parse_form(&read(
+            args.value("--form")?,
+            voltfill_core::fill::MAX_FORM_BYTES,
+        )?)
+        .map_err(|_| (2, "invalid_form"))?;
+        let bytes = read(args.value("--pdf")?, args.resources.pdf.max_bytes)?;
+        let snapshot =
+            pdf::inspect(&bytes, args.resources.pdf).map_err(|_| (4, "pdf_inspection_failed"))?;
+        let result = voltfill_core::fill::fill(&snapshot.document_id, &snapshot.fragments, &form);
+        output(&args, &result)?;
         return Ok(0);
     }
     let bytes = read(args.value("--pdf")?, args.resources.pdf.max_bytes)?;

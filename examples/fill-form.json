@@ -1,0 +1,8 @@
+{
+  "fields": [
+    {"id": "invoice_no", "label": "請求番号"},
+    {"id": "issued_on", "label": "発行日", "type": "date"},
+    {"id": "total", "label": "ご請求額", "type": "amount", "hints": ["合計", "税込合計"]},
+    {"id": "address", "label": "住所"}
+  ]
+}

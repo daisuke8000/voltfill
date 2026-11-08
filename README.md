@@ -24,6 +24,30 @@ Jevに送信せず、PDFのテキストと座標を確認します。
 voltfill inspect input.pdf
 ```
 
+<a id="fill"></a>
+
+### フォーム入力（fill）
+
+フォーム項目の一覧（[例](examples/fill-form.json)）を渡すと、PDFの原文から各項目の値を探して返します。Jevには送信しません。
+
+```sh
+voltfill fill input.pdf examples/fill-form.json -o result.json
+```
+
+項目は `id`・`label`・`type`（`text` / `date` / `amount` / `number`、既定 `text`）・`hints`（ラベルの別名）です。ラベルの表記ゆれ（全角半角・空白・括弧）を吸収して照合し、型に合う値だけを採用します。
+
+結果は項目ごとに `status` を持ちます。誤って埋めるより空欄を優先し、決めきれない項目は値を入れず候補を返します。
+
+| status | 意味 |
+|---|---|
+| `filled` | 値が1つに決まった。`raw`（原文）・`value`（日付はISO形式、金額・数値は数値）・`evidence` を返す |
+| `ambiguous` | 異なる値の候補が並んだ。`candidates` を返す |
+| `not_found` | 対応するラベルが見つからない |
+| `no_text` | 使えるテキスト層がない（スキャンPDF・文字化け） |
+| `invalid` | ラベルは見つかったが値が型に合わない。`raw` を返す |
+
+`evidence` はページ・原文片のIDとバイト範囲・座標（PDFポイント、左上原点）です。1つの片を「ラベル：値」で分けた場合の座標は文字幅からの推定で、`precision: "estimated"` と示します。表・AcroForm・区切り記号のない「ラベル 値」・和暦は未対応です。結果は評価専用です。
+
 接続先とキーを設定し（[実APIの利用](#environment)）、PDFと抽出定義を渡します。
 
 ```sh

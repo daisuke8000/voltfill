@@ -96,3 +96,22 @@ fn retry_and_logging_help_and_validation_precede_input_or_credentials() {
         assert_error_response(&out.stderr, "invalid_arguments");
     }
 }
+
+#[test]
+fn fill_validates_the_form_and_rejects_remote_flags() {
+    let dir = std::env::temp_dir().join(format!("voltfill-fill-cli-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir must be writable");
+    let bad = dir.join("bad-form.json");
+    std::fs::write(&bad, br#"{"fields":[]}"#).expect("form must be writable");
+    let bad = bad.to_str().expect("temp path must be UTF-8");
+    let out = cli(&["fill", "missing.pdf", bad]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_error_response(&out.stderr, "invalid_form");
+    let out = cli(&["fill", "missing.pdf", "missing-form.json"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_error_response(&out.stderr, "input_read_failed");
+    let out = cli(&["fill", "missing.pdf", bad, "--remote"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_error_response(&out.stderr, "invalid_arguments");
+    std::fs::remove_dir_all(&dir).ok();
+}
