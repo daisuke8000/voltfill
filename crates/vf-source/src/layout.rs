@@ -208,11 +208,13 @@ pub struct Pair {
     pub value: Vec<Span>,
     pub placement: Placement,
     pub binding: Binding,
-    /// A plain fragment (not a `label：` or `label：value` fragment) follows
-    /// the fragment of one of the value's lines on its line, at any
-    /// distance: the value may be cut short (split over runs) or followed by
-    /// another value without a delimiter.
-    pub split: bool,
+    /// One flag per line of `value`: a plain fragment (not a `label：` or
+    /// `label：value` fragment) follows the line's fragment on its line, at
+    /// any distance: the value may be cut short (split over runs) or followed
+    /// by another value without a delimiter. Per line, so a stage that drops
+    /// later lines (a continuation line that is a form label) only counts
+    /// the lines it keeps.
+    pub split: Vec<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -577,8 +579,8 @@ impl Page<'_> {
     /// `label：` or `label：value` fragment there, and (for a value to the
     /// right of its label) at a line with a fragment in the label's column
     /// before the value column: the next row (小計 / 合計). The first line's
-    /// fragment is at `position` of line `line`. Also returns whether any
-    /// line's fragment is [`Page::trailed`] ([`Pair::split`]). `None` when
+    /// fragment is at `position` of line `line`. Also returns, per line,
+    /// whether its fragment is [`Page::trailed`] ([`Pair::split`]). `None` when
     /// the value would exceed [`MAX_VALUE_LINES`].
     fn value(
         &self,
@@ -587,10 +589,10 @@ impl Page<'_> {
         first: Span,
         column: Column,
         budget: &mut Budget,
-    ) -> Result<Option<(Vec<Span>, bool)>, BudgetError> {
+    ) -> Result<Option<(Vec<Span>, Vec<bool>)>, BudgetError> {
         let page = self.lines[line].page;
         let mut last = first.bbox;
-        let mut split = self.trailed(&self.lines[line], position);
+        let mut split = vec![self.trailed(&self.lines[line], position)];
         let mut value = vec![first];
         for next_line in &self.lines[line + 1..] {
             budget.spend(1)?;
@@ -606,7 +608,7 @@ impl Page<'_> {
             }
             let next = next_line.fragments[at];
             value.push(self.span(next, START, END, budget)?);
-            split |= self.trailed(next_line, at);
+            split.push(self.trailed(next_line, at));
             last = self.fragments[next].bbox;
         }
         Ok(Some((value, split)))
@@ -694,7 +696,7 @@ impl Page<'_> {
                 value: vec![self.span(next.fragments[slot], START, END, budget)?],
                 placement: Placement::Below,
                 binding: Binding::Geometric,
-                split: self.trailed(next, slot),
+                split: vec![self.trailed(next, slot)],
             });
         }
         for (cell, split) in cells {
@@ -704,7 +706,7 @@ impl Page<'_> {
                 value: vec![self.span(cell, START, END, budget)?],
                 placement: Placement::Column,
                 binding: Binding::Geometric,
-                split,
+                split: vec![split],
             })?;
         }
         Ok(())
@@ -1343,7 +1345,7 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_fragment_close_after_the_value_marks_it_split() {
+    fn a_plain_fragment_after_the_value_marks_it_split() {
         // Before: 住所 → 〒100-0001 and 氏名 → 山田, with nothing marking the
         // rest of the value in the next fragment.
         let fragments = [
@@ -1364,9 +1366,10 @@ mod tests {
         let split = |label: &str| {
             let pairs = find(&layout, &fragments, label);
             assert_eq!(pairs.len(), 1, "{label}");
+            assert_eq!(pairs[0].split.len(), 1, "{label}");
             (
                 texts(&fragments, &pairs[0].value).join("\n"),
-                pairs[0].split,
+                pairs[0].split[0],
             )
         };
         assert_eq!(split("住所"), ("〒100-0001".into(), true));
@@ -1385,7 +1388,7 @@ mod tests {
             frag("c", "太郎", [151.0, 100.0, 171.0, 110.0]),
         ];
         let layout = analyze(&far);
-        assert!(find(&layout, &far, "氏名")[0].split);
+        assert_eq!(find(&layout, &far, "氏名")[0].split, [true]);
         // Continuation lines count too.
         let lines = [
             frag("a", "備考：", [60.0, 100.0, 90.0, 110.0]),
@@ -1399,7 +1402,8 @@ mod tests {
             texts(&lines, &note[0].value),
             ["午前中の配達を希望。", "不在時は"]
         );
-        assert!(note[0].split);
+        // Changed: one flag per line (before: one flag for the value).
+        assert_eq!(note[0].split, [false, true]);
     }
 
     #[test]

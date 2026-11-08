@@ -1,0 +1,22 @@
+{
+  "description": "「住所：東京都千代田区」の次の行が、フォームのラベル「担当」とその右の「山田太郎」。続きの行はフォームのラベルなので値に含めず、値は1行。以前は外した行の右に片があることも split_value に数え、住所を候補止まりにしていた。値に残した行の右に片があれば split_value のまま",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "住所：東京都千代田区"},
+    {"x": 60, "y": 112, "text": "担当"},
+    {"x": 120, "y": 112, "text": "山田太郎"},
+    {"x": 60, "y": 148, "text": "氏名：佐藤"},
+    {"x": 60, "y": 160, "text": "花子"},
+    {"x": 100, "y": 160, "text": "経理部"}
+  ],
+  "form": {"fields": [
+    {"id": "address", "label": "住所"},
+    {"id": "person", "label": "担当"},
+    {"id": "name", "label": "氏名"}
+  ]},
+  "expect": {
+    "address": {"raw": "東京都千代田区"},
+    "person": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "山田太郎"},
+    "name": {"abstain": "ambiguous", "hold": "multi_line", "holds": ["multi_line", "split_value"], "candidate": "佐藤\n花子"}
+  }
+}

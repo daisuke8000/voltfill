@@ -477,6 +477,9 @@ struct PreparedValue {
     evidence: Vec<FillEvidence>,
     /// More than one value in the text ([`several_values`]).
     several: bool,
+    /// A kept line's fragment is followed by a plain fragment
+    /// ([`Pair::split`]); dropped continuation lines do not count.
+    split: bool,
     /// The pair label states a scale unit (`千円`, `万円`) or the document
     /// has a unit note (`（単位：千円）`).
     scaled: bool,
@@ -561,7 +564,7 @@ impl Context<'_> {
                 (found.one_sided, Hold::OneSidedQualifier),
                 (pair.binding == Binding::Geometric, Hold::GeometricOnly),
                 (value.evidence.len() > 1, Hold::MultiLine),
-                (pair.split, Hold::SplitValue),
+                (value.split, Hold::SplitValue),
                 (
                     field.field_type == FieldType::Text && value.several,
                     Hold::SeveralValues,
@@ -616,6 +619,7 @@ impl Context<'_> {
             return Ok(rejected(false));
         };
         let mut evidence = Vec::with_capacity(pair.value.len());
+        let mut split = false;
         for (line, span) in pair.value.iter().enumerate() {
             budget.spend(1)?;
             let Some(text) = slice(self.texts, span) else {
@@ -631,6 +635,7 @@ impl Context<'_> {
                 }
                 break;
             }
+            split |= pair.split.get(line).copied().unwrap_or(false);
             evidence.push(FillEvidence {
                 page: pair.page,
                 fragment_id: span.fragment_id.clone(),
@@ -660,6 +665,7 @@ impl Context<'_> {
                 raw,
                 evidence,
                 several,
+                split,
                 scaled,
                 typed: [None, None, None],
             }),
@@ -2925,6 +2931,41 @@ mod tests {
         // candidate only (before: filled).
         assert_eq!(held(&result, "phone"), Some(Hold::GeometricOnly));
         assert_eq!(result.fields["phone"].candidates[0].raw, "03-1234-5678");
+    }
+
+    #[test]
+    fn dropped_continuation_lines_do_not_split_the_value() {
+        // The next line is the `担当` row (a form label) with its value.
+        let fragments = [
+            frag("a", "住所：東京都千代田区", [60.0, 100.0, 160.0, 110.0]),
+            frag("b", "担当", [60.0, 112.0, 80.0, 122.0]),
+            frag("c", "山田太郎", [120.0, 112.0, 160.0, 122.0]),
+            frag("d", "氏名：佐藤", [60.0, 136.0, 110.0, 146.0]),
+            frag("e", "花子", [60.0, 148.0, 80.0, 158.0]),
+            frag("f", "経理部", [100.0, 148.0, 130.0, 158.0]),
+        ];
+        let result = fill(
+            "doc",
+            &fragments,
+            &form(json!({"fields":[
+                {"id":"address","label":"住所"},
+                {"id":"person","label":"担当"},
+                {"id":"name","label":"氏名"}
+            ]})),
+        );
+        // Before: split_value, from the dropped `担当` line.
+        assert_eq!(
+            result.fields["address"].raw.as_deref(),
+            Some("東京都千代田区")
+        );
+        assert_eq!(held(&result, "person"), Some(Hold::GeometricOnly));
+        // A kept continuation line still counts.
+        let name = &result.fields["name"];
+        assert_eq!(name.status, FillStatus::Ambiguous);
+        assert_eq!(
+            name.candidates[0].holds,
+            [Hold::MultiLine, Hold::SplitValue]
+        );
     }
 
     /// `n` one-fragment lines stacked in one column with the same label text.
