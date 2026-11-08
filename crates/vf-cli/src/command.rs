@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use vf_core::assist;
 use vf_legacy::engine::{self, EvaluationProfile, ExtractOptions};
 use vf_legacy::evaluate::{Evaluator, FixtureEvaluator, RemoteEvaluator};
@@ -15,7 +16,7 @@ use vf_legacy::jev::transport::{ExecutionConfig, Secret};
 use vf_legacy::model::{JevResponse, Strategy};
 use vf_legacy::{pdf, schema};
 
-const HELP: &str = "VOLTFILL — PDF extraction\n\nvoltfill run --config voltfill.yaml (or voltfill.toml / voltfill.json)\nvoltfill serve --config voltfill.yaml\nvoltfill serve --help\nvoltfill run INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --mock ANSWERS.json\nvoltfill inspect INPUT.pdf\nvoltfill fill INPUT.pdf FORM.json (offline: match form labels to PDF text)\nvoltfill fill INPUT.pdf FORM.json --remote (Jev chooses among ambiguous fields' source candidates)\nvoltfill validate SCHEMA.json\n\n--strategy text|vision|hybrid (default: text)\n--model ID (default: jev-1.14.0); images require a pinned version >= 1.14.0.\n--renderer pdfium|hayro selects an enabled renderer; no automatic fallback.\n--pdfium-lib PATH or VOLTFILL_PDFIUM_LIB_PATH selects PDFium when --renderer is omitted\n--pixels-per-point NUMBER sets render scale (default: 1.5).\n--config FILE (or -c FILE, default VOLTFILL_CONFIG) loads YAML/TOML launch settings or legacy JSON execution limits.\nPrecedence: CLI > selected file > environment > defaults.\n--resource-config FILE (or VOLTFILL_RESOURCE_CONFIG) lowers PDF/render ceilings.\nVOLTFILL_EXECUTION_CONFIG selects execution JSON when no execution section/file is supplied.\nVOLTFILL_MODEL, VOLTFILL_STRATEGY, VOLTFILL_RENDERER, VOLTFILL_PIXELS_PER_POINT\nand VOLTFILL_LOG_LEVEL provide startup defaults.\n--max-concurrency N (default: 2, at least 1); rate limits may reduce concurrency.\n--max-attempts 1|2|3 includes the first attempt (default: 3).\n--log-level off|error|warn|info|debug (default: off) enables JSON Lines logs.\nLogs use stderr with JSON on stdout; with --output FILE (or -o FILE),\nlogs use stdout and results go to the file. Debug logs cover VOLTFILL only.\n--dry-run inspects the input without sending requests.\n--evaluation-profile synthetic enables confidence filtering for local synthetic examples.\nBy default, resolved values are returned without a confidence cutoff.\n\nRemote mode requires VOLTFILL_JEV_ENDPOINT (trusted HTTPS, no URL fallback) and\nVOLTFILL_JEV_API_KEY or VOLTFILL_JEV_API_KEY_FILE (one explicit credential file). Vision/Hybrid select image input;\nno additional image permission flag is required. Reports retain original\nresponse bodies regardless of log level and remain evaluation-only.\nLong-form --pdf, --schema, --allow-remote and --execution-config are also supported.\n\nfill --remote sends only fields left ambiguous, as choices among their own source\ncandidates (label and value text, no images); values still come from the PDF.\nIt accepts --model, --max-attempts and --execution-config FILE (not --config);\nbatches are sent one at a time. If every sent field fails, the full result is\nstill written and the exit code is 4. Fields left ambiguous or not_found (also\nwhen every sent field ends in not_unique_maximum) exit 0: check each status.\nWithout --remote, fill reads no credentials.\n\n--output FILE is checked and its temporary file created in FILE's directory after\nconfiguration files are read and before inputs, credentials or requests. If the\nresult cannot replace FILE (exit code 5), a file verified to hold all of it, in\nFILE's directory or else the working directory, is named in output_kept; if none\ncan hold it, stderr gets {\"error\":REASON,\"result\":RESULT}.\n";
+const HELP: &str = "VOLTFILL — PDF extraction\n\nvoltfill run --config voltfill.yaml (or voltfill.toml / voltfill.json)\nvoltfill serve --config voltfill.yaml\nvoltfill serve --help\nvoltfill run INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --mock ANSWERS.json\nvoltfill inspect INPUT.pdf\nvoltfill fill INPUT.pdf FORM.json (offline: match form labels to PDF text)\nvoltfill fill INPUT.pdf FORM.json --remote (Jev chooses among ambiguous fields' source candidates)\n--deadline-ms N bounds fill's layout and matching from the start of fill (default: 30000,\n1 to 600000); PDF inspection is bounded by its own limits and is not interrupted.\nPast a fill limit, fill exits 4 (layout_limit_exceeded, fill_budget_exceeded or\nfill_deadline_exceeded) before writing a result or sending a request.\nvoltfill validate SCHEMA.json\n\n--strategy text|vision|hybrid (default: text)\n--model ID (default: jev-1.14.0); images require a pinned version >= 1.14.0.\n--renderer pdfium|hayro selects an enabled renderer; no automatic fallback.\n--pdfium-lib PATH or VOLTFILL_PDFIUM_LIB_PATH selects PDFium when --renderer is omitted\n--pixels-per-point NUMBER sets render scale (default: 1.5).\n--config FILE (or -c FILE, default VOLTFILL_CONFIG) loads YAML/TOML launch settings or legacy JSON execution limits.\nPrecedence: CLI > selected file > environment > defaults.\n--resource-config FILE (or VOLTFILL_RESOURCE_CONFIG) lowers PDF/render ceilings.\nVOLTFILL_EXECUTION_CONFIG selects execution JSON when no execution section/file is supplied.\nVOLTFILL_MODEL, VOLTFILL_STRATEGY, VOLTFILL_RENDERER, VOLTFILL_PIXELS_PER_POINT\nand VOLTFILL_LOG_LEVEL provide startup defaults.\n--max-concurrency N (default: 2, at least 1); rate limits may reduce concurrency.\n--max-attempts 1|2|3 includes the first attempt (default: 3).\n--log-level off|error|warn|info|debug (default: off) enables JSON Lines logs.\nLogs use stderr with JSON on stdout; with --output FILE (or -o FILE),\nlogs use stdout and results go to the file. Debug logs cover VOLTFILL only.\n--dry-run inspects the input without sending requests.\n--evaluation-profile synthetic enables confidence filtering for local synthetic examples.\nBy default, resolved values are returned without a confidence cutoff.\n\nRemote mode requires VOLTFILL_JEV_ENDPOINT (trusted HTTPS, no URL fallback) and\nVOLTFILL_JEV_API_KEY or VOLTFILL_JEV_API_KEY_FILE (one explicit credential file). Vision/Hybrid select image input;\nno additional image permission flag is required. Reports retain original\nresponse bodies regardless of log level and remain evaluation-only.\nLong-form --pdf, --schema, --allow-remote and --execution-config are also supported.\n\nfill --remote sends only fields left ambiguous, as choices among their own source\ncandidates (label and value text, no images); values still come from the PDF.\nIt accepts --model, --max-attempts and --execution-config FILE (not --config);\nbatches are sent one at a time. --deadline-ms bounds only the offline step;\nrequests are bounded by the execution config (total_deadline_ms). If every sent field fails, the full result is\nstill written and the exit code is 4 (fill_assist_all_failed). Fields left ambiguous or not_found (also\nwhen every sent field ends in not_unique_maximum) exit 0: check each status.\nWithout --remote, fill reads no credentials.\n\n--output FILE is checked and its temporary file created in FILE's directory after\nconfiguration files are read and before inputs, credentials or requests. If the\nresult cannot replace FILE (exit code 5), a file verified to hold all of it, in\nFILE's directory or else the working directory, is named in output_kept; if none\ncan hold it, stderr gets {\"error\":REASON,\"result\":RESULT}.\n";
 
 struct Args {
     command: String,
@@ -26,6 +27,25 @@ struct Args {
     resources: vf_legacy::resources::ResourceLimits,
     launch_path: Option<PathBuf>,
 }
+/// Default wall-clock deadline for `voltfill fill` layout and matching, counted
+/// from the start of the `fill` command (inputs and inspection included).
+const FILL_DEADLINE_MS: u64 = 30_000;
+/// Largest accepted `--deadline-ms`.
+const MAX_FILL_DEADLINE_MS: u64 = 600_000;
+
+/// The `fill` deadline: `--deadline-ms` or [`FILL_DEADLINE_MS`].
+fn fill_deadline(args: &Args) -> Result<Duration, (u8, &'static str)> {
+    let ms = match args.values.get("--deadline-ms") {
+        None => FILL_DEADLINE_MS,
+        Some(value) => value
+            .parse::<u64>()
+            .ok()
+            .filter(|ms| (1..=MAX_FILL_DEADLINE_MS).contains(ms))
+            .ok_or((2, "invalid_deadline"))?,
+    };
+    Ok(Duration::from_millis(ms))
+}
+
 fn input_error() -> (u8, &'static str) {
     (2, "invalid_arguments")
 }
@@ -72,6 +92,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, (u8, &'sta
             "--execution-config",
             "--resource-config",
             "--log-level",
+            "--deadline-ms",
         ]
         .contains(&arg.as_str())
         {
@@ -117,6 +138,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, (u8, &'sta
                 "--model",
                 "--max-attempts",
                 "--execution-config",
+                "--deadline-ms",
             ],
             &["--allow-remote"],
         )),
@@ -127,6 +149,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, (u8, &'sta
                 "--output",
                 "--log-level",
                 "--resource-config",
+                "--deadline-ms",
             ],
             &[],
         )),
@@ -803,6 +826,9 @@ fn run_command<E: Evaluator, T: assist::Transport, C: assist::Clock>(
         return Ok(0);
     }
     if args.command == "fill" {
+        // Layout and matching stop at the deadline; inspection is bounded by
+        // PdfLimits and is not interrupted, but its time counts.
+        let deadline = Instant::now() + fill_deadline(args)?;
         // Remote options are validated before any input or credential is read.
         let options = if args.flag("--allow-remote") {
             let options = assist::AssistOptions {
@@ -836,7 +862,10 @@ fn run_command<E: Evaluator, T: assist::Transport, C: assist::Clock>(
             &snapshot.document_id,
             &snapshot.fragments,
             &form,
-            &vf_core::fill::FillLimits::default(),
+            &vf_core::fill::FillLimits {
+                deadline: Some(deadline),
+                ..vf_core::fill::FillLimits::default()
+            },
         )
         .map_err(|error| (4, error.code()))?;
         let Some((options, secret, (mut transport, mut clock))) = remote else {
