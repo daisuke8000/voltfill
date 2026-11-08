@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 vf-source.workspace = true
+vf-client.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -15,3 +16,4 @@ unicode-normalization.workspace = true
 
 [dev-dependencies]
 lopdf.workspace = true
+log.workspace = true

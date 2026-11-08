@@ -28,7 +28,7 @@ voltfill inspect input.pdf
 
 ### フォーム入力（fill）
 
-フォーム項目の一覧（[例](examples/forms/invoice.json)）を渡すと、PDFの原文から各項目の値を探して返します。Jevには送信しません。
+フォーム項目の一覧（[例](examples/forms/invoice.json)）を渡すと、PDFの原文から各項目の値を探して返します。`--remote` を付けない限りJevには送信しません。
 
 ```sh
 voltfill fill input.pdf examples/forms/invoice.json -o result.json
@@ -47,6 +47,18 @@ voltfill fill input.pdf examples/forms/invoice.json -o result.json
 | `invalid` | ラベルは見つかったが値が型に合わない。`raw` を返す |
 
 `evidence` はページ・原文片のIDとバイト範囲・座標（PDFポイント、左上原点）です。1つの片を「ラベル：値」で分けた場合の座標は文字幅からの推定で、`precision: "estimated"` と示します。表・AcroForm・区切り記号のない「ラベル 値」・和暦は未対応です。結果は評価専用です。
+
+`--remote` を付けると、`ambiguous` の項目だけをJevに送り、その項目の候補から選ばせます。接続先とキーは `run --remote` と同じく必要です（[実APIの利用](#environment)）。`--remote` なしでは認証情報を読まず、結果も変わりません。
+
+```sh
+voltfill fill input.pdf examples/forms/invoice.json --remote -o result.json
+```
+
+- 送るのは項目のラベル・型・別名と、候補ごとのページ・原文のラベルと値だけです。選択肢は候補の順に `c0`・`c1`…と `none` です。ページ画像・前後の行・ほかの項目は送りません。
+- 選ばれた候補が確率の単独最大のときだけ `filled`（`method: "jev_choice"`）にし、`raw`・`value`・`evidence` はその候補の原文から取ります。`none` が単独最大なら `not_found`、同率・不正な回答・送信失敗では `ambiguous` のままです。送った項目は `candidates` を残します。
+- 結果には `model`・`assist`（項目ごとの質問ID・`outcome`・選ばれたキー）・`usage`・`jev_responses` が加わります。`jev_responses` は再試行・エラー・不完全な本文を含む全試行の受信本文です。
+- `--model`・`--max-attempts`・`--execution-config FILE` が使えます。送信回数・期限・トークン・費用・本文量の上限は全バッチ合計に適用し、バッチは1件ずつ送ります。
+- 模擬応答でのみ試験しており、実APIでの精度は未測定です。confidence・確率は校正済みの正答確率ではありません。
 
 接続先とキーを設定し（[実APIの利用](#environment)）、PDFと抽出定義を渡します。
 

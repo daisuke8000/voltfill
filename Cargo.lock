@@ -2478,11 +2478,13 @@ dependencies = [
 name = "vf-core"
 version = "0.1.0"
 dependencies = [
+ "log",
  "lopdf 0.46.0",
  "serde",
  "serde_json",
  "thiserror",
  "unicode-normalization",
+ "vf-client",
  "vf-source",
 ]
 

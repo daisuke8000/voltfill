@@ -8,13 +8,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use vf_core::assist;
 use vf_legacy::engine::{self, EvaluationProfile, ExtractOptions};
 use vf_legacy::evaluate::{Evaluator, FixtureEvaluator, RemoteEvaluator};
 use vf_legacy::jev::transport::{ExecutionConfig, Secret};
 use vf_legacy::model::{JevResponse, Strategy};
 use vf_legacy::{pdf, schema};
 
-const HELP: &str = "VOLTFILL — PDF extraction\n\nvoltfill run --config voltfill.yaml (or voltfill.toml / voltfill.json)\nvoltfill serve --config voltfill.yaml\nvoltfill serve --help\nvoltfill run INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --mock ANSWERS.json\nvoltfill inspect INPUT.pdf\nvoltfill fill INPUT.pdf FORM.json (offline: match form labels to PDF text)\nvoltfill validate SCHEMA.json\n\n--strategy text|vision|hybrid (default: text)\n--model ID (default: jev-1.14.0); images require a pinned version >= 1.14.0.\n--renderer pdfium|hayro selects an enabled renderer; no automatic fallback.\n--pdfium-lib PATH or VOLTFILL_PDFIUM_LIB_PATH selects PDFium when --renderer is omitted\n--pixels-per-point NUMBER sets render scale (default: 1.5).\n--config FILE (or -c FILE, default VOLTFILL_CONFIG) loads YAML/TOML launch settings or legacy JSON execution limits.\nPrecedence: CLI > selected file > environment > defaults.\n--resource-config FILE (or VOLTFILL_RESOURCE_CONFIG) lowers PDF/render ceilings.\nVOLTFILL_EXECUTION_CONFIG selects execution JSON when no execution section/file is supplied.\nVOLTFILL_MODEL, VOLTFILL_STRATEGY, VOLTFILL_RENDERER, VOLTFILL_PIXELS_PER_POINT\nand VOLTFILL_LOG_LEVEL provide startup defaults.\n--max-concurrency N (default: 2, at least 1); rate limits may reduce concurrency.\n--max-attempts 1|2|3 includes the first attempt (default: 3).\n--log-level off|error|warn|info|debug (default: off) enables JSON Lines logs.\nLogs use stderr with JSON on stdout; with --output FILE (or -o FILE),\nlogs use stdout and results go to the file. Debug logs cover VOLTFILL only.\n--dry-run inspects the input without sending requests.\n--evaluation-profile synthetic enables confidence filtering for local synthetic examples.\nBy default, resolved values are returned without a confidence cutoff.\n\nRemote mode requires VOLTFILL_JEV_ENDPOINT (trusted HTTPS, no URL fallback) and\nVOLTFILL_JEV_API_KEY or VOLTFILL_JEV_API_KEY_FILE (one explicit credential file). Vision/Hybrid select image input;\nno additional image permission flag is required. Reports retain original\nresponse bodies regardless of log level and remain evaluation-only.\nLong-form --pdf, --schema, --allow-remote and --execution-config are also supported.\n";
+const HELP: &str = "VOLTFILL — PDF extraction\n\nvoltfill run --config voltfill.yaml (or voltfill.toml / voltfill.json)\nvoltfill serve --config voltfill.yaml\nvoltfill serve --help\nvoltfill run INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --mock ANSWERS.json\nvoltfill inspect INPUT.pdf\nvoltfill fill INPUT.pdf FORM.json (offline: match form labels to PDF text)\nvoltfill fill INPUT.pdf FORM.json --remote (Jev chooses among ambiguous fields' source candidates)\nvoltfill validate SCHEMA.json\n\n--strategy text|vision|hybrid (default: text)\n--model ID (default: jev-1.14.0); images require a pinned version >= 1.14.0.\n--renderer pdfium|hayro selects an enabled renderer; no automatic fallback.\n--pdfium-lib PATH or VOLTFILL_PDFIUM_LIB_PATH selects PDFium when --renderer is omitted\n--pixels-per-point NUMBER sets render scale (default: 1.5).\n--config FILE (or -c FILE, default VOLTFILL_CONFIG) loads YAML/TOML launch settings or legacy JSON execution limits.\nPrecedence: CLI > selected file > environment > defaults.\n--resource-config FILE (or VOLTFILL_RESOURCE_CONFIG) lowers PDF/render ceilings.\nVOLTFILL_EXECUTION_CONFIG selects execution JSON when no execution section/file is supplied.\nVOLTFILL_MODEL, VOLTFILL_STRATEGY, VOLTFILL_RENDERER, VOLTFILL_PIXELS_PER_POINT\nand VOLTFILL_LOG_LEVEL provide startup defaults.\n--max-concurrency N (default: 2, at least 1); rate limits may reduce concurrency.\n--max-attempts 1|2|3 includes the first attempt (default: 3).\n--log-level off|error|warn|info|debug (default: off) enables JSON Lines logs.\nLogs use stderr with JSON on stdout; with --output FILE (or -o FILE),\nlogs use stdout and results go to the file. Debug logs cover VOLTFILL only.\n--dry-run inspects the input without sending requests.\n--evaluation-profile synthetic enables confidence filtering for local synthetic examples.\nBy default, resolved values are returned without a confidence cutoff.\n\nRemote mode requires VOLTFILL_JEV_ENDPOINT (trusted HTTPS, no URL fallback) and\nVOLTFILL_JEV_API_KEY or VOLTFILL_JEV_API_KEY_FILE (one explicit credential file). Vision/Hybrid select image input;\nno additional image permission flag is required. Reports retain original\nresponse bodies regardless of log level and remain evaluation-only.\nLong-form --pdf, --schema, --allow-remote and --execution-config are also supported.\n\nfill --remote sends only fields left ambiguous, as choices among their own source\ncandidates (label and value text, no images); values still come from the PDF.\nIt accepts --model, --max-attempts and --execution-config FILE (not --config);\nbatches are sent one at a time. Without --remote, fill reads no credentials.\n";
 
 struct Args {
     command: String,
@@ -97,25 +98,60 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, (u8, &'sta
             return Err(input_error());
         }
     }
-    let allowed: Option<&[&str]> = match command.as_str() {
-        "validate" => Some(&["--schema", "--log-level"]),
-        "inspect" => Some(&["--pdf", "--output", "--log-level", "--resource-config"]),
-        "fill" => Some(&[
-            "--pdf",
-            "--form",
-            "--output",
-            "--log-level",
-            "--resource-config",
-        ]),
+    // Only `fill` accepts `--remote` among these commands; its remote options
+    // are rejected without it so offline fill stays unchanged.
+    let remote_fill = command == "fill" && flags.contains("--allow-remote");
+    let allowed: Option<(&[&str], &[&str])> = match command.as_str() {
+        "validate" => Some((&["--schema", "--log-level"], &[])),
+        "inspect" => Some((
+            &["--pdf", "--output", "--log-level", "--resource-config"],
+            &[],
+        )),
+        "fill" if remote_fill => Some((
+            &[
+                "--pdf",
+                "--form",
+                "--output",
+                "--log-level",
+                "--resource-config",
+                "--model",
+                "--max-attempts",
+                "--execution-config",
+            ],
+            &["--allow-remote"],
+        )),
+        "fill" => Some((
+            &[
+                "--pdf",
+                "--form",
+                "--output",
+                "--log-level",
+                "--resource-config",
+            ],
+            &[],
+        )),
         _ => None,
     };
-    if allowed.is_some_and(|keys| {
-        !flags.is_empty() || values.keys().any(|key| !keys.contains(&key.as_str()))
+    if allowed.is_some_and(|(keys, allowed_flags)| {
+        flags
+            .iter()
+            .any(|flag| !allowed_flags.contains(&flag.as_str()))
+            || values.keys().any(|key| !keys.contains(&key.as_str()))
     }) {
         return Err(input_error());
     }
     settings::defaults(&mut values, &[("--log-level", "VOLTFILL_LOG_LEVEL")])
         .map_err(|e| (2, e))?;
+    if remote_fill {
+        settings::defaults(
+            &mut values,
+            &[
+                ("--model", "VOLTFILL_MODEL"),
+                ("--execution-config", "VOLTFILL_EXECUTION_CONFIG"),
+            ],
+        )
+        .map_err(|e| (2, e))?;
+    }
     if command == "extract" {
         settings::defaults(&mut values, settings::COMMON).map_err(|e| (2, e))?;
         settings::defaults(&mut values, &[("--strategy", "VOLTFILL_STRATEGY")])
@@ -421,11 +457,12 @@ fn logger(level: log::LevelFilter, output_file: bool) -> crate::logging::JsonLog
     };
     crate::logging::JsonLogger::new("voltfill-cli", level, writer)
 }
-fn run_with<E: Evaluator>(
+fn run_with<E: Evaluator, T: assist::Transport, C: assist::Clock>(
     arguments: impl IntoIterator<Item = String>,
     initialize_logger: impl FnOnce(log::LevelFilter, bool) -> Result<(), (u8, &'static str)>,
     load_secret: impl FnOnce() -> Result<Secret, (u8, &'static str)>,
     make_remote: impl FnOnce(&ExecutionConfig, Secret, bool) -> Result<E, (u8, &'static str)>,
+    make_fill_remote: impl FnOnce() -> Result<(T, C), (u8, &'static str)>,
 ) -> Result<u8, (u8, &'static str)> {
     let args = parse_args(arguments)?;
     let level = log_level(&args)?;
@@ -441,14 +478,45 @@ fn run_with<E: Evaluator>(
         return Ok(0);
     }
     if args.command == "fill" {
+        // Remote options are validated before any input or credential is read.
+        let options = if args.flag("--allow-remote") {
+            let options = assist::AssistOptions {
+                allow_remote: true,
+                model: args
+                    .values
+                    .get("--model")
+                    .map_or(assist::MODEL, String::as_str)
+                    .into(),
+                execution: execution.clone(),
+            };
+            options.validate().map_err(|error| match error {
+                assist::AssistError::Model => (2, "invalid_model"),
+                _ => (2, "invalid_execution_config"),
+            })?;
+            Some(options)
+        } else {
+            None
+        };
         let form =
             vf_core::fill::parse_form(&read(args.value("--form")?, vf_core::fill::MAX_FORM_BYTES)?)
                 .map_err(|_| (2, "invalid_form"))?;
         let bytes = read(args.value("--pdf")?, args.resources.pdf.max_bytes)?;
+        let remote = match options {
+            Some(options) => Some((options, load_secret()?, make_fill_remote()?)),
+            None => None,
+        };
         let snapshot = vf_source::inspect(&bytes, args.resources.pdf)
             .map_err(|_| (4, "pdf_inspection_failed"))?;
         let result = vf_core::fill::fill(&snapshot.document_id, &snapshot.fragments, &form);
-        output(&args, &result)?;
+        let Some((options, secret, (mut transport, mut clock))) = remote else {
+            output(&args, &result)?;
+            return Ok(0);
+        };
+        log::debug!(target: "vf_cli", "{}", json!({"event":"fill_assist_config","model":options.model,"config":options.execution}));
+        let assisted = assist::assist(result, &form, &options, &secret, &mut transport, &mut clock)
+            .map_err(|_| (4, "fill_assist_failed"))?;
+        output(&args, &assisted)?;
+        log::info!(target: "vf_cli", "{}", json!({"event":"fill_assist_completed","questions":assisted.assist.len(),"attempts":assisted.usage.attempts,"responses":assisted.jev_responses.len()}));
         return Ok(0);
     }
     let bytes = read(args.value("--pdf")?, args.resources.pdf.max_bytes)?;
@@ -581,6 +649,12 @@ fn run(arguments: Vec<String>) -> Result<u8, (u8, &'static str)> {
             evaluator
                 .with_execution_config(config)
                 .map_err(|_| (2, "invalid_execution_config"))
+        },
+        || {
+            let transport =
+                assist::HttpTransport::try_new(settings::endpoint().map_err(|e| (2, e))?)
+                    .map_err(|_| (4, "transport_setup_failed"))?;
+            Ok((transport, assist::SystemClock::default()))
         },
     )
 }
@@ -830,5 +904,162 @@ mod tests {
             }
         }
         log::set_max_level(log::LevelFilter::Debug);
+    }
+
+    /// A one-page PDF with one Helvetica text line per entry.
+    fn text_pdf(lines: &[&str]) -> Vec<u8> {
+        let content: String = lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| format!("BT /F1 12 Tf 72 {} Td ({line}) Tj ET\n", 700 - 40 * i))
+            .collect();
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".to_owned(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_owned(),
+            format!("<< /Length {} >>\nstream\n{content}endstream", content.len()),
+        ];
+        let mut pdf = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::new();
+        for (i, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf += &format!("{} 0 obj\n{object}\nendobj\n", i + 1);
+        }
+        let xref = pdf.len();
+        pdf += &format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1);
+        for offset in offsets {
+            pdf += &format!("{offset:010} 00000 n \n");
+        }
+        pdf += &format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        );
+        pdf.into_bytes()
+    }
+
+    #[derive(Clone)]
+    struct FillWire(Arc<std::sync::Mutex<Vec<Vec<u8>>>>);
+    impl Transport for FillWire {
+        fn send(&mut self, request: HttpRequest<'_>) -> Result<HttpResponse, TransportError> {
+            let mut sent = self.0.lock().expect("the request log must not be poisoned");
+            sent.push(request.body.bytes().to_vec());
+            if sent.len() == 1 {
+                return Ok(HttpResponse {
+                    status: 503,
+                    body: b"private_retry_canary".to_vec(),
+                    body_error: None,
+                    retry_after_ms: None,
+                });
+            }
+            let request: Value =
+                serde_json::from_slice(request.body.bytes()).expect("the fill request is JSON");
+            let mut answers = serde_json::Map::new();
+            for (id, question) in request["questions"]
+                .as_object()
+                .expect("the fill request has questions")
+            {
+                let criteria = question["criteria"]
+                    .as_object()
+                    .expect("each fill question is a choice");
+                let selected = criteria
+                    .iter()
+                    .find(|(_, text)| text.as_str().is_some_and(|t| t.ends_with("Total: 120")))
+                    .expect("the source line Total: 120 is an option")
+                    .0;
+                let probabilities: serde_json::Map<String, Value> = criteria
+                    .keys()
+                    .map(|key| (key.clone(), json!(if key == selected { 1.0 } else { 0.0 })))
+                    .collect();
+                answers.insert(
+                    id.clone(),
+                    json!({"type":"choice","choice":selected,"probabilities":probabilities,"confidence":0.8}),
+                );
+            }
+            Ok(HttpResponse {
+                status: 200,
+                body: serde_json::to_vec(&json!({"model":request["model"],"answers":answers,"usage":{"input_tokens":50,"output_tokens":2}}))
+                    .expect("the scripted response serializes"),
+                body_error: None,
+                retry_after_ms: None,
+            })
+        }
+    }
+
+    #[test]
+    fn fill_remote_sends_only_ambiguous_fields_and_keeps_every_body() {
+        let dir =
+            std::env::temp_dir().join(format!("voltfill-fill-remote-unit-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("the temp dir must be writable");
+        let pdf = dir.join("input.pdf");
+        fs::write(
+            &pdf,
+            text_pdf(&["Invoice No: INV-7", "Subtotal: 100", "Total: 120"]),
+        )
+        .expect("the PDF must be writable");
+        let form = dir.join("form.json");
+        fs::write(&form, br#"{"fields":[{"id":"no","label":"Invoice No"},{"id":"amount","label":"Amount","type":"amount","hints":["Subtotal","Total"]},{"id":"missing","label":"Due"}]}"#)
+            .expect("the form must be writable");
+        let output = dir.join("result.json");
+        let path = |p: &Path| p.to_str().expect("temp paths are UTF-8").to_owned();
+        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let code = run_with::<FixtureEvaluator, _, _>(
+            [
+                "fill".into(),
+                path(&pdf),
+                path(&form),
+                "--remote".into(),
+                "--max-attempts".into(),
+                "2".into(),
+                "-o".into(),
+                path(&output),
+            ],
+            |_, _| Ok(()),
+            || {
+                Ok(Secret::try_new("synthetic_secret_canary".into())
+                    .expect("the synthetic bearer is valid"))
+            },
+            |_, _, _| Err((9, "legacy_evaluator_unexpected")),
+            || Ok((FillWire(sent.clone()), FakeClock::default())),
+        )
+        .expect("fill --remote with a scripted transport succeeds");
+        assert_eq!(code, 0);
+        let result: Value =
+            serde_json::from_slice(&fs::read(&output).expect("the result file exists"))
+                .expect("the result is JSON");
+        fs::remove_dir_all(&dir).ok();
+
+        let sent = sent.lock().expect("the request log must not be poisoned");
+        assert_eq!(sent.len(), 2);
+        for body in sent.iter() {
+            let body = std::str::from_utf8(body).expect("requests are UTF-8");
+            assert!(!body.contains("synthetic_secret_canary"));
+            assert!(!body.contains("INV-7") && !body.contains("Due"));
+            assert!(body.contains("Subtotal: 100") && body.contains("Total: 120"));
+        }
+        assert!(result["evaluation_only"].as_bool().expect("flag"));
+        let amount = &result["fields"]["amount"];
+        assert_eq!(amount["status"], "filled");
+        assert_eq!(amount["method"], "jev_choice");
+        assert_eq!(amount["raw"], "120");
+        assert_eq!(amount["value"], 120);
+        assert_eq!(amount["evidence"][0]["text"], "120");
+        assert_eq!(result["fields"]["no"]["method"], "label_match");
+        assert_eq!(result["fields"]["missing"]["status"], "not_found");
+        assert_eq!(result["assist"]["amount"]["outcome"], "selected");
+        assert!(result["assist"].get("no").is_none());
+        assert_eq!(result["usage"]["attempts"], 2);
+        let responses = result["jev_responses"].as_array().expect("responses");
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["http_status"], 503);
+        assert_eq!(responses[0]["body"], "private_retry_canary");
+        assert_eq!(responses[0]["field_ids"], json!(["amount"]));
+        let body: Value = serde_json::from_str(
+            responses[1]["body"]
+                .as_str()
+                .expect("the success body is kept as text"),
+        )
+        .expect("the success body is the original JSON");
+        assert_eq!(body["answers"]["q0"]["confidence"], 0.8);
     }
 }
