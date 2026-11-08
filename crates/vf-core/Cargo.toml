@@ -7,14 +7,14 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-vf-source = { path = "../vf-source" }
-vf-render = { path = "../vf-render" }
-vf-client = { path = "../vf-client" }
+vf-source.workspace = true
+vf-render.workspace = true
+vf-client.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 sha2.workspace = true
-lopdf = { version = "=0.46.0", default-features = false }
+lopdf.workspace = true
 log.workspace = true
 unicode-normalization.workspace = true
 
