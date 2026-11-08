@@ -1,10 +1,13 @@
 //! Box-to-source selection over synthetic fragments; no PDF parsing, rendering or API calls.
+use std::time::Instant;
+
+use vf_source::budget::Budget;
 use vf_source::geometry::{AffineTransform, ImageTransform, Padding, PageGeometry, Rect, Rotation};
-use vf_source::layout::{self, Placement, Precision, Span};
+use vf_source::layout::{self, Binding, LayoutLimits, Placement, Precision, Span};
 use vf_source::select::{
     ESTIMATED_EDGE_TOLERANCE_EM, HEIGHT_PER_ESTIMATED_EM, MAX_COPY_COMPARISONS,
-    MEASURED_EDGE_SLACK, Role, SelectError, Selected, contains_label, in_box, overlapping,
-    starts_with_label,
+    MEASURED_EDGE_SLACK, Role, SelectError, Selected, contains_label, in_box, in_box_within,
+    overlapping, overlapping_within, starts_with_label,
 };
 use vf_source::{Quality, SourceFragment};
 
@@ -73,11 +76,20 @@ fn roles(selected: &[Selected]) -> Vec<Role> {
     selected.iter().map(|s| s.role).collect()
 }
 
-/// The label and value parts that layout derives from one inline fragment.
+/// The pairs layout derives from `f` alone.
+fn layout_pairs(f: &SourceFragment) -> Vec<layout::Pair> {
+    layout::analyze(std::slice::from_ref(f), &LayoutLimits::default())
+        .expect("one fragment stays within the default layout limits")
+        .pairs
+}
+
+/// The label and value parts that layout derives from one inline fragment,
+/// bound by its delimiter.
 fn inline_parts(f: &SourceFragment) -> (Span, Span) {
-    let pairs = layout::analyze(std::slice::from_ref(f)).pairs;
+    let pairs = layout_pairs(f);
     assert_eq!(pairs.len(), 1, "{}", f.raw_text);
     assert_eq!(pairs[0].placement, Placement::Inline);
+    assert_eq!(pairs[0].binding, Binding::Delimiter);
     (pairs[0].label.clone(), pairs[0].value[0].clone())
 }
 
@@ -1192,4 +1204,103 @@ fn copy_search_beyond_its_limit_is_a_typed_error() {
     let half = &raw[..n / 4];
     let selected = in_box(half, 1, all).expect("within the copy-comparison limit");
     assert_eq!(selected, [whole(&half[0]), whole(&half[1])]);
+}
+
+/// A fragment layout does not split (several delimiters, a port colon after a
+/// label, an empty label side) has no known split: whatever the box, select
+/// never returns any of it with a fillable role.
+#[test]
+fn fragments_layout_does_not_split_are_never_fillable() {
+    // Text, the text before the first delimiter, and through it.
+    for (text, before, through) in [
+        ("TEL：03-1234-5678　FAX：03-1234-5679", "TEL", "TEL："),
+        ("請求番号：INV-0012：A", "請求番号", "請求番号："),
+        ("氏名：佐藤花子　電話：03-1234-5678", "氏名", "氏名："),
+        ("URL：https://example.com:8080/", "URL", "URL："),
+        ("：INV-0012", "", "："),
+        (": INV-0012", "", ": "),
+    ] {
+        let raw = [drawn("x", text, 1.0)];
+        assert!(layout_pairs(&raw[0]).is_empty(), "{text}");
+        let r = raw[0].bbox;
+        let (start, split) = (drawn_x(before, 1.0), drawn_x(through, 1.0));
+        let (top, bottom) = (r.top - 0.5, r.bottom + 0.5);
+        let boxes = [
+            expand(r, 0.5),
+            expand(r, 3.0),
+            // Label side, value side (at and past the split), the delimiter
+            // alone, and the right half.
+            rect(r.left - 0.5, top, split - 0.5, bottom),
+            rect(split - 0.5, top, r.right + 0.5, bottom),
+            rect(split + 0.5, top, r.right + 0.5, bottom),
+            rect(start - 0.5, top, split + 0.5, bottom),
+            rect(0.5 * (r.left + r.right), top, r.right + 0.5, bottom),
+        ];
+        for bbox in boxes {
+            let context = format!("{text} {bbox:?}");
+            match in_box(&raw, 1, bbox) {
+                Ok(selected) => assert_nothing_fillable(&selected, &context),
+                Err(error) => assert_eq!(
+                    error,
+                    SelectError::SplitsSourceRun {
+                        fragment_id: "x".into()
+                    },
+                    "{context}"
+                ),
+            }
+            let selected = overlapping(&raw, 1, bbox).expect("a valid box overlaps");
+            assert_nothing_fillable(&selected, &context);
+        }
+    }
+}
+
+/// select charges its work, layout's one-fragment split included, to the
+/// caller's budget: any budget short of what a call needs fails with a typed
+/// error instead of returning a different (unsplit) result, and a passed
+/// deadline fails before any work.
+#[test]
+fn select_work_is_charged_to_the_callers_budget() {
+    let raw = invoice_fragments();
+    let line = expand(raw[0].bbox, 0.5);
+    let expected = in_box(&raw, 1, line).expect("whole line");
+    assert_eq!(expected, both_parts(&raw[0]));
+    let mut budget = Budget::new(u64::MAX, None);
+    assert_eq!(
+        in_box_within(&raw, 1, line, &mut budget),
+        Ok(expected.clone())
+    );
+    let needed = u64::MAX - budget.remaining();
+    assert!(needed > 0);
+    for max_work in 0..needed {
+        let mut short = Budget::new(max_work, None);
+        assert_eq!(
+            in_box_within(&raw, 1, line, &mut short),
+            Err(SelectError::BudgetExceeded),
+            "{max_work} of {needed} units"
+        );
+    }
+    let mut exact = Budget::new(needed, None);
+    assert_eq!(in_box_within(&raw, 1, line, &mut exact), Ok(expected));
+    assert_eq!(exact.remaining(), 0);
+    let mut late = Budget::new(u64::MAX, Some(Instant::now()));
+    assert_eq!(
+        in_box_within(&raw, 1, line, &mut late),
+        Err(SelectError::DeadlineExceeded)
+    );
+    assert_eq!(
+        overlapping_within(&raw, 1, line, &mut late),
+        Err(SelectError::DeadlineExceeded)
+    );
+    assert_eq!(late.remaining(), u64::MAX);
+    // An invalid box is reported before the deadline.
+    let invalid = Rect {
+        left: 10.0,
+        top: 10.0,
+        right: 5.0,
+        bottom: 20.0,
+    };
+    assert_eq!(
+        in_box_within(&raw, 1, invalid, &mut late),
+        Err(SelectError::InvalidBox)
+    );
 }

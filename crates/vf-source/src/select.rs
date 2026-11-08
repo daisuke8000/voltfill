@@ -77,11 +77,20 @@
 //!
 //! # Known splits
 //!
-//! A known split is the one label/value pair that [`layout::analyze`] derives
-//! from that fragment alone, accepted only when all of these hold:
+//! A known split is the one label/value pair that [`layout::analyze_within`]
+//! derives from that fragment alone, accepted only when all of these hold:
 //!
-//! - the pair is [`Placement::Inline`] with exactly one value span, and both
-//!   spans are nonempty, ordered, char-boundary ranges of this fragment;
+//! - layout binds the label and value by a delimiter inside this fragment:
+//!   the pair is [`Placement::Inline`] with [`Binding::Delimiter`] and exactly
+//!   one value span (one line), and both spans are nonempty, ordered,
+//!   char-boundary ranges of this fragment. On one fragment layout yields
+//!   only inline pairs, all delimiter-bound, so today the binding check
+//!   rejects nothing the placement check accepts; it keeps a position-only
+//!   ([`Binding::Geometric`]) split from becoming parts should layout ever
+//!   produce one. Layout does not split a fragment with several delimiters
+//!   (`TEL：…　FAX：…`) or an empty label side (`：INV-0012`), so such a
+//!   fragment has no known split and is returned whole as `Mixed` (or a bare
+//!   `Label`), never fillable;
 //! - the label and value texts have no surrounding whitespace, the text
 //!   before the label and after the value is whitespace only, and the text
 //!   between them, trimmed, is exactly one delimiter of this module's own
@@ -96,6 +105,11 @@
 //!   side (`番号：No.1：2026年度`, `氏名：佐藤花子　電話∶03-1234-5678`), and
 //!   a visible character in each (`備考：` followed by U+200B is a bare
 //!   label, not a split).
+//!
+//! Layout's work for the split is charged to the call's [`Budget`]; running
+//! out of it or passing its deadline fails the call (see
+//! [Duplicates, order and cost](#duplicates-order-and-cost)) and is never
+//! taken for "no split".
 //!
 //! # Coverage
 //!
@@ -233,13 +247,38 @@
 //! time linear in their text until one is selected, and the selected
 //! fragments are sorted.
 //!
+//! The work is charged to a [`Budget`], the type layout and fill use, so one
+//! work budget and deadline can cover layout, fill and select:
+//! [`in_box_within`] and [`overlapping_within`] take the caller's budget,
+//! while [`in_box`] and [`overlapping`] use a fresh one of
+//! [`layout::DEFAULT_MAX_WORK`] units without a deadline. Units are spent
+//! before the work they pay for: one per fragment of the snapshot; the text
+//! bytes of each fragment on the page near the box (checked for a visible
+//! character); one per sort comparison for the m fragments and again for the
+//! selected ones (n·⌈log2(n + 1)⌉ each, as layout charges; a comparison by
+//! text reads at most the shorter text, which this does not count); one per
+//! copy comparison; and, for each copy the box is tested against,
+//! [`ANALYSIS_UNITS_PER_BYTE`] per byte of its text and ID plus layout's
+//! units for its one-fragment split ([`layout::analyze_within`]). The
+//! deadline is checked when the call starts and at least every
+//! [`crate::budget::CHECK_INTERVAL`] units. Running out of units or passing
+//! the deadline fails the call with [`SelectError::BudgetExceeded`] or
+//! [`SelectError::DeadlineExceeded`]; no partial result is returned. The
+//! units bound the work; they do not guarantee a running time.
+//!
+//! [`MAX_COPY_COMPARISONS`] stays a per-call cap beside the budget: the
+//! budget bounds the total over calls and adds the deadline, while the cap
+//! keeps a single box over an adversarial page from taking quadratic time
+//! however large the caller's budget is.
+//!
 //! [`ImageTransform::normalized_box_to_display`]: crate::geometry::ImageTransform::normalized_box_to_display
 use std::ops::RangeInclusive;
 
 use serde::Serialize;
 
+use crate::budget::{Budget, BudgetError};
 use crate::geometry::Rect;
-use crate::layout::{self, Placement, Precision, Span};
+use crate::layout::{self, Binding, LayoutError, Placement, Precision, Span};
 use crate::source::{Quality, SourceFragment};
 
 /// Edge slack, in Display units, for edges the extractor measured: fragment
@@ -279,8 +318,17 @@ pub const DUPLICATE_EDGE_TOLERANCE_EM: f64 = 0.1;
 
 /// Most comparisons between same-text fragments one call makes while looking
 /// for overprinted copies (see the module docs); beyond it the call fails
-/// with [`SelectError::LimitExceeded`].
+/// with [`SelectError::LimitExceeded`]. A per-call cap on top of the
+/// [`Budget`]: however large the caller's budget, one box never takes
+/// quadratic time.
 pub const MAX_COPY_COMPARISONS: usize = 1_000_000;
+
+/// Work units per byte of a fragment's text and ID for each copy the box is
+/// tested against: select's own passes (character classes, cleanliness, the
+/// edge bounds of every tested range, spans copied into the result) are a
+/// small fixed number per byte, rounded up to this. Layout's units for the
+/// one-fragment split are charged on top (see [`layout::analyze_within`]).
+pub const ANALYSIS_UNITS_PER_BYTE: u64 = 32;
 
 /// Delimiters of a known split; mirrors layout's inline delimiters.
 const DELIMITERS: [char; 2] = ['：', ':'];
@@ -348,31 +396,93 @@ pub enum SelectError {
     /// [`MAX_COPY_COMPARISONS`] comparisons.
     #[error("selection exceeded its overprinted-copy comparison limit")]
     LimitExceeded,
+    /// The [`Budget`] ran out of work units.
+    #[error("selection exceeded its work budget")]
+    BudgetExceeded,
+    /// The [`Budget`]'s deadline passed.
+    #[error("selection exceeded its deadline")]
+    DeadlineExceeded,
+}
+
+impl From<BudgetError> for SelectError {
+    fn from(error: BudgetError) -> Self {
+        match error {
+            BudgetError::WorkExceeded => Self::BudgetExceeded,
+            BudgetError::DeadlineExceeded => Self::DeadlineExceeded,
+        }
+    }
 }
 
 /// Spans fully inside `bbox` on `page`, in reading order. A fragment the box
 /// covers only in part contributes the parts of its known split that the box
-/// contains; any other partial cover is an error, as is
-/// [`SelectError::LimitExceeded`]. See the module docs for which spans may
-/// become fill values.
+/// contains; any other partial cover is an error, as are
+/// [`SelectError::LimitExceeded`] and the budget errors. See the module docs
+/// for which spans may become fill values. Runs within a fresh [`Budget`] of
+/// [`layout::DEFAULT_MAX_WORK`] units without a deadline; see
+/// [`in_box_within`].
 pub fn in_box(
     fragments: &[SourceFragment],
     page: u32,
     bbox: Rect,
 ) -> Result<Vec<Selected>, SelectError> {
-    select(fragments, page, bbox, Mode::Contained)
+    in_box_within(fragments, page, bbox, &mut default_budget())
+}
+
+/// [`in_box`], spending work from `budget` (units in the module docs).
+///
+/// # Errors
+/// As [`in_box`]; [`SelectError::BudgetExceeded`] when the budget runs out
+/// and [`SelectError::DeadlineExceeded`] once its deadline has passed. No
+/// partial result is returned.
+pub fn in_box_within(
+    fragments: &[SourceFragment],
+    page: u32,
+    bbox: Rect,
+    budget: &mut Budget,
+) -> Result<Vec<Selected>, SelectError> {
+    select(fragments, page, bbox, Mode::Contained, budget)
 }
 
 /// Spans `bbox` may touch on `page`, in reading order: whole runs, or the
 /// parts of a known split the box may touch. Inclusive, for diagnostics and
 /// candidate display: it must not be used to produce fill values. Fails only
-/// for an invalid box or [`SelectError::LimitExceeded`].
+/// for an invalid box, [`SelectError::LimitExceeded`] or a budget error.
+/// Runs within a fresh [`Budget`] as [`in_box`] does.
 pub fn overlapping(
     fragments: &[SourceFragment],
     page: u32,
     bbox: Rect,
 ) -> Result<Vec<Selected>, SelectError> {
-    select(fragments, page, bbox, Mode::Overlapping)
+    overlapping_within(fragments, page, bbox, &mut default_budget())
+}
+
+/// [`overlapping`], spending work from `budget` (units in the module docs).
+///
+/// # Errors
+/// As [`overlapping`]; budget errors as for [`in_box_within`].
+pub fn overlapping_within(
+    fragments: &[SourceFragment],
+    page: u32,
+    bbox: Rect,
+    budget: &mut Budget,
+) -> Result<Vec<Selected>, SelectError> {
+    select(fragments, page, bbox, Mode::Overlapping, budget)
+}
+
+fn default_budget() -> Budget {
+    Budget::new(layout::DEFAULT_MAX_WORK, None)
+}
+
+/// Comparisons charged for sorting `n` items: n·⌈log2(n + 1)⌉, as layout
+/// charges its sorts.
+fn sort_units(n: usize) -> u64 {
+    let n = u64::try_from(n).unwrap_or(u64::MAX);
+    n.saturating_mul(u64::from(u64::BITS - n.leading_zeros()))
+}
+
+/// Bytes as work units.
+fn byte_units(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
 }
 
 /// Whether `text` starts with `label`, ignoring whitespace and invisible
@@ -413,10 +523,12 @@ fn select(
     page: u32,
     bbox: Rect,
     mode: Mode,
+    budget: &mut Budget,
 ) -> Result<Vec<Selected>, SelectError> {
     bbox.validate().map_err(|_| SelectError::InvalidBox)?;
+    budget.check_deadline()?;
     let mut selected = Vec::new();
-    for copies in overprint_groups(fragments, page, bbox)? {
+    for copies in overprint_groups(fragments, page, bbox, budget)? {
         // Prefer a copy the box selects, then one it misses; report a cut
         // only when the box cuts every copy.
         let mut missed = false;
@@ -437,7 +549,9 @@ fn select(
                 }
                 tested.push(r);
             }
-            match Source::new(&fragments[index]).select(bbox, mode) {
+            // A budget error fails the call; it is never taken for a cut.
+            let source = Source::new(&fragments[index], budget)?;
+            match source.select(bbox, mode) {
                 Ok(Some(items)) => {
                     chosen = Some((index, items));
                     break;
@@ -454,7 +568,7 @@ fn select(
             (None, _) => {}
         }
     }
-    Ok(reading_order(fragments, selected))
+    reading_order(fragments, selected, budget)
 }
 
 /// Positive-area intersection without slack: when false, the box misses the
@@ -493,23 +607,30 @@ fn overprint_groups(
     fragments: &[SourceFragment],
     page: u32,
     bbox: Rect,
+    budget: &mut Budget,
 ) -> Result<Vec<Vec<usize>>, SelectError> {
-    let candidates: Vec<usize> = (0..fragments.len())
-        .filter(|&i| {
-            let f = &fragments[i];
-            f.page == page
-                && usable(f)
-                && intersects(
-                    grow(bbox, DUPLICATE_EDGE_TOLERANCE_EM * f.bbox.height()),
-                    f.bbox,
-                )
-        })
-        .collect();
+    budget.spend(byte_units(fragments.len()))?;
+    let mut candidates: Vec<usize> = Vec::new();
+    for (i, f) in fragments.iter().enumerate() {
+        // The text is read (by `usable`) only for fragments near the box.
+        if f.page == page
+            && intersects(
+                grow(bbox, DUPLICATE_EDGE_TOLERANCE_EM * f.bbox.height()),
+                f.bbox,
+            )
+        {
+            budget.spend(byte_units(f.raw_text.len()))?;
+            if usable(f) {
+                candidates.push(i);
+            }
+        }
+    }
     let n = candidates.len();
     let at = |place: usize| &fragments[candidates[place]];
     // Positions into `candidates`, by text and box: within one text, tops
     // ascend, same tops by left, and identical boxes are adjacent.
     let mut order: Vec<usize> = (0..n).collect();
+    budget.spend(sort_units(n))?;
     order.sort_by(|&a, &b| {
         let (fa, fb) = (&fragments[candidates[a]], &fragments[candidates[b]]);
         fa.raw_text
@@ -526,7 +647,7 @@ fn overprint_groups(
     // when it was processed (sets only merge, so that run stays one set).
     let (mut text_start, mut top_start) = (vec![0; n], vec![0; n]);
     let (mut box_start, mut set_start) = (vec![0; n], vec![0; n]);
-    let mut budget = MAX_COPY_COMPARISONS;
+    let mut comparisons_left = MAX_COPY_COMPARISONS;
     for k in 0..n {
         let b = at(order[k]);
         let (mut same_text, mut same_top, mut same_box) = (false, false, false);
@@ -552,7 +673,10 @@ fn overprint_groups(
                 if b.bbox.top - a.bbox.top > band {
                     break;
                 }
-                budget = budget.checked_sub(1).ok_or(SelectError::LimitExceeded)?;
+                comparisons_left = comparisons_left
+                    .checked_sub(1)
+                    .ok_or(SelectError::LimitExceeded)?;
+                budget.spend(1)?;
                 if sets.find(order[p]) == root {
                     p = set_start[p];
                 } else if same_place(a.bbox, b.bbox) {
@@ -665,7 +789,10 @@ struct Source<'a> {
 }
 
 impl<'a> Source<'a> {
-    fn new(f: &'a SourceFragment) -> Self {
+    fn new(f: &'a SourceFragment, budget: &mut Budget) -> Result<Self, SelectError> {
+        budget.spend(
+            ANALYSIS_UNITS_PER_BYTE.saturating_mul(byte_units(f.raw_text.len() + f.id.len())),
+        )?;
         let r = f.bbox;
         let weight = weight(&f.raw_text);
         let height_em = r.height();
@@ -679,7 +806,7 @@ impl<'a> Source<'a> {
         let em = plausible.then(|| (height_em.min(width_em), height_em.max(width_em)));
         let tolerance =
             (ESTIMATED_EDGE_TOLERANCE_EM * height_em.min(width_em)).max(MEASURED_EDGE_SLACK);
-        let parts = match known_split(f) {
+        let parts = match known_split(f, budget)? {
             Some((label, value)) => [(Role::Label, label), (Role::Value, value)]
                 .into_iter()
                 .map(|(role, span)| Part {
@@ -701,13 +828,13 @@ impl<'a> Source<'a> {
                 }]
             }
         };
-        Self {
+        Ok(Self {
             f,
             weight,
             em,
             tolerance,
             parts,
-        }
+        })
     }
 
     /// `None` when the box misses the content; otherwise the selected parts.
@@ -999,11 +1126,28 @@ fn whole_role(content: &str) -> Role {
     }
 }
 
-/// The label and value of the one inline pair layout derives from `f` alone,
-/// when it passes the checks in the module docs.
-fn known_split(f: &SourceFragment) -> Option<(Span, Span)> {
-    let pairs = layout::analyze(std::slice::from_ref(f)).pairs;
-    let [pair] = pairs.as_slice() else {
+/// The label and value of the one delimiter-bound inline pair layout derives
+/// from `f` alone, when it passes the checks in the module docs. Layout's
+/// work is charged to `budget`; a budget or deadline error fails the call.
+fn known_split(
+    f: &SourceFragment,
+    budget: &mut Budget,
+) -> Result<Option<(Span, Span)>, SelectError> {
+    // One fragment yields at most one pair, so the hypothesis limit is never
+    // hit; if it were, the fragment would have no known split (whole_role
+    // then never makes delimiter text fillable).
+    let pairs = match layout::analyze_within(std::slice::from_ref(f), 1, budget) {
+        Ok(layout) => layout.pairs,
+        Err(LayoutError::LimitExceeded) => return Ok(None),
+        Err(LayoutError::BudgetExceeded) => return Err(SelectError::BudgetExceeded),
+        Err(LayoutError::DeadlineExceeded) => return Err(SelectError::DeadlineExceeded),
+    };
+    Ok(split_parts(f, &pairs))
+}
+
+/// The checks of the module docs on the pairs layout derived from `f` alone.
+fn split_parts(f: &SourceFragment, pairs: &[layout::Pair]) -> Option<(Span, Span)> {
+    let [pair] = pairs else {
         return None;
     };
     let [value] = pair.value.as_slice() else {
@@ -1012,6 +1156,7 @@ fn known_split(f: &SourceFragment) -> Option<(Span, Span)> {
     let label = &pair.label;
     let text = f.raw_text.as_str();
     let shape = pair.placement == Placement::Inline
+        && pair.binding == Binding::Delimiter
         && label.fragment_id == f.id
         && value.fragment_id == f.id
         && label.start < label.end
@@ -1042,7 +1187,13 @@ fn known_split(f: &SourceFragment) -> Option<(Span, Span)> {
 type Item = (usize, Vec<Selected>);
 
 /// Flatten per-fragment spans in reading order (see the module docs).
-fn reading_order(fragments: &[SourceFragment], mut selected: Vec<Item>) -> Vec<Selected> {
+fn reading_order(
+    fragments: &[SourceFragment],
+    mut selected: Vec<Item>,
+    budget: &mut Budget,
+) -> Result<Vec<Selected>, SelectError> {
+    // The sort here and the per-band sorts below compare O(k log k) pairs.
+    budget.spend(sort_units(selected.len()).saturating_mul(2))?;
     let rect = |index: usize| fragments[index].bbox;
     selected.sort_by(|(a, _), (b, _)| {
         rect(*a)
@@ -1062,14 +1213,14 @@ fn reading_order(fragments: &[SourceFragment], mut selected: Vec<Item>) -> Vec<S
             _ => bands.push((r, vec![item])),
         }
     }
-    bands
+    Ok(bands
         .into_iter()
         .flat_map(|(_, mut items)| {
             items.sort_by(|(a, _), (b, _)| rect(*a).left.total_cmp(&rect(*b).left).then(a.cmp(b)));
             items
         })
         .flat_map(|(_, spans)| spans)
-        .collect()
+        .collect())
 }
 
 /// Vertical overlap of at least half the smaller height, as for layout lines.
