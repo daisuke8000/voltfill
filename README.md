@@ -45,6 +45,7 @@ voltfill fill input.pdf examples/forms/invoice.json -o result.json
 | `not_found` | 対応するラベルが見つからない |
 | `no_text` | 使えるテキスト層がない（スキャンPDF・文字化け） |
 | `invalid` | ラベルは見つかったが値が型に合わない。`raw` を返す |
+| `limit_exceeded` | 処理量の上限を超えたため評価していない（ライブラリの `fill` のみ。CLIはエラーで終了） |
 
 `evidence` はページ・原文片のIDとバイト範囲・座標（PDFポイント、左上原点）です。1つの片を「ラベル：値」で分けた場合の座標は文字幅からの推定で、`precision: "estimated"` と示します。
 
