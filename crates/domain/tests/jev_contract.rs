@@ -1,15 +1,13 @@
 //! Synthetic contract tests. No requests are sent to Jev or any other server.
+use domain::jev::transport::{
+    self, Clock, Execution, Failure, HttpRequest, HttpResponse, Policy, Secret, Transport,
+    TransportError,
+};
+use domain::jev::{self, Answer, Content, Diagnostic, Error, Limits, Question, Request, multipart};
 use serde_json::{Value, json};
 use std::cell::Cell;
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
-use voltfill_domain::jev::transport::{
-    self, Clock, Execution, Failure, HttpRequest, HttpResponse, Policy, Secret, Transport,
-    TransportError,
-};
-use voltfill_domain::jev::{
-    self, Answer, Content, Diagnostic, Error, Limits, Question, Request, multipart,
-};
 
 fn request_value() -> Value {
     json!({"model":"jev-1.14.0", "state":{"text":"synthetic blue square", "image":"<image>"},

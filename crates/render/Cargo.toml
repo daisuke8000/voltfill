@@ -1,5 +1,5 @@
 [package]
-name = "voltfill-render"
+name = "render"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,7 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-voltfill-source = { path = "../source" }
+source = { path = "../source" }
 thiserror.workspace = true
 firecrawl-pdfium = { version = "=0.1.0", optional = true }
 png = { version = "0.18", optional = true }

@@ -1,10 +1,10 @@
-use std::cell::Cell;
-use std::rc::Rc;
-use voltfill_domain::jev;
-use voltfill_domain::jev::transport::{
+use domain::jev;
+use domain::jev::transport::{
     self, AttemptBudget, Clock, ExecutionConfig, Failure, HttpRequest, HttpResponse, NoopObserver,
     Policy, Secret, Transport, TransportError,
 };
+use std::cell::Cell;
+use std::rc::Rc;
 
 #[derive(Clone, Default)]
 struct TestClock(Rc<Cell<u64>>);
@@ -161,7 +161,7 @@ fn invalid_allocations_are_rejected_before_any_attempt_is_reserved() {
             ..base.clone()
         },
         ExecutionConfig {
-            completion_gap_ms: voltfill_domain::jev::transport::MIN_COMPLETION_GAP_MS - 1,
+            completion_gap_ms: domain::jev::transport::MIN_COMPLETION_GAP_MS - 1,
             ..base.clone()
         },
         ExecutionConfig {
@@ -188,10 +188,10 @@ fn invalid_allocations_are_rejected_before_any_attempt_is_reserved() {
     assert_eq!(budget.set_worker_limit(0), Err(Failure::Config));
     assert_eq!(
         base.completion_gap_ms,
-        voltfill_domain::jev::transport::DEFAULT_COMPLETION_GAP_MS
+        domain::jev::transport::DEFAULT_COMPLETION_GAP_MS
     );
     let shortest = ExecutionConfig {
-        completion_gap_ms: voltfill_domain::jev::transport::MIN_COMPLETION_GAP_MS,
+        completion_gap_ms: domain::jev::transport::MIN_COMPLETION_GAP_MS,
         ..base
     };
     assert!(AttemptBudget::default().configure(&shortest).is_ok());

@@ -1,7 +1,7 @@
+use domain::evaluate::{EvaluationContext, EvaluationError, Evaluator, FixtureEvaluator};
+use domain::jev::{self, Answer, Content, Limits, Question, RequestDraft};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use voltfill_domain::evaluate::{EvaluationContext, EvaluationError, Evaluator, FixtureEvaluator};
-use voltfill_domain::jev::{self, Answer, Content, Limits, Question, RequestDraft};
 
 #[test]
 fn fixture_selection_requires_one_matching_non_none_choice() {

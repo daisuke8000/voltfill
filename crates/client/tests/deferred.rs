@@ -1,10 +1,10 @@
-use std::collections::VecDeque;
-use voltfill_client::multipart::Body;
-use voltfill_client::transport::{
+use client::multipart::Body;
+use client::transport::{
     self, AttemptBudget, Clock, Execution, Failure, HttpRequest, HttpResponse, NoopObserver,
     Policy, Secret, Transport, TransportError,
 };
-use voltfill_client::{self as jev, PngImage};
+use client::{self as jev, PngImage};
+use std::collections::VecDeque;
 
 #[derive(Default)]
 struct Wire {

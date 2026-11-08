@@ -1,9 +1,9 @@
 //! Environment defaults for application launchers. Core APIs use explicit values.
+use domain::jev::http::Endpoint;
+use domain::jev::transport::Secret;
+use domain::resources::ResourceLimits;
 use std::collections::BTreeMap;
 use std::path::Path;
-use voltfill_domain::jev::http::Endpoint;
-use voltfill_domain::jev::transport::Secret;
-use voltfill_domain::resources::ResourceLimits;
 
 pub const COMMON: &[(&str, &str)] = &[
     ("--log-level", "VOLTFILL_LOG_LEVEL"),
@@ -108,9 +108,8 @@ pub fn resources_from_path(
 ) -> Result<ResourceLimits, &'static str> {
     let limits = if let Some(path) = path {
         let bytes = read_file(path, 64 * 1024)?;
-        let value =
-            voltfill_domain::jev::json::parse(&bytes, voltfill_domain::jev::Limits::default())
-                .map_err(|_| "invalid_resource_limits")?;
+        let value = domain::jev::json::parse(&bytes, domain::jev::Limits::default())
+            .map_err(|_| "invalid_resource_limits")?;
         serde_json::from_value(value).map_err(|_| "invalid_resource_limits")?
     } else {
         configured.unwrap_or_default()

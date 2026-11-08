@@ -1,7 +1,7 @@
 mod support;
+use domain::pdf::{self, PdfLimits};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
-use voltfill_domain::pdf::{self, PdfLimits};
 
 #[test]
 fn source_ids_keep_the_original_document_page_and_item_encoding() {

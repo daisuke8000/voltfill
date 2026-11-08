@@ -1,7 +1,7 @@
 use crate::geometry::PageGeometry;
 use crate::model::{PageDiagnostic, SourceFragment, Timings};
+pub use source::{PdfError, PdfLimits, metadata};
 use std::collections::BTreeMap;
-pub use voltfill_source::{PdfError, PdfLimits, metadata};
 
 /// Compatibility snapshot using core timings while retaining the original PDF inspection data.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -15,7 +15,7 @@ pub struct DocumentSnapshot {
 
 /// Inspect locally without a renderer or Jev request, adapting only the timing representation.
 pub fn inspect(bytes: &[u8], limits: PdfLimits) -> Result<DocumentSnapshot, PdfError> {
-    let snapshot = voltfill_source::inspect(bytes, limits)?;
+    let snapshot = source::inspect(bytes, limits)?;
     Ok(DocumentSnapshot {
         document_id: snapshot.document_id,
         fragments: snapshot.fragments,
