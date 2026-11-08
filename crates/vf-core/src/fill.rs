@@ -1481,6 +1481,19 @@ enum Shape {
     Phone,
     Date,
     Amount,
+    /// Digit groups joined by hyphens, longer than a phone number
+    /// (`03-1234-5678-03-1234-5679`): two numbers run together.
+    LongPhoneRun,
+}
+
+/// What a phone number scan ([`phone_at`]) found.
+enum PhoneScan {
+    /// A phone number ending at this char index.
+    Phone(usize),
+    /// Three or more digit groups joined by single hyphens, longer than a
+    /// phone number.
+    TooLong,
+    None,
 }
 
 /// Marks that join two dates or amounts into one range (after NFKC).
@@ -1490,7 +1503,9 @@ const RANGE_MARKS: [&str; 6] = ["〜", "~", "-", "\u{2212}", "\u{2013}", "\u{201
 /// Phone numbers, dates and currency amounts are found by [`value_shapes`];
 /// the text holds several values when it has
 /// - two phone numbers, whatever joins them (`03-1234-5678 FAX
-///   03-1234-5679`, `03-1234-5678、03-1234-5679`);
+///   03-1234-5679`, `03-1234-5678、03-1234-5679`), or hyphenated digit
+///   groups longer than a phone number (`03-1234-5678-03-1234-5679`, see
+///   [`phone_at`]);
 /// - two dates or two amounts not joined by a range mark alone: a word,
 ///   `、`, `/` or a space between them (`1,000円 と 500円`); a range such as
 ///   `2026年11月8日〜2026年12月8日` or `¥1,000-¥2,000` is one value;
@@ -1546,7 +1561,11 @@ fn several_values(
                 .windows(2)
                 .any(|pair| shape == Shape::Phone || !range(pair[0].2, pair[1].1))
         });
+    let long_run = tokens
+        .iter()
+        .any(|&(kind, _, _)| kind == Shape::LongPhoneRun);
     Ok(two_of_a_kind
+        || long_run
         || tokens
             .iter()
             .any(|&(kind, start, end)| after_label(text, start) || labelled_after(text, kind, end)))
@@ -1613,13 +1632,17 @@ fn value_shapes(
     while i < chars.len() {
         let c = chars[i].1;
         let boundary = i == 0 || !chars[i - 1].1.is_ascii_digit();
-        if boundary
-            && (c.is_ascii_digit() || c == '(')
-            && let Some(end) = phone_at(&chars, i, budget)?
-        {
-            tokens.push((Shape::Phone, at(i), at(end)));
-            i = end;
-            continue;
+        if boundary && (c.is_ascii_digit() || c == '(') {
+            match phone_at(&chars, i, budget)? {
+                PhoneScan::Phone(end) => {
+                    tokens.push((Shape::Phone, at(i), at(end)));
+                    i = end;
+                    continue;
+                }
+                // The run is read on below as a numeric date or amount run.
+                PhoneScan::TooLong => tokens.push((Shape::LongPhoneRun, at(i), at(i))),
+                PhoneScan::None => {}
+            }
         }
         if !c.is_ascii_digit() {
             i += 1;
@@ -1747,11 +1770,14 @@ const MAX_PHONE_CHARS: usize = 2 * MAX_PHONE_DIGITS - 1;
 /// instead of reading the rest of the run, and every character it reads is
 /// charged to `budget`. Before, every start re-read the whole run, so a
 /// value like `(1(1(1…` took quadratic time without checking the deadline.
+/// Such a run read so far as three or more digit groups joined by single
+/// hyphens is [`PhoneScan::TooLong`] (two numbers run together,
+/// `03-1234-5678-03-1234-5679`).
 fn phone_at(
     chars: &[(usize, char)],
     i: usize,
     budget: &mut Budget,
-) -> Result<Option<usize>, BudgetError> {
+) -> Result<PhoneScan, BudgetError> {
     let mut run = String::new();
     let mut digits = 0;
     let mut end = i;
@@ -1766,7 +1792,16 @@ fn phone_at(
         end += 1;
         if digits > MAX_PHONE_DIGITS || end - i > MAX_PHONE_CHARS {
             budget.spend((end - i) as u64)?;
-            return Ok(None);
+            let groups = run.trim_end_matches('-').split('-');
+            let hyphenated = !run.contains(['(', ')'])
+                && !run.contains("--")
+                && groups.clone().count() >= 3
+                && groups.clone().all(|g| !g.is_empty());
+            return Ok(if hyphenated {
+                PhoneScan::TooLong
+            } else {
+                PhoneScan::None
+            });
         }
     }
     budget.spend((end - i + 1) as u64)?;
@@ -1776,7 +1811,11 @@ fn phone_at(
         run.pop();
         end -= 1;
     }
-    Ok(is_phone(&run).then_some(end))
+    Ok(if is_phone(&run) {
+        PhoneScan::Phone(end)
+    } else {
+        PhoneScan::None
+    })
 }
 
 /// See [`phone_at`].
@@ -2773,7 +2812,14 @@ mod tests {
         assert_eq!(result.fields["tel"].raw.as_deref(), Some(text.as_str()));
         // Phone numbers at the cap are still found; longer runs are not numbers.
         assert!(holds_several("0-1-2-3-4-5-6-7-8-9-0-1-2 03-1234-5678"));
-        assert!(!holds_several("0-1-2-3-4-5-6-7-8-9-0-1-2-3 03-1234-5678"));
+        // Changed: a longer run of hyphenated digit groups is two numbers
+        // run together (before: no number, so one value).
+        assert!(holds_several("0-1-2-3-4-5-6-7-8-9-0-1-2-3 03-1234-5678"));
+        assert!(holds_several("03-1234-5678-03-1234-5679"));
+        assert!(holds_several("0312-345-678-0312-345-679"));
+        // Runs without hyphens or with brackets are no phone shape.
+        assert!(!holds_several("12345678901234567"));
+        assert!(!holds_several("(1(1(1(1(1(1(1(1(1(1(1(1(1(1"));
         assert!(holds_several("12-03-1234-5678 FAX 03-1234-5679"));
     }
 
