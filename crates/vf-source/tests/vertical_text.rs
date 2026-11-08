@@ -5,7 +5,7 @@
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, StringFormat, dictionary};
 use vf_source::geometry::Rect;
-use vf_source::layout::{Layout, LayoutLimits, Pair, Placement, Precision, Span, analyze};
+use vf_source::layout::{Binding, Layout, LayoutLimits, Pair, Placement, Precision, Span, analyze};
 use vf_source::{DocumentSnapshot, Orientation, PdfLimits, Quality, SourceFragment, inspect};
 
 /// One text show: font resource tag, `Tf` size, text matrix and the shown
@@ -1525,4 +1525,85 @@ fn a_script_chain_hung_on_a_turned_script_is_held_with_its_page() {
         .map(|f| f.id.as_str())
         .collect();
     assert_eq!(pairs_touching(&snapshot, &turned), 0);
+}
+
+/// Per page, one turned orientation: `Name:` with `Alice` 5 em further
+/// along its line, and on the next line `Ref:` with `X-9` 2 em further and
+/// `Tokyo` 5 em after that, beside upright body text. Glyphs advance one em
+/// (12 pt).
+fn strict_rules_document() -> Vec<u8> {
+    document(|doc| {
+        let f1 = type3_font(doc);
+        let pages = [
+            (DEG90, (300.0, 200.0)),
+            (DEG180, (500.0, 300.0)),
+            (DEG270, (300.0, 600.0)),
+        ];
+        pages
+            .into_iter()
+            .map(|(linear, (x, y))| {
+                let [a, b, c, d] = linear;
+                // Along the reading line `along` pt, `line` lines down.
+                let at = |line: f64, along: f64, text| {
+                    let (x, y) = (
+                        x + a * along - c * 40.0 * line,
+                        y + b * along - d * 40.0 * line,
+                    );
+                    turned(linear, x, y, text)
+                };
+                let mut runs = vec![
+                    upright(80.0, 760.0, "Invoice No: A-1"),
+                    upright(80.0, 740.0, "Total"),
+                    upright(200.0, 740.0, "1000"),
+                    upright(80.0, 720.0, "Date: 2026-01-01"),
+                ];
+                runs.extend([
+                    at(0.0, 0.0, "Name:"),
+                    at(0.0, 5.0 * 12.0 + 60.0, "Alice"),
+                    at(1.0, 0.0, "Ref:"),
+                    at(1.0, 4.0 * 12.0 + 24.0, "X-9"),
+                    at(1.0, 7.0 * 12.0 + 24.0 + 60.0, "Tokyo"),
+                ]);
+                Page::new(dictionary! {"F1" => f1}, &runs)
+            })
+            .collect()
+    })
+}
+
+#[test]
+fn turned_runs_keep_the_delimiter_gap_and_split_rules() {
+    let snapshot = snapshot(&strict_rules_document());
+    let layout = analyzed(&snapshot.fragments);
+    assert_layout_consistent(&snapshot, &layout);
+    for (page, orientation) in [
+        (1, Orientation::Deg90),
+        (2, Orientation::Deg180),
+        (3, Orientation::Deg270),
+    ] {
+        let get = |text| fragment(&snapshot, page, text);
+        for text in ["Name:", "Alice", "Ref:", "X-9", "Tokyo"] {
+            let f = get(text);
+            assert_eq!(f.quality, Quality::Usable, "{f:?}");
+            assert_eq!(f.orientation, orientation, "{f:?}");
+        }
+        let right = |label: &SourceFragment| {
+            let pairs: Vec<&Pair> = layout
+                .pairs
+                .iter()
+                .filter(|p| p.label.fragment_id == label.id && p.placement == Placement::Right)
+                .collect();
+            assert_eq!(pairs.len(), 1, "{orientation:?}: {pairs:?}");
+            pairs[0]
+        };
+        // 5 em from `Name:`, beyond MAX_DELIMITER_GAP_EM: position only.
+        let name = right(get("Name:"));
+        assert_eq!(span_text(&snapshot, &name.value[0]), "Alice");
+        assert_eq!(name.binding, Binding::Geometric, "{orientation:?}");
+        assert_eq!(name.split, [false], "{orientation:?}");
+        // 2 em from `Ref:`: delimiter-bound, but `Tokyo` follows on the line.
+        let reference = right(get("Ref:"));
+        assert_eq!(span_text(&snapshot, &reference.value[0]), "X-9");
+        assert_eq!(reference.binding, Binding::Delimiter, "{orientation:?}");
+        assert_eq!(reference.split, [true], "{orientation:?}");
+    }
 }
