@@ -1480,11 +1480,13 @@ fn states_scale(label: &Label) -> bool {
             .any(|q| qualifier_states_scale(q) || unit_note(q))
 }
 
-/// Whether one bracketed qualifier scales amounts: any of its parts
-/// (split at `・` `、` `,` `/` `:` and spaces; a comma between digits is
-/// kept) starts with a scale word after an optional `単位` and `は`
-/// (`（千円）`, `（税込・千円）`, `（金額：千円）`, `（円、千円）`), or is a
-/// number other than 1 followed by `円` (`（1,000円）`, `（1000円）`).
+/// Whether one bracketed qualifier scales amounts: it contains a scale word
+/// followed by `円` anywhere (`（税込千円）`, `（税込；千円）`), or any of its
+/// parts (split at `・` `、` `,` `/` `:`; a comma between digits is kept;
+/// `normalize_label` has already removed spaces) starts with a scale word
+/// after an optional `単位` and `は` (`（千円）`, `（税込・千円）`,
+/// `（金額：千円）`, `（円、千円）`), or is a number other than 1 followed by
+/// `円` (`（1,000円）`, `（1000円）`).
 fn qualifier_states_scale(qualifier: &str) -> bool {
     let chars: Vec<char> = qualifier.nfkc().collect();
     let mut joined = String::with_capacity(qualifier.len());
@@ -1495,7 +1497,13 @@ fn qualifier_states_scale(qualifier: &str) -> bool {
         }
         joined.push(c);
     }
-    joined.split(['・', '、', ',', '/', ':', ' ']).any(|part| {
+    if SCALE_WORDS
+        .iter()
+        .any(|word| joined.contains(&format!("{word}円")))
+    {
+        return true;
+    }
+    joined.split(['・', '、', ',', '/', ':']).any(|part| {
         let part = part.trim_start_matches("単位").trim_start_matches('は');
         if SCALE_WORDS.iter().any(|word| part.starts_with(word)) {
             return true;
@@ -3352,6 +3360,10 @@ mod tests {
             "売上高（1000円）",
             "売上高（１，０００円）",
             "売上高（1,000円）",
+            "金額（税込千円）",
+            "売上高（税込；千円）",
+            "売上高（税込-千円）",
+            "売上高（税込 千円）",
         ] {
             assert!(states_scale(&normalize_label(label)), "{label}");
         }
