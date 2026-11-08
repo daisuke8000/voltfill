@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light">
+<meta name="description" content="VOLTFILLのアーキテクチャとC4モデル。PDFの原文から、フォーム項目に合う値を根拠付きで返す構成と、実装状況を示します。">
+<title>VOLTFILL — Architecture & C4</title>
+<style>
+:root{--paper:#f5f5f5;--ink:#2d3142;--muted:#4f5d75;--soft:#7a8399;--rule:#dcdfe5;--accent:#eb6c36;--tint:#fff4ed;--link:#2e5aa8;--done:#2f7d4f;--done-tint:#eaf5ee;--wip:#b26a00;--wip-tint:#fff6e0;--plan:#7a8399;color-scheme:light}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:system-ui,sans-serif;line-height:1.7}
+a{color:var(--link);text-underline-offset:4px}
+.shell{display:grid;grid-template-columns:220px minmax(0,1fr);max-width:1440px;margin:auto;min-height:100vh}
+.sidebar{padding:40px 24px;border-right:1px solid var(--rule);position:sticky;top:0;height:100vh}
+.brand{font:600 30px system-ui,sans-serif;letter-spacing:-2px;color:var(--ink);text-decoration:none}
+.brand b{color:var(--accent);font-weight:400}
+.mono,.eyebrow,.chip,.node-tag,.node-sub,.edge-text,.zone-label{font-family:ui-monospace,monospace}
+.eyebrow{font-size:11px;letter-spacing:.12em;color:var(--muted);text-transform:uppercase}
+.nav{display:grid;gap:6px;margin-top:32px}
+.nav a{text-decoration:none;color:var(--muted);font-size:14px;padding:8px;border-radius:4px}
+.nav a:hover{background:var(--tint);color:var(--ink)}
+.main{min-width:0;padding:40px 48px}
+h1{font:600 44px/1.1 system-ui,sans-serif;letter-spacing:-1.5px;margin:8px 0 16px}
+h1 span{color:var(--soft)}
+.intro{font-size:15px;color:var(--muted);max-width:820px;margin:0 0 8px}
+section{margin:56px 0;scroll-margin-top:24px}
+h2{font-size:26px;letter-spacing:-.03em;margin:4px 0 6px}
+.sub{color:var(--muted);font-size:14px;margin:0 0 20px;max-width:880px}
+.legend{display:flex;flex-wrap:wrap;gap:16px;font-size:12px;color:var(--muted);margin:16px 0 0}
+.chip{display:inline-block;font-size:11px;border-radius:4px;padding:1px 8px;border:1px solid;white-space:nowrap}
+.chip.done{color:var(--done);border-color:var(--done);background:var(--done-tint)}
+.chip.wip{color:var(--wip);border-color:var(--wip);background:var(--wip-tint)}
+.chip.plan{color:var(--plan);border-color:#b8bec9;border-style:dashed;background:#fff}
+.layers{display:grid;gap:12px}
+.layer{display:grid;grid-template-columns:120px minmax(0,1fr) auto;gap:16px;align-items:start;background:#fff;border:1px solid var(--rule);border-radius:8px;padding:16px 20px}
+.layer .tag{font:600 15px system-ui,sans-serif}
+.layer .tag small{display:block;font:11px ui-monospace,monospace;color:var(--soft)}
+.layer p{margin:0;font-size:14px;color:var(--muted)}
+.layer p b{color:var(--ink)}
+.layer.core{border-left:3px solid var(--accent)}
+.canvas{border:1px solid var(--rule);border-radius:8px;background:#fafafa;overflow:auto;padding:16px}
+.canvas svg{display:block;width:100%;min-width:760px;height:auto}
+.node rect{fill:#fff;stroke:#a0a8b6;stroke-width:1.2}
+.node.accent rect{fill:var(--tint);stroke:var(--accent);stroke-width:1.6}
+.node.external rect{fill:#eceef1;stroke:#a7aebb}
+.node.planned rect{fill:#fff;stroke:#a7aebb;stroke-dasharray:6 4}
+.node.optional rect{fill:#f5f5f5;stroke:#a7aebb;stroke-dasharray:3 3}
+.node.wip rect{fill:var(--wip-tint);stroke:var(--wip)}
+.node-tag{font-size:10px;letter-spacing:.04em;fill:var(--muted)}
+.node-title{font-size:16px;font-weight:600;fill:var(--ink)}
+.node-sub{font-size:11px;fill:var(--muted)}
+.edge{fill:none;stroke:var(--muted);stroke-width:1.2}
+.edge.planned{stroke-dasharray:6 4}
+.edge.ext{stroke:var(--link)}
+.edge-text{font-size:11px;fill:var(--muted)}
+.boundary{fill:none;stroke:#b1b7c2;stroke-dasharray:5 4}
+.zone-label{font-size:11px;fill:var(--muted);letter-spacing:.05em}
+.notes{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin-top:20px}
+.note{background:#fff;border:1px solid var(--rule);border-radius:8px;padding:16px 20px}
+.note h3{font-size:14px;margin:0 0 6px}
+.note p,.note li{font-size:13px;color:var(--muted);margin:0}
+.note ul{margin:0;padding-left:18px}
+pre{background:#fff;border:1px solid var(--rule);border-radius:8px;padding:16px;font-size:12px;overflow:auto;line-height:1.6}
+footer{border-top:1px solid var(--rule);padding:20px 0;font-size:12px;color:var(--muted)}
+@media(max-width:900px){.shell{grid-template-columns:minmax(0,1fr)}.sidebar{position:static;height:auto;border-right:0;border-bottom:1px solid var(--rule);padding:20px 16px}.nav{grid-template-columns:repeat(2,1fr);margin-top:12px}.main{padding:24px 16px}h1{font-size:32px}.layer{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="shell">
+<aside class="sidebar">
+  <a class="brand" href="#top">VOLT<b>FILL</b></a>
+  <div class="eyebrow">Architecture</div>
+  <nav class="nav">
+    <a href="#pipeline">処理の流れ</a>
+    <a href="#context">C4 · Context</a>
+    <a href="#containers">C4 · Containers</a>
+    <a href="#components">C4 · Components</a>
+    <a href="#jev">Jevへの問い合わせ</a>
+    <a href="#rules">守る約束</a>
+  </nav>
+</aside>
+<main class="main" id="top">
+  <div class="eyebrow">VOLTFILL · Architecture &amp; C4</div>
+  <h1>PDFの原文から、<span>フォームの値を。</span></h1>
+  <p class="intro">VOLTFILLは、PDFのテキスト層から、指定されたフォーム項目に当てはまる<b>原文の値</b>を、ページと座標の<b>根拠（Evidence）</b>付きで返します。文字を生成・読み取りせず、モデル（Jev）は「どの原文か」「どこにあるか」を選ぶためだけに使います。UIは別のWebアプリが担います。</p>
+  <p class="intro">現在、旧来の抽出（Text／Vision／Hybrid）からフォーム入力向けの構成へ移行中です。図では実装状況を区別しています。</p>
+  <div class="legend">
+    <span><span class="chip done">実装済み</span> 現在のmainで動作</span>
+    <span><span class="chip wip">実装中</span> 一部のみ実装</span>
+    <span><span class="chip plan">計画</span> 未実装（設計段階）</span>
+  </div>
+
+  <section id="pipeline">
+    <div class="eyebrow">01</div>
+    <h2>処理の流れ</h2>
+    <p class="sub">入力はPDFとフォーム項目の一覧（id・ラベル・型・別名）。出力は項目ごとの値・根拠・状態です。原則は「誤って埋めるより空欄」です。</p>
+    <div class="layers">
+      <div class="layer"><div class="tag">L1 読む<small>pdf-probe</small></div><p>テキスト片と座標、ページごとのテキスト有無と品質を取得します。フォント非埋め込みなどで文字化けした片は <b>suspect</b> として除外します。</p><span class="chip done">実装済み</span></div>
+      <div class="layer core"><div class="tag">L2 構造化<small>pdf-probe</small></div><p>片を<b>行</b>にまとめ、<b>ラベルと値の候補</b>を作ります（1つの片の中の「ラベル：値」、同じ行の右、真下、同じ列の複数行）。値は既存の片のバイト範囲で、片の一部の座標は推定値として明示します。表・AcroFormは対象外です。</p><span class="chip wip">実装中</span></div>
+      <div class="layer"><div class="tag">L3 当てる<small>voltfill-core</small></div><p>フォームのラベル・別名・型で候補を採点し、1つに決まれば確定します。決めきれない項目だけ、Jevに候補から選ばせます（ページ画像を送るかは評価で決定）。</p><span class="chip plan">計画</span></div>
+      <div class="layer"><div class="tag">L4 返す<small>voltfill-core</small></div><p>原文・正規化値（日付・金額など）・根拠（ページ・座標・精度）・状態（filled / ambiguous / not_found / no_text / invalid）を返します。Evidenceと受信本文の保存は既存の仕組みを引き継ぎます。</p><span class="chip wip">実装中</span></div>
+    </div>
+  </section>
+
+  <section id="context">
+    <div class="eyebrow">02 · C4 Level 1</div>
+    <h2>System context</h2>
+    <p class="sub">VOLTFILLはUIを持たない処理エンジンです。WebアプリのバックエンドやCLIの利用者から呼ばれ、必要なときだけJev APIに問い合わせます。</p>
+    <div class="canvas"><svg viewBox="0 0 1000 400" role="img" aria-label="System context diagram">
+      <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#4f5d75"/></marker><marker id="arrx" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#2e5aa8"/></marker></defs>
+      <g class="node external"><rect x="30" y="40" width="200" height="80" rx="8"/><text class="node-tag" x="46" y="62">PERSON</text><text class="node-title" x="46" y="86">業務担当者</text><text class="node-sub" x="46" y="106">PDFを渡し、入力を確認</text></g>
+      <g class="node planned"><rect x="30" y="230" width="200" height="90" rx="8"/><text class="node-tag" x="46" y="252">SOFTWARE SYSTEM · 計画</text><text class="node-title" x="46" y="276">Webアプリ</text><text class="node-sub" x="46" y="296">UI・フォーム定義（別プロジェクト）</text></g>
+      <g class="node accent"><rect x="400" y="150" width="240" height="110" rx="8"/><text class="node-tag" x="418" y="174">SOFTWARE SYSTEM</text><text class="node-title" x="418" y="200">VOLTFILL</text><text class="node-sub" x="418" y="222">PDF → 項目ごとの原文の値</text><text class="node-sub" x="418" y="240">＋根拠・状態（CLI / HTTP）</text></g>
+      <g class="node external"><rect x="770" y="60" width="200" height="90" rx="8"/><text class="node-tag" x="786" y="82">EXTERNAL SYSTEM</text><text class="node-title" x="786" y="106">Jev API</text><text class="node-sub" x="786" y="126">choice / noul / box で選択</text></g>
+      <g class="node external"><rect x="770" y="250" width="200" height="90" rx="8"/><text class="node-tag" x="786" y="272">PERSON</text><text class="node-title" x="786" y="296">運用者</text><text class="node-sub" x="786" y="316">接続先・キー・上限を設定</text></g>
+      <path class="edge" d="M130,120 V230" marker-end="url(#arr)"/><text class="edge-text" x="140" y="180">PDFをアップロード</text>
+      <path class="edge planned" d="M230,262 C300,262 320,215 400,215" marker-end="url(#arr)"/><text class="edge-text" x="246" y="248">PDF＋フォーム項目</text>
+      <path class="edge planned" d="M400,240 C320,240 300,300 230,300" marker-end="url(#arr)"/><text class="edge-text" x="250" y="330">値・根拠・状態（JSON）</text>
+      <path class="edge ext" d="M640,180 C700,180 710,105 770,105" marker-end="url(#arrx)"/><text class="edge-text" x="650" y="140">曖昧な項目の候補（--remote時）</text>
+      <path class="edge" d="M770,295 C710,295 700,240 640,240" marker-end="url(#arr)"/><text class="edge-text" x="660" y="290">環境変数・設定</text>
+    </svg></div>
+  </section>
+
+  <section id="containers">
+    <div class="eyebrow">03 · C4 Level 2</div>
+    <h2>Containers</h2>
+    <p class="sub">CLIとHTTPサーバーは同じ処理を呼ぶ薄い入口です。複数の要求でJevの送信量・費用の上限を共有する場合はHTTPサーバーを常駐させます。</p>
+    <div class="canvas"><svg viewBox="0 0 1000 440" role="img" aria-label="Container diagram">
+      <defs><marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#4f5d75"/></marker></defs>
+      <rect class="boundary" x="230" y="20" width="520" height="400" rx="10"/><text class="zone-label" x="246" y="42">VOLTFILL</text>
+      <g class="node external"><rect x="20" y="70" width="180" height="80" rx="8"/><text class="node-tag" x="34" y="92">CALLER</text><text class="node-title" x="34" y="116">CLI利用者</text><text class="node-sub" x="34" y="136">開発・一括処理</text></g>
+      <g class="node planned"><rect x="20" y="250" width="180" height="80" rx="8"/><text class="node-tag" x="34" y="272">CALLER · 計画</text><text class="node-title" x="34" y="296">Webアプリ</text><text class="node-sub" x="34" y="316">バックエンドから呼出</text></g>
+      <g class="node"><rect x="260" y="60" width="220" height="110" rx="8"/><text class="node-tag" x="276" y="82">CONTAINER · Rust CLI</text><text class="node-title" x="276" y="106">voltfill-cli</text><text class="node-sub" x="276" y="128">inspect / validate / run / extract</text><text class="node-sub" x="276" y="148">serve（サーバー起動）· fill は計画</text></g>
+      <g class="node"><rect x="260" y="240" width="220" height="110" rx="8"/><text class="node-tag" x="276" y="262">CONTAINER · Axum HTTP</text><text class="node-title" x="276" y="286">voltfill-server</text><text class="node-sub" x="276" y="308">POST /v1/extract · GET /health</text><text class="node-sub" x="276" y="328">/v1/fill は計画 · 同時1件</text></g>
+      <g class="node accent"><rect x="530" y="150" width="200" height="110" rx="8"/><text class="node-tag" x="546" y="172">LIBRARY</text><text class="node-title" x="546" y="196">voltfill-core</text><text class="node-sub" x="546" y="218">抽出・Evidence・結果</text><text class="node-sub" x="546" y="238">上限・予算・本文保存</text></g>
+      <g class="node external"><rect x="790" y="80" width="190" height="80" rx="8"/><text class="node-tag" x="804" y="102">EXTERNAL</text><text class="node-title" x="804" y="126">Jev API</text><text class="node-sub" x="804" y="146">HTTPS（信頼済み）</text></g>
+      <g class="node optional"><rect x="790" y="260" width="190" height="80" rx="8"/><text class="node-tag" x="804" y="282">OPTIONAL · 利用者指定</text><text class="node-title" x="804" y="306">PDFium</text><text class="node-sub" x="804" y="326">ネイティブ描画（任意）</text></g>
+      <path class="edge" d="M200,110 H260" marker-end="url(#arr2)"/>
+      <path class="edge planned" d="M200,290 H260" marker-end="url(#arr2)"/>
+      <path class="edge" d="M480,115 C510,115 505,180 530,180" marker-end="url(#arr2)"/>
+      <path class="edge" d="M480,295 C510,295 505,230 530,230" marker-end="url(#arr2)"/>
+      <path class="edge" d="M370,170 V240" marker-end="url(#arr2)"/><text class="edge-text" x="378" y="210">serve</text>
+      <path class="edge" d="M730,180 C760,180 760,120 790,120" marker-end="url(#arr2)"/>
+      <path class="edge" d="M730,230 C760,230 760,300 790,300" stroke-dasharray="3 3" marker-end="url(#arr2)"/>
+    </svg></div>
+  </section>
+
+  <section id="components">
+    <div class="eyebrow">04 · C4 Level 3</div>
+    <h2>Components（crate）</h2>
+    <p class="sub">基盤crateは抽出スキーマやEvidenceに依存せず、coreに依存しません。PDF処理とJev通信は互いに独立しています。</p>
+    <div class="canvas"><svg viewBox="0 0 1000 470" role="img" aria-label="Component diagram">
+      <defs><marker id="arr3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#4f5d75"/></marker></defs>
+      <g class="node"><rect x="40" y="30" width="200" height="70" rx="8"/><text class="node-tag" x="56" y="52">FRONT END</text><text class="node-title" x="56" y="76">voltfill-cli</text></g>
+      <g class="node"><rect x="300" y="30" width="200" height="70" rx="8"/><text class="node-tag" x="316" y="52">FRONT END</text><text class="node-title" x="316" y="76">voltfill-server</text></g>
+      <rect class="boundary" x="40" y="140" width="920" height="130" rx="10"/><text class="zone-label" x="56" y="160">voltfill-core</text>
+      <g class="node"><rect x="60" y="172" width="160" height="80" rx="8"/><text class="node-tag" x="74" y="192">実装済み</text><text class="node-title" x="74" y="214">schema</text><text class="node-sub" x="74" y="234">旧スキーマ定義</text></g>
+      <g class="node"><rect x="236" y="172" width="160" height="80" rx="8"/><text class="node-tag" x="250" y="192">実装済み</text><text class="node-title" x="250" y="214">engine / evaluate</text><text class="node-sub" x="250" y="234">Text/Vision/Hybrid</text></g>
+      <g class="node"><rect x="412" y="172" width="160" height="80" rx="8"/><text class="node-tag" x="426" y="192">実装済み</text><text class="node-title" x="426" y="214">candidates</text><text class="node-sub" x="426" y="234">候補・in_box照合</text></g>
+      <g class="node"><rect x="588" y="172" width="160" height="80" rx="8"/><text class="node-tag" x="602" y="192">実装済み</text><text class="node-title" x="602" y="214">model / logging</text><text class="node-sub" x="602" y="234">Evidence・JSON Lines</text></g>
+      <g class="node planned"><rect x="764" y="172" width="180" height="80" rx="8"/><text class="node-tag" x="778" y="192">計画</text><text class="node-title" x="778" y="214">fill（L3・L4）</text><text class="node-sub" x="778" y="234">ラベル照合・正規化</text></g>
+      <g class="node wip"><rect x="40" y="330" width="260" height="110" rx="8"/><text class="node-tag" x="56" y="352">FOUNDATION</text><text class="node-title" x="56" y="376">pdf-probe</text><text class="node-sub" x="56" y="398">inspect · geometry · metadata</text><text class="node-sub" x="56" y="418">layout（L2）は実装中</text></g>
+      <g class="node optional"><rect x="360" y="330" width="260" height="110" rx="8"/><text class="node-tag" x="376" y="352">FOUNDATION · 任意機能</text><text class="node-title" x="376" y="376">pdf-render</text><text class="node-sub" x="376" y="398">hayro / pdfium（既定オフ）</text><text class="node-sub" x="376" y="418">ページ画像と座標変換</text></g>
+      <g class="node"><rect x="680" y="330" width="280" height="110" rx="8"/><text class="node-tag" x="696" y="352">FOUNDATION</text><text class="node-title" x="696" y="376">jev-client</text><text class="node-sub" x="696" y="398">protocol · transport · 上限/予算</text><text class="node-sub" x="696" y="418">全試行の受信本文を記録</text></g>
+      <path class="edge" d="M240,65 H300" marker-end="url(#arr3)"/><text class="edge-text" x="246" y="58">settings</text>
+      <path class="edge" d="M140,100 V140" marker-end="url(#arr3)"/>
+      <path class="edge" d="M400,100 V140" marker-end="url(#arr3)"/>
+      <path class="edge" d="M170,270 V330" marker-end="url(#arr3)"/>
+      <path class="edge" d="M490,270 V330" marker-end="url(#arr3)"/>
+      <path class="edge" d="M820,270 V330" marker-end="url(#arr3)"/>
+      <path class="edge" d="M360,385 H300" marker-end="url(#arr3)"/>
+    </svg></div>
+    <div class="notes">
+      <div class="note"><h3>依存の約束</h3><ul><li>pdf-probe・pdf-render は抽出スキーマ・Evidenceを必要としない</li><li>jev-client は PDF crate と core に依存しない</li><li>基盤crateは core に依存しない</li></ul></div>
+      <div class="note"><h3>外部crate</h3><p>PDF解析は <span class="mono">pdf-inspector</span> と <span class="mono">lopdf</span>、HTTPは <span class="mono">reqwest</span>（rustls）、サーバーは <span class="mono">axum</span> / <span class="mono">tokio</span>。描画の <span class="mono">hayro</span>・PDFium は既定オフです。</p></div>
+      <div class="note"><h3>移行の方針</h3><p>新しいL2〜L4は旧来の抽出と並べて作り、同じPDFでの比較（誤入力率→空欄率→トークン→時間の順）で方式を決めてから旧来部分を整理します。</p></div>
+    </div>
+  </section>
+
+  <section id="jev">
+    <div class="eyebrow">05</div>
+    <h2>Jevへの問い合わせ</h2>
+    <p class="sub">Jevは文字列を返さず、選択（choice）・有無（noul）・位置（box）だけを答えます。値は必ずPDFの原文から取ります。</p>
+    <div class="notes">
+      <div class="note"><h3>候補から選ぶ <span class="chip done">実装済み</span></h3><p>原文の候補を <span class="mono">choice</span> の選択肢として渡し、どれかを選ばせます（該当なしも選択肢に含む）。計画中の構成では、曖昧な項目の上位候補と前後の行だけを送ります。</p></div>
+      <div class="note"><h3>位置を指す <span class="chip done">実装済み</span></h3><p>ページ画像を渡して <span class="mono">box</span> で値の位置を答えさせ、座標をPDFに戻して範囲内の原文片を値にします（Vision）。片の一部だけを囲む場合はL2の分割で対応します。</p></div>
+      <div class="note"><h3>送らないもの</h3><p>認証情報・HTTPヘッダー・本文はログに出しません。送信には明示的な <span class="mono">--remote</span> が必要で、送信回数・トークン・費用・期限の上限を全試行に適用します。</p></div>
+    </div>
+<pre>{ "questions": { "total": { "type": "choice",
+    "instructions": "フォーム項目「ご請求額」（金額）に入れる値の候補を選んでください。",
+    "criteria": { "c1": "小計 ¥11,000", "c2": "合計 ¥12,100", "none": "該当なし" } } } }
+→ { "answers": { "total": { "type": "choice", "choice": "c2", "confidence": 0.9, ... } } }</pre>
+  </section>
+
+  <section id="rules">
+    <div class="eyebrow">06</div>
+    <h2>守る約束</h2>
+    <div class="notes">
+      <div class="note"><h3>原文と根拠</h3><p>値はPDFの原文から取り、文字を生成・OCRしません。Evidenceと全試行の受信本文（再試行・エラー・不完全な本文を含む）を保存します。推定した座標は推定と明示します。</p></div>
+      <div class="note"><h3>評価専用</h3><p>結果は評価専用で、confidenceは校正済みの正答確率ではありません。モックの結果を実際の精度・性能として扱いません。</p></div>
+      <div class="note"><h3>依存とネイティブ</h3><p>ネイティブ描画は任意で、利用者が指定したライブラリパスだけを使い、自動取得しません。RUSTSEC-2026-0192（ttf-parserの保守警告）は抑止せず追跡します。</p></div>
+    </div>
+  </section>
+
+  <footer>VOLTFILL · <a href="https://github.com/daisuke8000/voltfill">GitHub</a> · MIT License</footer>
+</main>
+</div>
+</body>
+</html>

@@ -4,7 +4,7 @@
 
 # VOLTFILL
 
-PDFのテキスト層から、指定された項目に対応する原文の値を根拠（Evidence）付きで返すRust製CLI／HTTPサーバーです。PDFは変更しません。
+PDFのテキスト層から、指定された項目に対応する原文の値を根拠（Evidence）付きで返すRust製CLI／HTTPサーバーです。PDFは変更しません。構成と実装状況は[アーキテクチャ・C4](https://daisuke8000.github.io/voltfill/)を参照してください。
 
 > 機能の範囲を絞り込み中です。Vision／Hybrid方式とスキーマ形式は今後変更されます。
 
@@ -120,4 +120,4 @@ cargo test --workspace --locked
 
 `pdf-inspector` の `ttf-parser 0.25.1` に[RUSTSEC-2026-0192](https://rustsec.org/advisories/RUSTSEC-2026-0192.html)の保守警告があります。脆弱性の発見を示すものではないため、各検査で抑止せず警告として表示します。正式修正は原文・座標・Evidenceの回帰検証後に採用します。
 
-[MITライセンス](LICENSE)
+[アーキテクチャ・C4](https://daisuke8000.github.io/voltfill/)（[ソース](docs/architecture.html)） · [MITライセンス](LICENSE)
