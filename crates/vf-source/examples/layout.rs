@@ -2,7 +2,10 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::args().nth(1).ok_or("usage: layout INPUT.pdf")?;
     let snapshot = vf_source::inspect(&std::fs::read(path)?, vf_source::PdfLimits::default())?;
-    let layout = vf_source::layout::analyze(&snapshot.fragments);
+    let layout = vf_source::layout::analyze(
+        &snapshot.fragments,
+        &vf_source::layout::LayoutLimits::default(),
+    )?;
     for pair in &layout.pairs {
         let text = |s: &vf_source::layout::Span| {
             snapshot

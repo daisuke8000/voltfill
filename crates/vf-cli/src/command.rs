@@ -832,7 +832,13 @@ fn run_command<E: Evaluator, T: assist::Transport, C: assist::Clock>(
         };
         let snapshot = vf_source::inspect(&bytes, args.resources.pdf)
             .map_err(|_| (4, "pdf_inspection_failed"))?;
-        let result = vf_core::fill::fill(&snapshot.document_id, &snapshot.fragments, &form);
+        let result = vf_core::fill::fill_with_limits(
+            &snapshot.document_id,
+            &snapshot.fragments,
+            &form,
+            &vf_core::fill::FillLimits::default(),
+        )
+        .map_err(|error| (4, error.code()))?;
         let Some((options, secret, (mut transport, mut clock))) = remote else {
             output(sink, &result)?;
             return Ok(0);
