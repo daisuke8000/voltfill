@@ -33,7 +33,9 @@
 //! - (d) Type: date, amount and number values match the type's grammar as a
 //!   whole (otherwise the field is `invalid`). Amounts and numbers are not
 //!   normalized when the label states a scale unit (`売上高（千円）`) or
-//!   any text on the page is a unit note (`（単位：千円）`).
+//!   any text on any page of the document is a unit note (`（単位：千円）`,
+//!   `（単位は千円）`, `（千円単位）`): which tables or pages a note covers
+//!   cannot be told.
 //!
 //! Only the best-scoring candidates decide (an exact label over a partial
 //! one). The field is filled only when every one of them may be committed
@@ -356,12 +358,15 @@ pub fn fill_with_limits(
     budget.spend(fragments.len() as u64)?;
     let texts: HashMap<&str, &SourceFragment> =
         fragments.iter().map(|f| (f.id.as_str(), f)).collect();
-    // A unit note anywhere on a page scales the amounts and numbers on it.
-    let mut scaled_pages = BTreeSet::new();
+    // A unit note on any page may scale every amount and number of the
+    // document: a note on an earlier page (or after a table) still applies.
+    let mut scaled_document = false;
     for fragment in fragments {
-        budget.spend_bytes(&fragment.raw_text)?;
+        // Whitespace removal and the note match each read the text once.
+        budget.spend(2 * u64::try_from(fragment.raw_text.len()).unwrap_or(u64::MAX / 2))?;
         if unit_note(&fragment.raw_text) {
-            scaled_pages.insert(fragment.page);
+            scaled_document = true;
+            break;
         }
     }
     // A value that reads as one of the form's own labels is a neighbouring label, not a value.
@@ -380,7 +385,7 @@ pub fn fill_with_limits(
         index: &index,
         texts: &texts,
         labels: &labels,
-        scaled_pages: &scaled_pages,
+        scaled_document,
     };
     let mut cache = Cache {
         slots: (0..pairs.len()).map(|_| None).collect(),
@@ -465,8 +470,8 @@ struct PreparedValue {
     evidence: Vec<FillEvidence>,
     /// More than one value in the text ([`several_values`]).
     several: bool,
-    /// The pair label states a scale unit (`千円`, `万円`) or the page has a
-    /// unit note (`（単位：千円）`).
+    /// The pair label states a scale unit (`千円`, `万円`) or the document
+    /// has a unit note (`（単位：千円）`).
     scaled: bool,
     /// Normalized values for date, amount and number fields, on first use.
     typed: [Option<Option<Value>>; 3],
@@ -492,8 +497,8 @@ struct Context<'a> {
     texts: &'a HashMap<&'a str, &'a SourceFragment>,
     /// The form's labels and hints ([`Label::stem`]).
     labels: &'a BTreeSet<String>,
-    /// Pages with a unit note ([`unit_note`]).
-    scaled_pages: &'a BTreeSet<u32>,
+    /// Some page of the document has a unit note ([`unit_note`]).
+    scaled_document: bool,
 }
 
 impl Context<'_> {
@@ -640,8 +645,7 @@ impl Context<'_> {
             return Ok(rejected(false));
         }
         let several = several_values(&raw.nfkc().collect::<String>(), self.labels, budget)?;
-        let scaled =
-            states_scale(&self.index.groups[*group].0) || self.scaled_pages.contains(&pair.page);
+        let scaled = states_scale(&self.index.groups[*group].0) || self.scaled_document;
         Ok(Prepared {
             first_is_label: false,
             value: Some(PreparedValue {
@@ -936,29 +940,41 @@ fn label_score(a: &Label, b: &Label) -> Match {
     }
 }
 
-/// A page-wide unit note (`（単位：千円）`, `単位：万円`, `単位 百万円`): `単位`,
-/// optional spaces or a colon, then a scale (`十` `百` `千` `万` `億` `兆`).
+/// Scales of a unit note or a label unit.
+const NOTE_SCALES: [char; 6] = ['十', '百', '千', '万', '億', '兆'];
+
+/// A unit note (`（単位：千円）`, `単位：万円`, `単位 百万円`, `（単位は千円）`,
+/// `金額単位：千円`, `（千円単位）`, `単 位：千円`), whitespace ignored: `単位`
+/// followed by optional `:`, `：` or `は` and a scale (`十` `百` `千` `万`
+/// `億` `兆`), or `単位` preceded by a scale and an optional `円`. A note on
+/// any page leaves the document's amounts and numbers unnormalized.
 fn unit_note(text: &str) -> bool {
-    text.match_indices("単位").any(|(at, unit)| {
-        let rest = text[at + unit.len()..]
-            .trim_start_matches(|c: char| c.is_whitespace() || matches!(c, ':' | '：'));
-        ["十", "百", "千", "万", "億", "兆"]
-            .iter()
-            .any(|scale| rest.starts_with(scale))
+    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    compact.match_indices("単位").any(|(at, unit)| {
+        let after = compact[at + unit.len()..].trim_start_matches([':', '：', 'は']);
+        let before = &compact[..at];
+        let before = before.strip_suffix('円').unwrap_or(before);
+        after.starts_with(NOTE_SCALES) || before.ends_with(NOTE_SCALES)
     })
 }
 
 /// Scale units that make a label's amounts and numbers multiples
-/// (`売上高（千円）`, `金額（単位：万円）`, `売上高百万円`).
+/// (`売上高（千円）`, `金額（単位：万円）`, `売上高百万円`, `金額（単位は千円）`,
+/// `売上高（千円単位）`): a scaled yen unit in the base, a qualifier that
+/// starts with a scale (after `単位` and `:`, `：` or `は`), or a unit note
+/// ([`unit_note`]) in the base or a qualifier.
 fn states_scale(label: &Label) -> bool {
     const SCALES: [&str; 5] = ["千", "万", "百万", "億", "兆"];
     let in_base = ["千円", "万円", "億円", "兆円"]
         .iter()
         .any(|unit| label.base.contains(unit));
     in_base
+        || unit_note(&label.base)
         || label.qualifiers.iter().any(|q| {
-            let q = q.trim_start_matches("単位").trim_start_matches([':', '：']);
-            SCALES.iter().any(|scale| q.starts_with(scale))
+            let scale = q
+                .trim_start_matches("単位")
+                .trim_start_matches([':', '：', 'は']);
+            SCALES.iter().any(|unit| scale.starts_with(unit)) || unit_note(q)
         })
 }
 
@@ -1876,7 +1892,7 @@ mod tests {
     }
 
     #[test]
-    fn page_unit_notes_leave_amounts_unnormalized() {
+    fn unit_notes_anywhere_leave_amounts_unnormalized() {
         let page = |page: u32, text: &str, top: f64| SourceFragment {
             page,
             ..frag(
@@ -1907,14 +1923,47 @@ mod tests {
         for id in ["sales", "sales_number", "budget"] {
             assert_eq!(f[id].status, FillStatus::Invalid, "{id}");
         }
-        // The note applies to its page only; text keeps the source text.
-        assert_eq!(f["cost"].value, Some(json!(7000)));
+        // Changed: a note applies to the whole document (before: its page
+        // only, so cost on page 3 was 7000). Text keeps the source text.
+        assert_eq!(f["cost"].status, FillStatus::Invalid);
         assert_eq!(f["sales_text"].raw.as_deref(), Some("1,234"));
-        for text in ["（単位：千円）", "単位:百万円", "(単位 億円)"] {
+        // Before: notes later in the document, or worded as below, were not
+        // notes, and the amounts were normalized.
+        let late = [
+            page(1, "売上高：1,234", 100.0),
+            page(2, "（千円単位）", 80.0),
+        ];
+        let result = fill(
+            "doc",
+            &late,
+            &form(json!({"fields":[{"id":"sales","label":"売上高","type":"amount"}]})),
+        );
+        assert_eq!(result.fields["sales"].status, FillStatus::Invalid);
+        for text in [
+            "（単位：千円）",
+            "単位:百万円",
+            "(単位 億円)",
+            "（単位は千円）",
+            "（千円単位）",
+            "単位：千円",
+            "金額単位：千円",
+            "(単位:千円)",
+            "単　位：千円",
+            "単 位 : 百万円",
+            "百万円単位",
+            "（千単位）",
+        ] {
             assert!(unit_note(&text.nfkc().collect::<String>()), "{text}");
             assert!(unit_note(text), "{text}");
         }
-        for text in ["単位：円", "単位：個", "単価：1,000円"] {
+        for text in [
+            "単位：円",
+            "単位：個",
+            "単価：1,000円",
+            "100円単位",
+            "数量単位",
+            "単位当たり",
+        ] {
             assert!(!unit_note(text), "{text}");
         }
     }
@@ -2318,6 +2367,10 @@ mod tests {
             "金額(万円)",
             "売上（単位：百万円）",
             "売上高千円",
+            // Before: not a scale unit, so the amount was normalized.
+            "金額（単位は千円）",
+            "売上高（千円単位）",
+            "売上高 単位：千円",
         ] {
             assert!(states_scale(&normalize_label(label)), "{label}");
         }

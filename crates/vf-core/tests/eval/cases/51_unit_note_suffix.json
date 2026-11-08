@@ -1,0 +1,21 @@
+{
+  "description": "表の後ろに単位の注記（（千円単位））がある。「千円単位」の形も単位の注記とみなし、金額・数値は変換しない（invalid）。以前は 1234・7000 で埋めていた",
+  "support": "supported",
+  "runs": [
+    {"x": 60, "y": 100, "text": "売上高：1,234"},
+    {"x": 60, "y": 124, "text": "経費：¥7,000"},
+    {"x": 400, "y": 148, "text": "（千円単位）"}
+  ],
+  "form": {"fields": [
+    {"id": "sales", "label": "売上高", "type": "amount"},
+    {"id": "sales_number", "label": "売上高", "type": "number"},
+    {"id": "sales_text", "label": "売上高"},
+    {"id": "cost", "label": "経費", "type": "amount"}
+  ]},
+  "expect": {
+    "sales": {"abstain": "invalid"},
+    "sales_number": {"abstain": "invalid"},
+    "sales_text": {"raw": "1,234"},
+    "cost": {"abstain": "invalid"}
+  }
+}

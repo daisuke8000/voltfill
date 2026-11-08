@@ -1,0 +1,21 @@
+{
+  "description": "「金額単位：千円」の形の単位の注記。金額・数値は変換しない（invalid）",
+  "support": "supported",
+  "runs": [
+    {"x": 400, "y": 80, "text": "金額単位：千円"},
+    {"x": 60, "y": 100, "text": "売上高：1,234"},
+    {"x": 60, "y": 124, "text": "経費：¥7,000"}
+  ],
+  "form": {"fields": [
+    {"id": "sales", "label": "売上高", "type": "amount"},
+    {"id": "sales_number", "label": "売上高", "type": "number"},
+    {"id": "sales_text", "label": "売上高"},
+    {"id": "cost", "label": "経費", "type": "amount"}
+  ]},
+  "expect": {
+    "sales": {"abstain": "invalid"},
+    "sales_number": {"abstain": "invalid"},
+    "sales_text": {"raw": "1,234"},
+    "cost": {"abstain": "invalid"}
+  }
+}
