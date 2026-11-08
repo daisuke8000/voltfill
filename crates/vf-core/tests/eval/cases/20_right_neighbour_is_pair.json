@@ -14,13 +14,7 @@
   ]},
   "expect": {
     "company": {"raw": "株式会社サンプル商事"},
-    "person": {
-      "abstain": "any",
-      "known_wrong": {
-        "status": "filled", "raw": "部署：経理部", "value": "部署：経理部",
-        "reason": "同じ行の右隣のランを、それ自体が「ラベル：値」であっても右方向の値（Right）として採用する"
-      }
-    },
+    "person": {"abstain": "not_found"},
     "department": {"raw": "経理部"}
   }
 }

@@ -1,6 +1,6 @@
 {
-  "description": "未対応: 和暦の日付（令和・平成・元年・略記）",
-  "support": "unsupported",
+  "description": "和暦の日付（令和・平成・元年・略記）を西暦のISO形式に変換する",
+  "support": "supported",
   "runs": [
     {"x": 60, "y": 100, "text": "発行日：令和8年11月8日"},
     {"x": 60, "y": 124, "text": "生年月日：平成2年4月1日"},

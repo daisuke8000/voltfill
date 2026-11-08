@@ -14,12 +14,6 @@
   "expect": {
     "issued": {"raw": "2026年11月1日", "value": "2026-11-01"},
     "ship": {"abstain": "invalid"},
-    "deliver": {
-      "abstain": "any",
-      "known_wrong": {
-        "status": "filled", "raw": "2026年11月8日以降", "value": "2026-11-08",
-        "reason": "日付の正規化は日付の後ろに続く「以降」を無視する"
-      }
-    }
+    "deliver": {"abstain": "invalid"}
   }
 }

@@ -14,13 +14,7 @@
   ]},
   "expect": {
     "net": {"raw": "¥10,000", "value": 10000},
-    "gross": {
-      "abstain": "any",
-      "known_wrong": {
-        "status": "filled", "raw": "¥10,000", "value": 10000,
-        "reason": "ラベル照合で括弧内の限定（税抜・税込）を捨てるため、金額（税込）が金額（税抜）と完全一致する"
-      }
-    },
+    "gross": {"abstain": "not_found"},
     "tax": {"raw": "¥1,000", "value": 1000}
   }
 }

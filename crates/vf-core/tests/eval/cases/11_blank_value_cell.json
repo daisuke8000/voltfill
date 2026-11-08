@@ -17,13 +17,7 @@
   ]},
   "expect": {
     "company": {"raw": "株式会社サンプル"},
-    "department": {
-      "abstain": "any",
-      "known_wrong": {
-        "status": "filled", "raw": "役職", "value": "役職",
-        "reason": "値が空欄の「部署」行で、直下の行の先頭にある「役職」（フォームにないラベル）を下方向の値（Below）として採用する"
-      }
-    },
+    "department": {"abstain": "not_found"},
     "person": {"raw": "佐藤 花子"}
   }
 }

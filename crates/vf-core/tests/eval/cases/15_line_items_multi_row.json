@@ -1,6 +1,6 @@
 {
-  "description": "未対応: 明細表（3行）。単一の項目に対して値が一意に決まらないため空欄が正しい",
-  "support": "unsupported",
+  "description": "明細表（3行）。単一の項目に対して値が一意に決まらないため、見出しの列はすべて空欄（ambiguous）",
+  "support": "supported",
   "runs": [
     {"x": 60, "y": 100, "text": "品名"},
     {"x": 300, "y": 100, "text": "数量"},
@@ -25,17 +25,8 @@
     {"id": "amount", "label": "金額", "type": "amount"}
   ]},
   "expect": {
-    "item": {
-      "abstain": "any",
-      "known_wrong": {"status": "filled", "raw": "USBケーブル Type-C 1m", "value": "USBケーブル Type-C 1m", "reason": "見出し行の直下にある明細1行目だけを下方向の値（Below）として採用し、3行のうち1行目の値で埋める"}
-    },
-    "quantity": {
-      "abstain": "any",
-      "known_wrong": {"status": "filled", "raw": "2", "value": 2, "reason": "見出し行の直下にある明細1行目だけを下方向の値（Below）として採用し、3行のうち1行目の値で埋める"}
-    },
-    "amount": {
-      "abstain": "any",
-      "known_wrong": {"status": "filled", "raw": "¥2,400", "value": 2400, "reason": "見出し行の直下にある明細1行目だけを下方向の値（Below）として採用し、3行のうち1行目の値で埋める"}
-    }
+    "item": {"abstain": "ambiguous"},
+    "quantity": {"abstain": "ambiguous"},
+    "amount": {"abstain": "ambiguous"}
   }
 }

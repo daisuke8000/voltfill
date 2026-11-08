@@ -12,13 +12,7 @@
   ]},
   "expect": {
     "issued": {"raw": "2026年11月1日", "value": "2026-11-01"},
-    "valid_date": {
-      "abstain": "any",
-      "known_wrong": {
-        "status": "filled", "raw": "2026年11月8日〜2026年12月8日", "value": "2026-11-08",
-        "reason": "日付の正規化は先頭の年・月・日だけを読み、後ろに続く終了日を無視する"
-      }
-    },
+    "valid_date": {"abstain": "invalid"},
     "valid_text": {"raw": "2026年11月8日〜2026年12月8日"}
   }
 }
