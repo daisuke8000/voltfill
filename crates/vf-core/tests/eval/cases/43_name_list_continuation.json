@@ -1,5 +1,5 @@
 {
-  "description": "ラベルの右に氏名が1列に3行続く（山田 太郎 / 佐藤 花子 / 鈴木 一郎）。「担当者：」でも複数行の値は候補止まり（multi_line）、区切り記号のない「営業担当」は geometric_only",
+  "description": "ラベルの右に氏名が1列に3行続く（山田 太郎 / 佐藤 花子 / 鈴木 一郎）。「担当者：」でも複数行の値は候補止まり（ラベルとの間が4emを超える（10em）ため geometric_only、さらに multi_line）、区切り記号のない「営業担当」は geometric_only",
   "support": "supported",
   "runs": [
     {"x": 60, "y": 100, "text": "担当者："},
@@ -16,7 +16,7 @@
     {"id": "sales", "label": "営業担当"}
   ]},
   "expect": {
-    "person": {"abstain": "ambiguous", "hold": "multi_line", "candidate": "山田 太郎\n佐藤 花子\n鈴木 一郎"},
+    "person": {"abstain": "ambiguous", "hold": "geometric_only", "holds": ["geometric_only", "multi_line"], "candidate": "山田 太郎\n佐藤 花子\n鈴木 一郎"},
     "sales": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "山田 太郎\n佐藤 花子\n鈴木 一郎"}
   }
 }

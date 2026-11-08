@@ -1,5 +1,5 @@
 {
-  "description": "ラベルと値が同じ行の別ラン。ラベル側に区切り記号がある値（請求額：）だけ埋め、区切り記号のない右隣の値は位置だけの結び付きのため候補止まり（ambiguous・geometric_only）",
+  "description": "ラベルと値が同じ行の別ラン。区切り記号のない右隣の値は位置だけの結び付きのため候補止まり（ambiguous・geometric_only）。ラベル側に区切り記号がある値（請求日：）も、ラベルとの間が4emを超える（6em）ため位置だけの結び付きとして候補止まり（以前は埋めていた）",
   "support": "supported",
   "runs": [
     {"x": 60, "y": 100, "text": "氏名"},
@@ -20,7 +20,7 @@
   "expect": {
     "name": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "山田 太郎"},
     "phone": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "03-1234-5678"},
-    "billed": {"raw": "2026/11/08", "value": "2026-11-08"},
+    "billed": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "2026/11/08"},
     "quantity": {"abstain": "ambiguous", "hold": "geometric_only", "candidate": "12 個"}
   }
 }

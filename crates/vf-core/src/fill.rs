@@ -1682,9 +1682,10 @@ mod tests {
         vec![
             frag("a", "請求番号：INV-0012", [60.0, 119.0, 161.4, 130.0]),
             frag("b", "発行日：2026年11月8日", [60.0, 139.0, 179.8, 150.0]),
-            frag("c", "小計：", [330.0, 219.0, 363.0, 230.0]),
+            // Within MAX_DELIMITER_GAP_EM of the right-aligned amounts.
+            frag("c", "小計：", [430.0, 219.0, 463.0, 230.0]),
             frag("d", "¥11,000", [480.2, 219.0, 520.0, 230.0]),
-            frag("e", "合計：", [330.0, 259.0, 363.0, 270.0]),
+            frag("e", "合計：", [430.0, 259.0, 463.0, 270.0]),
             frag("f", "¥12,100", [480.2, 259.0, 520.0, 270.0]),
             frag("g", "住所", [60.0, 319.0, 82.0, 330.0]),
             frag(
@@ -1743,12 +1744,15 @@ mod tests {
     fn only_delimiter_bound_single_values_commit() {
         let fragments = [
             frag("a", "請求日：", [60.0, 100.0, 100.0, 110.0]),
-            frag("b", "2026/11/08", [200.0, 100.0, 250.0, 110.0]),
+            frag("b", "2026/11/08", [130.0, 100.0, 180.0, 110.0]),
             frag("c", "支払期限", [60.0, 130.0, 100.0, 140.0]),
-            frag("d", "2026/11/30", [200.0, 130.0, 250.0, 140.0]),
+            frag("d", "2026/11/30", [130.0, 130.0, 180.0, 140.0]),
             frag("e", "住所：", [60.0, 160.0, 90.0, 170.0]),
-            frag("f", "東京都架空区1-2-3", [200.0, 160.0, 290.0, 170.0]),
-            frag("g", "テストビル5階", [200.0, 172.0, 270.0, 182.0]),
+            frag("f", "東京都架空区1-2-3", [120.0, 160.0, 210.0, 170.0]),
+            frag("g", "テストビル5階", [120.0, 172.0, 190.0, 182.0]),
+            // Further than MAX_DELIMITER_GAP_EM: bound by position only.
+            frag("l", "発送日：", [60.0, 280.0, 100.0, 290.0]),
+            frag("m", "2026/11/09", [400.0, 280.0, 450.0, 290.0]),
             frag("h", "備考：東京都架空区4-5-6", [60.0, 200.0, 185.0, 210.0]),
             frag("i", "テストビル6階", [90.0, 212.0, 160.0, 222.0]),
             frag("j", "注文番号", [60.0, 240.0, 100.0, 250.0]),
@@ -1762,13 +1766,16 @@ mod tests {
                 {"id":"due","label":"支払期限","type":"date"},
                 {"id":"address","label":"住所"},
                 {"id":"note","label":"備考"},
-                {"id":"order","label":"注文番号"}
+                {"id":"order","label":"注文番号"},
+                {"id":"sent","label":"発送日","type":"date"}
             ]})),
         );
         assert_eq!(result.fields["issued"].value, Some(json!("2026-11-08")));
-        // A right neighbour without a delimiter and a value below: geometric.
+        // A right neighbour without a delimiter or far from its `label：`,
+        // and a value below: geometric. Before: sent = 2026-11-09.
         assert_eq!(held(&result, "due"), Some(Hold::GeometricOnly));
         assert_eq!(held(&result, "order"), Some(Hold::GeometricOnly));
+        assert_eq!(held(&result, "sent"), Some(Hold::GeometricOnly));
         // A delimiter-bound value over two lines, right or inline.
         assert_eq!(held(&result, "address"), Some(Hold::MultiLine));
         assert_eq!(held(&result, "note"), Some(Hold::MultiLine));
@@ -2088,11 +2095,11 @@ mod tests {
         // The matching qualifier wins over a one-sided one.
         let fragments = [
             frag("a", "金額（税抜）：", [60.0, 100.0, 130.0, 110.0]),
-            frag("b", "¥10,000", [200.0, 100.0, 240.0, 110.0]),
+            frag("b", "¥10,000", [150.0, 100.0, 190.0, 110.0]),
             frag("c", "金額（税込）：", [60.0, 130.0, 130.0, 140.0]),
-            frag("d", "¥11,000", [200.0, 130.0, 240.0, 140.0]),
+            frag("d", "¥11,000", [150.0, 130.0, 190.0, 140.0]),
             frag("e", "金額：", [60.0, 160.0, 90.0, 170.0]),
-            frag("f", "¥99", [200.0, 160.0, 220.0, 170.0]),
+            frag("f", "¥99", [110.0, 160.0, 130.0, 170.0]),
         ];
         let result = fill(
             "doc",
@@ -2407,9 +2414,9 @@ mod tests {
     #[test]
     fn one_sided_qualifiers_are_candidates_only() {
         let fragments = [
-            frag("a", "消費税（10%）：", [330.0, 100.0, 402.0, 110.0]),
+            frag("a", "消費税（10%）：", [400.0, 100.0, 472.0, 110.0]),
             frag("b", "¥1,000", [480.0, 100.0, 520.0, 110.0]),
-            frag("c", "消費税（8%）：", [330.0, 120.0, 397.0, 130.0]),
+            frag("c", "消費税（8%）：", [400.0, 120.0, 467.0, 130.0]),
             frag("d", "¥160", [490.0, 120.0, 520.0, 130.0]),
             frag(
                 "e",
@@ -2984,7 +2991,7 @@ mod tests {
         let value = "あ".repeat(200_000);
         let fragments = [
             frag("l", "備考：", [60.0, 100.0, 90.0, 110.0]),
-            frag("v", &value, [200.0, 100.0, 500.0, 110.0]),
+            frag("v", &value, [100.0, 100.0, 500.0, 110.0]),
         ];
         let fields: Vec<serde_json::Value> = (0..MAX_FIELDS)
             .map(|f| json!({"id": format!("f{f}"), "label": "備考"}))

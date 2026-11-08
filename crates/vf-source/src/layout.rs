@@ -9,9 +9,11 @@
 //! Each pair records how its value is tied to its label ([`Binding`]):
 //! - [`Binding::Delimiter`]: an inline `label：value` / `label: value` in one
 //!   fragment, or a fragment ending with its only delimiter (`label：`)
-//!   followed by the next fragment to its right on the same line.
+//!   followed by the next fragment to its right on the same line, at most
+//!   [`MAX_DELIMITER_GAP_EM`] em away.
 //! - [`Binding::Geometric`]: position only — a right neighbour without a
-//!   delimiter, a value directly below the label, or a row of a column.
+//!   delimiter or further than [`MAX_DELIMITER_GAP_EM`] em, a value directly
+//!   below the label, or a row of a column.
 //!
 //! A value to the right (and an inline value) takes continuation lines in
 //! its column; a value with more than one line is still one pair, with one
@@ -79,6 +81,15 @@ pub const MAX_COLUMN_ROWS: usize = 5;
 pub const MAX_WINDOW: usize = 16;
 /// Default ceiling on label/value hypotheses for one document.
 pub const DEFAULT_MAX_PAIRS: usize = 50_000;
+/// Widest gap, in em (the larger height of the two fragments), between a
+/// `label：` fragment and the next fragment to its right for the delimiter
+/// to bind them ([`Binding::Delimiter`]). A wider gap binds by position
+/// only ([`Binding::Geometric`]): a blank `氏名：` must not take an unrelated
+/// fragment far to its right (a right-aligned company name) as its value.
+/// Runs closer than about half an em are usually extracted as one fragment
+/// (split by the delimiter instead), so delimiter-bound right values lie
+/// roughly 0.5 to 4 em to the right of their labels.
+pub const MAX_DELIMITER_GAP_EM: f64 = 4.0;
 /// Default work units for [`analyze`] (see [`analyze_within`]).
 pub const DEFAULT_MAX_WORK: u64 = 200_000_000;
 
@@ -173,10 +184,12 @@ pub enum Placement {
 pub enum Binding {
     /// An explicit delimiter: a `label：value` fragment ([`Placement::Inline`]),
     /// or a fragment that ends with its only delimiter (`label：`) and the
-    /// next fragment to its right on the same line ([`Placement::Right`]).
+    /// next fragment to its right on the same line, at most
+    /// [`MAX_DELIMITER_GAP_EM`] em away ([`Placement::Right`]).
     Delimiter,
-    /// Position only: a right neighbour without a delimiter, a value below
-    /// the label or a row of a column.
+    /// Position only: a right neighbour without a delimiter or further than
+    /// [`MAX_DELIMITER_GAP_EM`] em, a value below the label or a row of a
+    /// column.
     Geometric,
 }
 
@@ -283,12 +296,18 @@ pub fn analyze_within(
                 to: left + half,
                 label: Some(fragments[label].bbox),
             };
+            // `windows(2)` over left-sorted fragments: no other fragment
+            // starts between the label and its value.
+            let (l, v) = (fragments[label].bbox, fragments[value].bbox);
+            let em = l.height().max(v.height());
+            let binding = if measures[label].kind == Kind::Label
+                && v.left - l.right <= MAX_DELIMITER_GAP_EM * em
+            {
+                Binding::Delimiter
+            } else {
+                Binding::Geometric
+            };
             if let Some(value) = page.value(i, first, column, budget)? {
-                let binding = if measures[label].kind == Kind::Label {
-                    Binding::Delimiter
-                } else {
-                    Binding::Geometric
-                };
                 pairs.push(Pair {
                     page: line.page,
                     label: page.span(label, START, LABEL_END, budget)?,
@@ -1573,7 +1592,7 @@ mod tests {
     fn bindings_tell_delimiters_from_geometry() {
         let fragments = [
             frag("a", "請求日：", [60.0, 100.0, 100.0, 110.0]),
-            frag("b", "2026/11/08", [200.0, 100.0, 250.0, 110.0]),
+            frag("b", "2026/11/08", [140.0, 100.0, 190.0, 110.0]),
             frag("c", "担当", [60.0, 130.0, 80.0, 140.0]),
             frag("d", "山田 太郎", [200.0, 130.0, 250.0, 140.0]),
             frag("e", "件名：制作費", [60.0, 160.0, 120.0, 170.0]),
@@ -1590,6 +1609,35 @@ mod tests {
         assert_eq!(binding("担当"), (Placement::Right, Binding::Geometric));
         assert_eq!(binding("件名"), (Placement::Inline, Binding::Delimiter));
         assert_eq!(binding("注文番号"), (Placement::Below, Binding::Geometric));
+    }
+
+    #[test]
+    fn a_far_right_fragment_is_bound_by_position_only() {
+        // A blank `氏名：` and a right-aligned company name on its line.
+        // Before: the delimiter bound them (氏名 → 株式会社サンプル商事).
+        let pair = |left: f64| {
+            let fragments = [
+                frag("a", "氏名：", [60.0, 100.0, 90.0, 110.0]),
+                frag(
+                    "b",
+                    "株式会社サンプル商事",
+                    [left, 100.0, left + 100.0, 110.0],
+                ),
+            ];
+            let pairs = analyze(&fragments).pairs;
+            assert_eq!(pairs.len(), 1);
+            (pairs[0].placement, pairs[0].binding)
+        };
+        assert_eq!(pair(435.0), (Placement::Right, Binding::Geometric));
+        // Up to MAX_DELIMITER_GAP_EM em (40 pt at 10 pt) the delimiter binds.
+        assert_eq!(pair(130.0), (Placement::Right, Binding::Delimiter));
+        assert_eq!(pair(130.5), (Placement::Right, Binding::Geometric));
+        // The larger font sets the em.
+        let fragments = [
+            frag("a", "合計：", [60.0, 100.0, 90.0, 110.0]),
+            frag("b", "¥12,100", [140.0, 92.0, 210.0, 110.0]),
+        ];
+        assert_eq!(analyze(&fragments).pairs[0].binding, Binding::Delimiter);
     }
 
     #[test]
