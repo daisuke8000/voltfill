@@ -997,18 +997,23 @@ const PLAIN_UNITS: [&str; 30] = [
 ];
 
 /// A unit note, whitespace ignored and NFKC applied:
-/// - `単位` followed by optional `:`, `：` or `は` and a scale (`十` `百`
-///   `千` `万` `億` `兆`) or a number other than 1 not followed by a count
-///   unit (`（単位：千円）`, `単位 百万円`, `（単位は千円）`,
-///   `（単位：1,000円）`, `単位:1000`). A quantity (`発注単位：100個`,
-///   `最小単位：10枚`) is not a note;
-/// - `単位` after `(` or followed by `:`, `：` or `は`, then anything but a
-///   plain unit ([`PLAIN_UNITS`], optionally after the number 1) and the
-///   end of the note (`）`, `)`, `、`, `。` or the end of the text):
-///   `（単位：ドル）`, `単位：千ドル`. A plain unit (`単位：円`,
-///   `（単位：個）`, `単位：1円`) and `単位` followed by other text
-///   (`単位当たり`, `数量単位`) are not notes;
-/// - `単位` preceded by a scale and an optional `円` (`（千円単位）`).
+/// - `単位` preceded by a scale and an optional `円` (`（千円単位）`);
+/// - `単位` followed by optional `:`, `：` or `は` and a note body up to `)`,
+///   `。` or the end of the text, split into parts at `、`, `/` and `・`,
+///   where one part is a note:
+///   - a part starting with a scale (`十` `百` `千` `万` `億` `兆`):
+///     `（単位：千円）`, `単位 百万円`, `（単位は千円）`,
+///     `（単位：個、千円）`, `単位：個／千円`;
+///   - a part starting with a number other than 1 (`（単位：1,000円）`,
+///     `単位:1000`, `（単位：1,000個）`), except a quantity: a number and a
+///     count unit after a word that names the unit (`発注単位：100個`,
+///     `最小単位：10枚`);
+///   - when `単位` follows `(` or is followed by `:`, `：` or `は`, a part
+///     that is not a plain unit ([`PLAIN_UNITS`], optionally after the
+///     number 1): `（単位：ドル）`, `単位：千ドル`.
+///
+/// A plain unit (`単位：円`, `（単位：個）`, `単位：1円`) and `単位` followed
+/// by other text (`単位当たり`, `数量単位`) are not notes.
 ///
 /// A note on any page leaves the document's amounts and numbers
 /// unnormalized: which tables or pages it covers cannot be told.
@@ -1019,30 +1024,42 @@ fn unit_note(text: &str) -> bool {
         let after = rest.trim_start_matches([':', '：', 'は']);
         let before = &compact[..at];
         let opened = before.ends_with('(');
-        let before = before.strip_suffix('円').unwrap_or(before);
+        // A word right before `単位` (`発注単位`) names what is counted.
+        let named = before.ends_with(char::is_alphabetic);
+        let scaled = before.strip_suffix('円').unwrap_or(before);
         let marked = opened || after.len() < rest.len();
-        if after.starts_with(NOTE_SCALES) || before.ends_with(NOTE_SCALES) {
+        if scaled.ends_with(NOTE_SCALES) {
             return true;
         }
-        let digits_end = after
-            .find(|c: char| !(c.is_ascii_digit() || c == ','))
-            .unwrap_or(after.len());
-        let (number, unit) = after.split_at(digits_end);
-        let digits: String = number.chars().filter(char::is_ascii_digit).collect();
-        if digits.is_empty() {
-            return marked && !unit.is_empty() && !plain_unit(unit);
-        }
-        // A quantity (`100個`), not a scale.
-        let count = PLAIN_UNITS[1..].iter().any(|u| {
-            unit.get(..u.len())
-                .is_some_and(|head| head.eq_ignore_ascii_case(u))
-        });
-        if count {
-            return false;
-        }
-        // `単位：1円` is plain yen; any other number scales (`1,000円`).
-        digits.trim_start_matches('0') != "1" || (marked && !unit.is_empty() && !plain_unit(unit))
+        let body = &after[..after.find([')', '。']).unwrap_or(after.len())];
+        body.split(['、', '/', '・'])
+            .any(|part| note_part(part, marked, named))
     })
+}
+
+/// Whether one part of a unit note body scales amounts ([`unit_note`]).
+fn note_part(part: &str, marked: bool, named: bool) -> bool {
+    if part.starts_with(NOTE_SCALES) {
+        return true;
+    }
+    let digits_end = part
+        .find(|c: char| !(c.is_ascii_digit() || c == ','))
+        .unwrap_or(part.len());
+    let (number, unit) = part.split_at(digits_end);
+    let digits: String = number.chars().filter(char::is_ascii_digit).collect();
+    if digits.is_empty() {
+        return marked && !unit.is_empty() && !plain_unit(unit);
+    }
+    // A quantity (`発注単位：100個`), not a scale.
+    let count = PLAIN_UNITS[1..].iter().any(|u| {
+        unit.get(..u.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(u))
+    });
+    if count && named {
+        return false;
+    }
+    // `単位：1円` is plain yen; any other number scales (`1,000円`).
+    digits.trim_start_matches('0') != "1" || (marked && !unit.is_empty() && !plain_unit(unit))
 }
 
 /// Most adjacent fragments of one line joined to find a unit note split
@@ -1604,11 +1621,15 @@ fn labelled_after(text: &str, kind: Shape, end: usize) -> bool {
     };
     let after = word.trim_start_matches(char::is_alphabetic);
     let letters = word[..word.len() - after.len()].chars().count();
+    // `Ext.123`, `No.5`, `#12`: a mark between the word and its number.
+    let numbered = after
+        .trim_start_matches(['.', '#', ':', '．', '＃', '：'])
+        .starts_with(|c: char| c.is_ascii_digit() || ('０'..='９').contains(&c));
     letters > 0
         && (after
             .strip_prefix(char::is_whitespace)
             .is_some_and(|value| !value.trim_start().is_empty())
-            || after.starts_with(|c: char| c.is_ascii_digit())
+            || numbered
             || (after.trim().is_empty() && letters > MAX_TAIL_WORD_CHARS))
 }
 
@@ -2202,6 +2223,16 @@ mod tests {
             "（単位：ドル）",
             "(単位:千ドル)",
             "単位は USD",
+            // Before: not notes (a count unit after the number, or a plain
+            // unit before `、` or `/`), so `売上高：1,234` was 1234.
+            "（単位：100個、千円）",
+            "（単位：個、千円）",
+            "単位：個／千円",
+            "（単位：1,000個）",
+            "（単位：1,000t）",
+            "（単位：1,000人）",
+            // No word names what is counted, so this may scale amounts.
+            "単位：12本",
         ] {
             assert!(unit_note(&text.nfkc().collect::<String>()), "{text}");
             assert!(unit_note(text), "{text}");
@@ -2223,7 +2254,6 @@ mod tests {
             "発注単位：100個",
             "ロット単位：500個",
             "最小単位：10枚",
-            "単位：12本",
         ] {
             assert!(!unit_note(text), "{text}");
         }
@@ -2934,6 +2964,10 @@ mod tests {
             // word (a label and its value without a space), or a form label
             // after `/`, `・`, `、` or `,`.
             ("03-1234-5678 内線123", true),
+            // Before: false. A mark between the word and its number.
+            ("03-1234-5678 Ext.123", true),
+            ("03-1234-5678 内線#123", true),
+            ("03-1234-5678 No.5", true),
             ("03-1234-5678 担当山田", true),
             ("2026年11月8日 午前10時", true),
             ("1,000円 送料500", true),
