@@ -230,3 +230,206 @@ fn a_refused_output_target_fails_before_credentials_are_read() {
     }
     assert!(!temp.0.join("elsewhere.json").exists());
 }
+
+/// Temporary output files left in `dir`.
+fn temporaries(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .expect("read the test directory")
+        .map(|entry| {
+            entry
+                .expect("read the directory entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name.starts_with(".voltfill-"))
+        .collect()
+}
+
+fn legacy_schema() -> String {
+    path(
+        &Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/legacy/text-form.json")
+            .canonicalize()
+            .expect("the legacy example schema exists"),
+    )
+}
+
+#[test]
+fn an_unwritable_output_target_fails_before_inputs_credentials_or_sends() {
+    let temp = Temp::new();
+    let (pdf, form) = inputs(&temp);
+    let schema = legacy_schema();
+    let key_file = temp.file("key", b"synthetic_secret_canary\n");
+    // No endpoint is configured, so nothing could be sent; with the key file
+    // set, a remote run that got past the preflight would stop later with
+    // jev_endpoint_required (exit 2) after reading the inputs and the key.
+    let env = [("VOLTFILL_JEV_API_KEY_FILE", key_file.as_str())];
+    let existing = temp.0.join("existing-dir");
+    std::fs::create_dir(&existing).expect("create the existing directory");
+    let mut targets = vec![
+        (path(&existing), "output_is_directory"),
+        (
+            path(&temp.0.join("missing").join("result.json")),
+            "output_directory_not_found",
+        ),
+        (String::new(), "invalid_output_path"),
+    ];
+    #[cfg(unix)]
+    let read_only = {
+        use std::os::unix::fs::PermissionsExt;
+        let read_only = temp.0.join("read-only");
+        std::fs::create_dir(&read_only).expect("create the read-only directory");
+        std::fs::set_permissions(&read_only, std::fs::Permissions::from_mode(0o555))
+            .expect("make the directory read-only");
+        // A privileged user can still write there; skip that case then.
+        let probe = read_only.join("probe");
+        if std::fs::write(&probe, b"").is_ok() {
+            std::fs::remove_file(&probe).ok();
+        } else {
+            targets.push((path(&read_only.join("result.json")), "output_not_writable"));
+        }
+        read_only
+    };
+    // Every command that writes a result shares the same preflight.
+    let commands: [Vec<&str>; 4] = [
+        vec!["fill", &pdf, &form, "--remote"],
+        vec!["fill", &pdf, &form],
+        vec!["inspect", &pdf],
+        vec!["run", &pdf, &schema, "--remote"],
+    ];
+    for command in &commands {
+        for (target, reason) in &targets {
+            let mut args = command.clone();
+            args.extend(["-o", target.as_str()]);
+            let out = cli(&args, &temp, &env);
+            assert_eq!(out.status.code(), Some(5), "{args:?}");
+            assert!(out.stdout.is_empty(), "{args:?}");
+            assert_eq!(error(&out), *reason, "{args:?}");
+            assert!(!String::from_utf8_lossy(&out.stderr).contains("synthetic_secret_canary"));
+        }
+    }
+    assert!(temporaries(&temp.0).is_empty());
+    assert!(temporaries(&existing).is_empty());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert!(temporaries(&read_only).is_empty());
+        std::fs::set_permissions(&read_only, std::fs::Permissions::from_mode(0o755)).ok();
+    }
+}
+
+#[test]
+fn a_run_that_stops_before_sending_leaves_no_temporary_output() {
+    let temp = Temp::new();
+    let (pdf, form) = inputs(&temp);
+    let bad_form = temp.file("bad-form.json", br#"{"fields":[]}"#);
+    let key_file = temp.file("key", b"synthetic_secret_canary\n");
+    let key_env = [("VOLTFILL_JEV_API_KEY_FILE", key_file.as_str())];
+    let result = temp.0.join("result.json");
+    type Env<'a> = &'a [(&'a str, &'a str)];
+    let cases: [(Vec<&str>, Env, &str); 3] = [
+        (vec!["fill", &pdf, &bad_form], &[], "invalid_form"),
+        (
+            vec!["fill", &pdf, &form, "--remote"],
+            &[],
+            "api_key_required",
+        ),
+        (
+            vec!["fill", &pdf, &form, "--remote"],
+            &key_env,
+            "jev_endpoint_required",
+        ),
+    ];
+    for (mut args, env, reason) in cases {
+        // A relative target is created next to the working directory.
+        args.extend(["-o", "result.json"]);
+        let out = cli(&args, &temp, env);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert_eq!(error(&out), reason, "{args:?}");
+        assert!(temporaries(&temp.0).is_empty(), "{args:?}");
+        assert!(!result.exists(), "{args:?}");
+    }
+    let out = cli(&["fill", &pdf, &form, "-o", "result.json"], &temp, &[]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stdout.is_empty() && out.stderr.is_empty());
+    let written: Value =
+        serde_json::from_slice(&std::fs::read(&result).expect("the result is written"))
+            .expect("the result is JSON");
+    assert_eq!(written["fields"]["no"]["raw"], "INV-7");
+    assert!(temporaries(&temp.0).is_empty());
+}
+
+#[test]
+fn the_api_key_file_is_never_an_output_target() {
+    let temp = Temp::new();
+    let (pdf, form) = inputs(&temp);
+    let schema = legacy_schema();
+    let key_file = temp.file("key", b"synthetic_secret_canary\n");
+    let env = [("VOLTFILL_JEV_API_KEY_FILE", key_file.as_str())];
+    // Neither offline fill, inspect nor a dry run reads the key, but none of
+    // them may replace it either.
+    let commands: [Vec<&str>; 3] = [
+        vec!["fill", &pdf, &form],
+        vec!["inspect", &pdf],
+        vec!["run", &pdf, &schema, "--remote", "--dry-run"],
+    ];
+    for command in &commands {
+        let mut refused = command.clone();
+        refused.extend(["-o", key_file.as_str()]);
+        let out = cli(&refused, &temp, &env);
+        assert_eq!(out.status.code(), Some(5), "{refused:?}");
+        assert!(out.stdout.is_empty(), "{refused:?}");
+        assert_eq!(error(&out), "input_overwrite_refused", "{refused:?}");
+        assert!(!String::from_utf8_lossy(&out.stderr).contains("synthetic_secret_canary"));
+        // The same command succeeds with another target.
+        let mut allowed = command.clone();
+        allowed.extend(["-o", "other.json"]);
+        let out = cli(&allowed, &temp, &env);
+        assert_eq!(out.status.code(), Some(0), "{allowed:?} {:?}", out.stderr);
+    }
+    assert_eq!(
+        std::fs::read(&key_file).expect("read the key file again"),
+        b"synthetic_secret_canary\n"
+    );
+    assert!(temporaries(&temp.0).is_empty());
+}
+
+#[test]
+fn a_result_that_cannot_replace_the_target_is_kept_and_its_path_reported() {
+    let temp = Temp::new();
+    let (pdf, form) = inputs(&temp);
+    // The directory is writable, so the preflight passes, but no file system
+    // accepts a 300-byte name: the final rename fails after the write.
+    let target = path(&temp.0.join("a".repeat(300)));
+    for logged in [false, true] {
+        let mut args = vec!["fill", pdf.as_str(), form.as_str(), "-o", target.as_str()];
+        if logged {
+            args.extend(["--log-level", "error"]);
+        }
+        let out = cli(&args, &temp, &[]);
+        assert_eq!(out.status.code(), Some(5), "{logged}");
+        // With -o, logs go to stdout; otherwise the error is JSON on stderr.
+        let report: Value = if logged {
+            assert!(out.stderr.is_empty());
+            serde_json::from_slice(&out.stdout).expect("the error log is one JSON line")
+        } else {
+            assert!(out.stdout.is_empty());
+            serde_json::from_slice(&out.stderr).expect("CLI errors are JSON")
+        };
+        let reason = if logged {
+            &report["event"]
+        } else {
+            &report["error"]
+        };
+        assert_eq!(reason, "output_rename_failed", "{logged}");
+        let kept = Path::new(report["output_kept"].as_str().expect("the kept path"));
+        assert_eq!(kept.parent(), Some(temp.0.as_path()));
+        let written: Value =
+            serde_json::from_slice(&std::fs::read(kept).expect("the temporary file remains"))
+                .expect("the kept result is complete JSON");
+        assert_eq!(written["fields"]["no"]["raw"], "INV-7");
+        std::fs::remove_file(kept).expect("remove the kept file");
+    }
+    assert!(temporaries(&temp.0).is_empty());
+}

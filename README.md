@@ -57,10 +57,9 @@ voltfill fill input.pdf examples/forms/invoice.json --remote -o result.json
 - 送るのは項目のラベル・型・別名と、候補ごとのページ・原文のラベルと値だけです。選択肢は候補の順に `c0`・`c1`…と `none` です。ページ画像・前後の行・ほかの項目は送りません。候補の文は選択対象の文書データで指示ではないと、要求に明記します。
 - 選ばれた候補が確率の単独最大で、確率の合計が1のときだけ `filled`（`method: "jev_choice"`）にし、`raw`・`value`・`evidence` はその候補の原文から取ります。`none` が単独最大なら `not_found`、同率・不正な回答（確率の合計が1でないものを含む）・送信失敗では `ambiguous` のままです。送った項目は `candidates` を残します。
 - 結果には `model`・`assist`（項目ごとの質問ID・`outcome`・選ばれたキー）・`usage`・`jev_responses` が加わります。`jev_responses` は再試行・エラー・不完全な本文を含む全試行の受信本文です。
-- `outcome` は、回答を得た場合が `selected`・`none_selected`・`not_unique_maximum` です。失敗には `answer_invalid`・`request_failed`・`budget_exhausted`（上限に達したか予算が停止していて、そのバッチかその再試行を送らなかった）・`usage_exceeded_budget`・`deadline_exceeded`・`request_too_large` があります。`usage_exceeded_budget` は、受信して解析できた回答の使用量が予約か費用上限を超えた場合です。その回答は使わず（本文は残します）、以降のバッチも送りません。
+- `outcome` は、回答を得た場合が `selected`・`none_selected`・`not_unique_maximum` です。失敗には `answer_invalid`・`request_failed`・`budget_exhausted`（上限に達したか予算が停止していて、そのバッチかその再試行を送らなかった）・`usage_exceeded_budget`・`deadline_exceeded`・`request_too_large`・`cancelled` があります。`usage_exceeded_budget` は、受信して解析できた回答の使用量が予約か費用上限を超えた場合です。その回答は使わず（本文は残します）、以降のバッチも送りません。`cancelled` はライブラリの呼び出し側が中止させた場合で、CLIからは発生しません。
 - `--model`・`--max-attempts`・`--execution-config FILE` が使えます。バッチは1件ずつ送ります。送信回数（`max_requests`）・費用・本文量・期限の上限は全バッチと再試行の合計に適用します。試行回数（`--max-attempts`）はバッチごとで、各試行も送信回数に数えます。トークンの上限は1試行ごと（`input_tokens_per_attempt`）と1秒あたり（`input_tokens_per_second`）です。
-- 送った項目がすべて失敗で終わった場合も、全受信本文を含む結果を書き出してから終了コード4（`fill_assist_all_failed`）を返します。
-- `-o` の出力先がシンボリックリンク、または入力・設定・キーファイルと同じ場合は、入力や認証情報を読む前・送信前に終了コード5で拒否します（全コマンド共通）。
+- 送った項目がすべて失敗で終わった場合も、全受信本文を含む結果を書き出してから終了コード4（`fill_assist_all_failed`）を返します。書き出せない出力先は送信前に止めます（[出力先](#output)）。項目が `ambiguous`・`not_found` のまま残っても終了コードは0です（送った項目がすべて `not_unique_maximum` の場合も含みます。`--remote` なしの `fill` と同じく、各項目の `status` で確認します）。
 - 模擬応答でのみ試験しており、実APIでの精度は未測定です。confidence・確率は校正済みの正答確率ではありません。
 
 接続先とキーを設定し（[実APIの利用](#environment)）、PDFと抽出定義を渡します。
@@ -86,6 +85,22 @@ voltfill run input.pdf examples/legacy/text-form.json --remote -o result.json
 結果は `fields`・`evidence`・`usage`・`jev_responses` です。部分失敗でも値を保持するため、`status`・`reason_codes` を確認してください。再試行・エラーの受信本文も残し、未受信・不完全なら `body_complete: false` です。
 
 原文・座標・型・validatorを検証し、既定ではconfidenceで足切りしません。結果は評価専用（`evaluation_only: true`）で、confidenceは校正済みの正答確率ではありません。
+
+<a id="output"></a>
+
+## 出力先（`-o` / `--output`）
+
+`-o` を付けたコマンド（`fill`・`inspect`・`run`／`extract`）は、設定ファイル（`--config`・`--execution-config`・`--resource-config`）を読んだ後、PDF・フォーム・スキーマ・模擬応答・APIキーを読む前で送信前に、出力先を確かめて同じディレクトリに一時ファイル（`.voltfill-<PID>-<番号>.tmp`）を作ります。次の場合は終了コード5で止まり、何も送りません。
+
+| エラー | 出力先 |
+|---|---|
+| `invalid_output_path` | 空、または `/`・`.`・`..` で終わるパス |
+| `symlink_output_refused` | シンボリックリンク |
+| `output_is_directory`・`output_not_regular_file` | 既存のディレクトリ、通常ファイル以外 |
+| `input_overwrite_refused` | 入力・設定ファイル・ネイティブライブラリ・`VOLTFILL_JEV_API_KEY_FILE` と同じファイル（キーファイルはパスだけを比べ、中身は読みません） |
+| `output_directory_not_found`・`output_not_writable` | ディレクトリがない、書き込めない |
+
+結果は一時ファイルに書いてから出力先へ名前を変えて置き換えます。置き換えはリンクをたどらないため、実行中に出力先へ置かれたシンボリックリンクはそれ自体が置き換わり、リンク先は変わりません。結果を書き始める前に止まった場合（送信前のエラーなど）、一時ファイルは削除します。書き込み開始後に失敗した場合（`output_write_failed`・`output_rename_failed`）は一時ファイルを削除せず、エラーの `output_kept` にそのパスを示します。受信本文を含む結果はそこに残ります（`output_write_failed` では内容が途中までの場合があります）。標準出力には切り替えません。
 
 ## 設定
 

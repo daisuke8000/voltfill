@@ -15,7 +15,7 @@ use vf_legacy::jev::transport::{ExecutionConfig, Secret};
 use vf_legacy::model::{JevResponse, Strategy};
 use vf_legacy::{pdf, schema};
 
-const HELP: &str = "VOLTFILL — PDF extraction\n\nvoltfill run --config voltfill.yaml (or voltfill.toml / voltfill.json)\nvoltfill serve --config voltfill.yaml\nvoltfill serve --help\nvoltfill run INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --mock ANSWERS.json\nvoltfill inspect INPUT.pdf\nvoltfill fill INPUT.pdf FORM.json (offline: match form labels to PDF text)\nvoltfill fill INPUT.pdf FORM.json --remote (Jev chooses among ambiguous fields' source candidates)\nvoltfill validate SCHEMA.json\n\n--strategy text|vision|hybrid (default: text)\n--model ID (default: jev-1.14.0); images require a pinned version >= 1.14.0.\n--renderer pdfium|hayro selects an enabled renderer; no automatic fallback.\n--pdfium-lib PATH or VOLTFILL_PDFIUM_LIB_PATH selects PDFium when --renderer is omitted\n--pixels-per-point NUMBER sets render scale (default: 1.5).\n--config FILE (or -c FILE, default VOLTFILL_CONFIG) loads YAML/TOML launch settings or legacy JSON execution limits.\nPrecedence: CLI > selected file > environment > defaults.\n--resource-config FILE (or VOLTFILL_RESOURCE_CONFIG) lowers PDF/render ceilings.\nVOLTFILL_EXECUTION_CONFIG selects execution JSON when no execution section/file is supplied.\nVOLTFILL_MODEL, VOLTFILL_STRATEGY, VOLTFILL_RENDERER, VOLTFILL_PIXELS_PER_POINT\nand VOLTFILL_LOG_LEVEL provide startup defaults.\n--max-concurrency N (default: 2, at least 1); rate limits may reduce concurrency.\n--max-attempts 1|2|3 includes the first attempt (default: 3).\n--log-level off|error|warn|info|debug (default: off) enables JSON Lines logs.\nLogs use stderr with JSON on stdout; with --output FILE (or -o FILE),\nlogs use stdout and results go to the file. Debug logs cover VOLTFILL only.\n--dry-run inspects the input without sending requests.\n--evaluation-profile synthetic enables confidence filtering for local synthetic examples.\nBy default, resolved values are returned without a confidence cutoff.\n\nRemote mode requires VOLTFILL_JEV_ENDPOINT (trusted HTTPS, no URL fallback) and\nVOLTFILL_JEV_API_KEY or VOLTFILL_JEV_API_KEY_FILE (one explicit credential file). Vision/Hybrid select image input;\nno additional image permission flag is required. Reports retain original\nresponse bodies regardless of log level and remain evaluation-only.\nLong-form --pdf, --schema, --allow-remote and --execution-config are also supported.\n\nfill --remote sends only fields left ambiguous, as choices among their own source\ncandidates (label and value text, no images); values still come from the PDF.\nIt accepts --model, --max-attempts and --execution-config FILE (not --config);\nbatches are sent one at a time. If every sent field fails, the full result is\nstill written and the exit code is 4. Without --remote, fill reads no credentials.\n";
+const HELP: &str = "VOLTFILL — PDF extraction\n\nvoltfill run --config voltfill.yaml (or voltfill.toml / voltfill.json)\nvoltfill serve --config voltfill.yaml\nvoltfill serve --help\nvoltfill run INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --mock ANSWERS.json\nvoltfill inspect INPUT.pdf\nvoltfill fill INPUT.pdf FORM.json (offline: match form labels to PDF text)\nvoltfill fill INPUT.pdf FORM.json --remote (Jev chooses among ambiguous fields' source candidates)\nvoltfill validate SCHEMA.json\n\n--strategy text|vision|hybrid (default: text)\n--model ID (default: jev-1.14.0); images require a pinned version >= 1.14.0.\n--renderer pdfium|hayro selects an enabled renderer; no automatic fallback.\n--pdfium-lib PATH or VOLTFILL_PDFIUM_LIB_PATH selects PDFium when --renderer is omitted\n--pixels-per-point NUMBER sets render scale (default: 1.5).\n--config FILE (or -c FILE, default VOLTFILL_CONFIG) loads YAML/TOML launch settings or legacy JSON execution limits.\nPrecedence: CLI > selected file > environment > defaults.\n--resource-config FILE (or VOLTFILL_RESOURCE_CONFIG) lowers PDF/render ceilings.\nVOLTFILL_EXECUTION_CONFIG selects execution JSON when no execution section/file is supplied.\nVOLTFILL_MODEL, VOLTFILL_STRATEGY, VOLTFILL_RENDERER, VOLTFILL_PIXELS_PER_POINT\nand VOLTFILL_LOG_LEVEL provide startup defaults.\n--max-concurrency N (default: 2, at least 1); rate limits may reduce concurrency.\n--max-attempts 1|2|3 includes the first attempt (default: 3).\n--log-level off|error|warn|info|debug (default: off) enables JSON Lines logs.\nLogs use stderr with JSON on stdout; with --output FILE (or -o FILE),\nlogs use stdout and results go to the file. Debug logs cover VOLTFILL only.\n--dry-run inspects the input without sending requests.\n--evaluation-profile synthetic enables confidence filtering for local synthetic examples.\nBy default, resolved values are returned without a confidence cutoff.\n\nRemote mode requires VOLTFILL_JEV_ENDPOINT (trusted HTTPS, no URL fallback) and\nVOLTFILL_JEV_API_KEY or VOLTFILL_JEV_API_KEY_FILE (one explicit credential file). Vision/Hybrid select image input;\nno additional image permission flag is required. Reports retain original\nresponse bodies regardless of log level and remain evaluation-only.\nLong-form --pdf, --schema, --allow-remote and --execution-config are also supported.\n\nfill --remote sends only fields left ambiguous, as choices among their own source\ncandidates (label and value text, no images); values still come from the PDF.\nIt accepts --model, --max-attempts and --execution-config FILE (not --config);\nbatches are sent one at a time. If every sent field fails, the full result is\nstill written and the exit code is 4. Fields left ambiguous or not_found (also\nwhen every sent field ends in not_unique_maximum) exit 0: check each status.\nWithout --remote, fill reads no credentials.\n\n--output FILE is checked and its temporary file created in FILE's directory after\nconfiguration files are read and before inputs, credentials or requests. If the\nresult cannot replace FILE, the temporary file is kept and named in output_kept.\n";
 
 struct Args {
     command: String,
@@ -222,18 +222,23 @@ fn read(path: &str, limit: usize) -> Result<Vec<u8>, (u8, &'static str)> {
     }
     Ok(bytes)
 }
-/// Refuse a symlink output or one that would overwrite an input, a launch,
-/// execution or resource file, a native library or the API key file.
-/// `run_with` checks this before reading any input or credential and before
-/// any request, so a refused target never discards received bodies;
-/// [`output`] checks again in case the target changed during the run.
-fn check_output_target(args: &Args) -> Result<(), (u8, &'static str)> {
-    let Some(path) = args.values.get("--output") else {
-        return Ok(());
-    };
+/// Refuse an output path that cannot name a file, an existing symlink,
+/// directory or other non-regular file, and one that would overwrite an input,
+/// a launch, execution or resource file, a native library or the API key file.
+/// The key file is compared by path for every command; it is never read here.
+fn check_output_target(args: &Args, path: &str) -> Result<(), (u8, &'static str)> {
+    // `Path::file_name` normalizes `dir/` and `dir/.`, which rename cannot
+    // replace, so the last component is taken from the raw argument.
+    let name = path.rsplit(std::path::is_separator).next().unwrap_or("");
+    if matches!(name, "" | "." | "..") {
+        return Err((5, "invalid_output_path"));
+    }
     let target = Path::new(path);
-    if fs::symlink_metadata(target).is_ok_and(|m| m.file_type().is_symlink()) {
-        return Err((5, "symlink_output_refused"));
+    match fs::symlink_metadata(target) {
+        Ok(m) if m.file_type().is_symlink() => return Err((5, "symlink_output_refused")),
+        Ok(m) if m.is_dir() => return Err((5, "output_is_directory")),
+        Ok(m) if !m.is_file() => return Err((5, "output_not_regular_file")),
+        _ => {}
     }
     let canonical = target.canonicalize().ok();
     if [
@@ -252,69 +257,153 @@ fn check_output_target(args: &Args) -> Result<(), (u8, &'static str)> {
     {
         return Err((5, "input_overwrite_refused"));
     }
-    // Only the key file's path is compared; its contents are not read here.
-    if args.flag("--allow-remote")
-        && !args.flag("--dry-run")
-        && std::env::var_os("VOLTFILL_JEV_API_KEY_FILE").is_some_and(|path| {
-            canonical.is_some() && Path::new(&path).canonicalize().ok() == canonical
-        })
-    {
+    // Only the key file's path is compared, for every command; its contents
+    // are not read here.
+    if std::env::var_os("VOLTFILL_JEV_API_KEY_FILE").is_some_and(|path| {
+        canonical.is_some() && Path::new(&path).canonicalize().ok() == canonical
+    }) {
         return Err((5, "input_overwrite_refused"));
     }
     Ok(())
 }
-fn output(args: &Args, value: &impl serde::Serialize) -> Result<(), (u8, &'static str)> {
+/// Where the result is written: stdout, or with `--output` a temporary file
+/// created next to the target before any input, credential or request.
+enum Sink {
+    Stdout,
+    File(PendingOutput),
+}
+impl Sink {
+    /// Check the `--output` target and create its temporary file, so a target
+    /// that cannot be written fails before anything is sent.
+    fn prepare(args: &Args) -> Result<Self, (u8, &'static str)> {
+        let Some(path) = args.values.get("--output") else {
+            return Ok(Self::Stdout);
+        };
+        check_output_target(args, path)?;
+        PendingOutput::create(Path::new(path)).map(Self::File)
+    }
+    /// The temporary file left in place because the result could not be moved
+    /// to the target.
+    fn kept(&self) -> Option<PathBuf> {
+        match self {
+            Self::File(pending) if matches!(pending.stage, Stage::Kept) => {
+                Some(pending.temporary.clone())
+            }
+            _ => None,
+        }
+    }
+}
+/// A temporary file in the target's directory, held open until the result is
+/// written into it and renamed over the target.
+///
+/// The target is checked once, in [`Sink::prepare`]. Rename replaces the
+/// directory entry without following it, so a symlink or hard link planted at
+/// the target during the run is itself replaced and its referent is never
+/// written; a second check before the write would add no safety and could
+/// only discard received bodies.
+struct PendingOutput {
+    target: PathBuf,
+    temporary: PathBuf,
+    stage: Stage,
+}
+enum Stage {
+    /// Nothing written yet; dropping removes the temporary file.
+    Open(File),
+    /// Renamed over the target.
+    Moved,
+    /// Writing started but the result is not at the target; the temporary
+    /// file is never removed, because it may hold received bodies.
+    Kept,
+}
+impl PendingOutput {
+    fn create(target: &Path) -> Result<Self, (u8, &'static str)> {
+        let parent = target
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        for n in 0..100 {
+            let temporary = parent.join(format!(".voltfill-{}-{n}.tmp", std::process::id()));
+            let mut open = OpenOptions::new();
+            open.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                open.mode(0o600);
+            }
+            match open.open(&temporary) {
+                Ok(file) => {
+                    return Ok(Self {
+                        target: target.to_owned(),
+                        temporary,
+                        stage: Stage::Open(file),
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    return Err((5, "output_directory_not_found"));
+                }
+                Err(_) => return Err((5, "output_not_writable")),
+            }
+        }
+        Err((5, "output_not_writable"))
+    }
+    fn commit(&mut self, bytes: &[u8]) -> Result<(), (u8, &'static str)> {
+        let mut file = match std::mem::replace(&mut self.stage, Stage::Kept) {
+            Stage::Open(file) => file,
+            other => {
+                self.stage = other;
+                return Err((5, "output_write_failed"));
+            }
+        };
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|_| (5, "output_write_failed"))?;
+        drop(file);
+        fs::rename(&self.temporary, &self.target).map_err(|_| (5, "output_rename_failed"))?;
+        self.stage = Stage::Moved;
+        Ok(())
+    }
+}
+impl Drop for PendingOutput {
+    fn drop(&mut self) {
+        if matches!(self.stage, Stage::Open(_)) {
+            let _ = fs::remove_file(&self.temporary);
+        }
+    }
+}
+fn output(sink: &mut Sink, value: &impl serde::Serialize) -> Result<(), (u8, &'static str)> {
     let mut bytes =
         serde_json::to_vec_pretty(value).map_err(|_| (5, "output_serialization_failed"))?;
     bytes.push(b'\n');
-    if let Some(path) = args.values.get("--output") {
-        check_output_target(args)?;
-        write_atomic(Path::new(path), &bytes).map_err(|_| (5, "output_write_failed"))?;
-    } else {
-        io::stdout()
+    match sink {
+        Sink::File(pending) => pending.commit(&bytes),
+        Sink::Stdout => io::stdout()
             .lock()
             .write_all(&bytes)
-            .map_err(|_| (5, "output_write_failed"))?;
+            .map_err(|_| (5, "output_write_failed")),
     }
-    Ok(())
 }
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let mut temporary = None;
-    for n in 0..100 {
-        let candidate = parent.join(format!(".voltfill-{}-{n}.tmp", std::process::id()));
-        let mut open = OpenOptions::new();
-        open.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            open.mode(0o600);
-        }
-        match open.open(&candidate) {
-            Ok(file) => {
-                temporary = Some((candidate, file));
-                break;
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
+/// A failed run. `kept_output` names the temporary file that holds the result
+/// when it could not be moved to the `--output` target.
+#[derive(Debug, PartialEq, Eq)]
+struct Failure {
+    code: u8,
+    reason: &'static str,
+    kept_output: Option<PathBuf>,
+}
+impl From<(u8, &'static str)> for Failure {
+    fn from((code, reason): (u8, &'static str)) -> Self {
+        Self {
+            code,
+            reason,
+            kept_output: None,
         }
     }
-    let (temporary, mut file) = temporary.ok_or_else(|| {
-        io::Error::new(io::ErrorKind::AlreadyExists, "temporary output unavailable")
-    })?;
-    let result = (|| {
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temporary, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(temporary);
-    }
-    result
 }
 #[derive(serde::Serialize)]
 struct ExtractionError<'response> {
@@ -322,7 +411,7 @@ struct ExtractionError<'response> {
     jev_responses: &'response [JevResponse],
 }
 fn execute<E: Evaluator>(
-    args: &Args,
+    sink: &mut Sink,
     pdf: &[u8],
     form: &schema::FormDefinition,
     options: &ExtractOptions,
@@ -334,7 +423,7 @@ fn execute<E: Evaluator>(
         Err(error) => {
             if !error.jev_responses().is_empty() {
                 output(
-                    args,
+                    sink,
                     &ExtractionError {
                         error: "extraction_failed",
                         jev_responses: error.jev_responses(),
@@ -353,7 +442,7 @@ fn execute<E: Evaluator>(
     } else {
         3
     };
-    output(args, &report)?;
+    output(sink, &report)?;
     log::info!(target: "vf_cli", "{}", json!({"event":"extraction_completed","fields":form.fields.len(),"exit_code":code}));
     Ok(code)
 }
@@ -476,17 +565,42 @@ fn run_with<E: Evaluator, T: assist::Transport, C: assist::Clock>(
     load_secret: impl FnOnce() -> Result<Secret, (u8, &'static str)>,
     make_remote: impl FnOnce(&ExecutionConfig, Secret, bool) -> Result<E, (u8, &'static str)>,
     make_fill_remote: impl FnOnce() -> Result<(T, C), (u8, &'static str)>,
-) -> Result<u8, (u8, &'static str)> {
+) -> Result<u8, Failure> {
     let args = parse_args(arguments)?;
     let level = log_level(&args)?;
     let execution = execution_config(&args)?;
     initialize_logger(level, args.values.contains_key("--output"))?;
-    check_output_target(&args)?;
+    // Configuration files have been read; inputs, credentials and requests
+    // come only after the output target is checked and its temporary file
+    // exists. Dropping the sink on an early error removes that file.
+    let mut sink = Sink::prepare(&args)?;
+    run_command(
+        &args,
+        &execution,
+        &mut sink,
+        load_secret,
+        make_remote,
+        make_fill_remote,
+    )
+    .map_err(|(code, reason)| Failure {
+        code,
+        reason,
+        kept_output: sink.kept(),
+    })
+}
+fn run_command<E: Evaluator, T: assist::Transport, C: assist::Clock>(
+    args: &Args,
+    execution: &ExecutionConfig,
+    sink: &mut Sink,
+    load_secret: impl FnOnce() -> Result<Secret, (u8, &'static str)>,
+    make_remote: impl FnOnce(&ExecutionConfig, Secret, bool) -> Result<E, (u8, &'static str)>,
+    make_fill_remote: impl FnOnce() -> Result<(T, C), (u8, &'static str)>,
+) -> Result<u8, (u8, &'static str)> {
     if args.command == "validate" {
         let form = schema::parse(&read(args.value("--schema")?, schema::MAX_SCHEMA_BYTES)?)
             .map_err(|_| (2, "invalid_schema"))?;
         output(
-            &args,
+            sink,
             &json!({"valid":true,"schema_version":form.schema_version,"field_count":form.fields.len()}),
         )?;
         return Ok(0);
@@ -523,13 +637,13 @@ fn run_with<E: Evaluator, T: assist::Transport, C: assist::Clock>(
             .map_err(|_| (4, "pdf_inspection_failed"))?;
         let result = vf_core::fill::fill(&snapshot.document_id, &snapshot.fragments, &form);
         let Some((options, secret, (mut transport, mut clock))) = remote else {
-            output(&args, &result)?;
+            output(sink, &result)?;
             return Ok(0);
         };
         log::debug!(target: "vf_cli", "{}", json!({"event":"fill_assist_config","model":options.model,"config":options.execution}));
         let assisted = assist::assist(result, &form, &options, &secret, &mut transport, &mut clock)
             .map_err(|_| (4, "fill_assist_failed"))?;
-        output(&args, &assisted)?;
+        output(sink, &assisted)?;
         // The full result with every received body is written first; a run in
         // which every sent field failed then exits like a failed extraction.
         let all_failed =
@@ -544,7 +658,7 @@ fn run_with<E: Evaluator, T: assist::Transport, C: assist::Clock>(
     if args.command == "inspect" {
         let snapshot =
             pdf::inspect(&bytes, args.resources.pdf).map_err(|_| (4, "pdf_inspection_failed"))?;
-        output(&args, &snapshot)?;
+        output(sink, &snapshot)?;
         return Ok(0);
     }
     let form = schema::parse(&read(args.value("--schema")?, schema::MAX_SCHEMA_BYTES)?)
@@ -583,9 +697,9 @@ fn run_with<E: Evaluator, T: assist::Transport, C: assist::Clock>(
         evaluation_profile,
         ..ExtractOptions::default()
     }
-    .with_execution_config(&execution)
+    .with_execution_config(execution)
     .map_err(|_| (2, "invalid_execution_config"))?;
-    configure_rendering(&mut options, &args)?;
+    configure_rendering(&mut options, args)?;
     let image_input = form
         .fields
         .iter()
@@ -621,7 +735,7 @@ fn run_with<E: Evaluator, T: assist::Transport, C: assist::Clock>(
             .filter(|fragment| planned_pages.contains(&fragment.page))
             .count();
         output(
-            &args,
+            sink,
             &json!({"dry_run":true,"document_id":snapshot.document_id,"pdf_bytes":bytes.len(),"pages":planned_pages,"fragment_count":fragment_count,"field_count":form.fields.len(),"model":model,"strategy":strategy,"remote_sent":false}),
         )?;
         return Ok(0);
@@ -632,17 +746,17 @@ fn run_with<E: Evaluator, T: assist::Transport, C: assist::Clock>(
         }
         let evaluator = FixtureEvaluator::from_bytes(&read(mock, 1024 * 1024)?)
             .map_err(|_| (2, "invalid_mock_fixture"))?;
-        execute(&args, &bytes, &form, &options, evaluator)
+        execute(sink, &bytes, &form, &options, evaluator)
     } else {
         if !args.flag("--allow-remote") {
             return Err((2, "remote_permission_required"));
         }
         let secret = load_secret()?;
-        let evaluator = make_remote(&execution, secret, image_input)?;
-        execute(&args, &bytes, &form, &options, evaluator)
+        let evaluator = make_remote(execution, secret, image_input)?;
+        execute(sink, &bytes, &form, &options, evaluator)
     }
 }
-fn run(arguments: Vec<String>) -> Result<u8, (u8, &'static str)> {
+fn run(arguments: Vec<String>) -> Result<u8, Failure> {
     run_with(
         arguments,
         |level, output_file| {
@@ -705,13 +819,26 @@ pub(crate) fn main() {
     }
     let code = match run(arguments) {
         Ok(code) => code,
-        Err((code, reason)) => {
+        Err(failure) => {
+            // A kept temporary file holds the result and its received bodies.
+            let kept = failure
+                .kept_output
+                .as_deref()
+                .map(|path| path.to_string_lossy().into_owned());
             if log::max_level() != log::LevelFilter::Off {
-                log::error!(target: "vf_cli", "{}", json!({"event":reason}));
+                let mut event = json!({"event":failure.reason});
+                if let Some(kept) = kept {
+                    event["output_kept"] = json!(kept);
+                }
+                log::error!(target: "vf_cli", "{event}");
             } else {
-                eprintln!("{}", json!({"error":reason}));
+                let mut error = json!({"error":failure.reason});
+                if let Some(kept) = kept {
+                    error["output_kept"] = json!(kept);
+                }
+                eprintln!("{error}");
             }
-            code
+            failure.code
         }
     };
     std::process::exit(i32::from(code));
@@ -1119,6 +1246,72 @@ mod tests {
         p.to_str().expect("temp paths are UTF-8").to_owned()
     }
 
+    /// Temporary output files left in `dir`.
+    fn temporaries(dir: &Path) -> Vec<PathBuf> {
+        fs::read_dir(dir)
+            .expect("the temp dir is readable")
+            .map(|entry| entry.expect("the entry is readable").path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(".voltfill-"))
+            })
+            .collect()
+    }
+
+    /// Answers every attempt with 503 like [`Unavailable`], after running
+    /// `before_first` when the first request is sent.
+    struct Meddling<F: FnOnce()>(Arc<AtomicU32>, Option<F>);
+    impl<F: FnOnce()> Transport for Meddling<F> {
+        fn send(&mut self, _: HttpRequest<'_>) -> Result<HttpResponse, TransportError> {
+            if let Some(before_first) = self.1.take() {
+                before_first();
+            }
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(HttpResponse {
+                status: 503,
+                body: b"private_unavailable_canary".to_vec(),
+                body_error: None,
+                retry_after_ms: None,
+            })
+        }
+    }
+
+    /// `fill --remote --max-attempts 2 -o output` with a transport that runs
+    /// `before_first` on the first send.
+    fn fill_remote_with(
+        pdf: &Path,
+        form: &Path,
+        output: &Path,
+        sends: &Arc<AtomicU32>,
+        before_first: impl FnOnce(),
+    ) -> Result<u8, Failure> {
+        run_with::<FixtureEvaluator, _, _>(
+            [
+                "fill".into(),
+                arg(pdf),
+                arg(form),
+                "--remote".into(),
+                "--max-attempts".into(),
+                "2".into(),
+                "-o".into(),
+                arg(output),
+            ],
+            |_, _| Ok(()),
+            || {
+                Ok(Secret::try_new("synthetic_secret_canary".into())
+                    .expect("the synthetic bearer is valid"))
+            },
+            |_, _, _| Err((9, "legacy_evaluator_unexpected")),
+            || {
+                Ok((
+                    Meddling(sends.clone(), Some(before_first)),
+                    FakeClock::default(),
+                ))
+            },
+        )
+    }
+
     #[test]
     fn fill_remote_refuses_the_output_target_before_credentials_or_sends() {
         let (dir, pdf, form) = fill_inputs("fill-remote-preflight");
@@ -1128,6 +1321,8 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(dir.join("elsewhere.json"), &link)
             .expect("the symlink must be creatable");
+        let existing = dir.join("existing-dir");
+        fs::create_dir(&existing).expect("the directory must be creatable");
         let mut cases = vec![
             (form.clone(), Vec::new(), "input_overwrite_refused"),
             (pdf.clone(), Vec::new(), "input_overwrite_refused"),
@@ -1136,10 +1331,53 @@ mod tests {
                 vec!["--execution-config".to_owned(), arg(&config)],
                 "input_overwrite_refused",
             ),
+            (existing.clone(), Vec::new(), "output_is_directory"),
+            (
+                dir.join("missing").join("result.json"),
+                Vec::new(),
+                "output_directory_not_found",
+            ),
+            (
+                form.join("result.json"),
+                Vec::new(),
+                "output_directory_not_found",
+            ),
+            (PathBuf::new(), Vec::new(), "invalid_output_path"),
+            (
+                PathBuf::from(format!("{}/", arg(&dir.join("new")))),
+                Vec::new(),
+                "invalid_output_path",
+            ),
+            (dir.join(".."), Vec::new(), "invalid_output_path"),
         ];
         if cfg!(unix) {
             cases.push((link.clone(), Vec::new(), "symlink_output_refused"));
+            cases.push((
+                PathBuf::from("/dev/null"),
+                Vec::new(),
+                "output_not_regular_file",
+            ));
         }
+        #[cfg(unix)]
+        let read_only = {
+            use std::os::unix::fs::PermissionsExt;
+            let read_only = dir.join("read-only");
+            fs::create_dir(&read_only).expect("the directory must be creatable");
+            fs::set_permissions(&read_only, fs::Permissions::from_mode(0o555))
+                .expect("the directory mode must be settable");
+            // A privileged user can still write there; skip that case then.
+            let probe = read_only.join("probe");
+            if fs::write(&probe, b"").is_ok() {
+                fs::remove_file(&probe).ok();
+            } else {
+                cases.push((
+                    read_only.join("result.json"),
+                    Vec::new(),
+                    "output_not_writable",
+                ));
+            }
+            read_only
+        };
         let originals: Vec<Vec<u8>> = [&form, &pdf, &config]
             .iter()
             .map(|p| fs::read(p).expect("the input is readable"))
@@ -1171,7 +1409,15 @@ mod tests {
                     Ok((Unavailable(sends.clone()), FakeClock::default()))
                 },
             );
-            assert_eq!(result, Err((5, reason)), "{target:?}");
+            assert_eq!(
+                result,
+                Err(Failure {
+                    code: 5,
+                    reason,
+                    kept_output: None
+                }),
+                "{target:?}"
+            );
             assert_eq!(sends.load(Ordering::SeqCst), 0, "{target:?}");
             assert_eq!(secret_loads.get(), 0, "{target:?}");
             assert_eq!(transports.get(), 0, "{target:?}");
@@ -1180,7 +1426,116 @@ mod tests {
             assert_eq!(fs::read(path).expect("the input is readable"), original);
         }
         assert!(!dir.join("elsewhere.json").exists());
+        assert!(fs::read_dir(&existing).expect("readable").next().is_none());
+        assert!(temporaries(&dir).is_empty());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert!(temporaries(&read_only).is_empty());
+            fs::set_permissions(&read_only, fs::Permissions::from_mode(0o755)).ok();
+        }
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_run_that_stops_before_sending_removes_its_temporary_output() {
+        let (dir, pdf, form) = fill_inputs("fill-remote-early-exit");
+        let output = dir.join("result.json");
+        for failing in ["secret", "transport"] {
+            let result = run_with::<FixtureEvaluator, Unavailable, FakeClock>(
+                [
+                    "fill".into(),
+                    arg(&pdf),
+                    arg(&form),
+                    "--remote".into(),
+                    "-o".into(),
+                    arg(&output),
+                ],
+                |_, _| Ok(()),
+                || {
+                    if failing == "secret" {
+                        Err((2, "api_key_required"))
+                    } else {
+                        Ok(Secret::try_new("synthetic_secret_canary".into())
+                            .expect("the synthetic bearer is valid"))
+                    }
+                },
+                |_, _, _| Err((9, "legacy_evaluator_unexpected")),
+                || Err((2, "jev_endpoint_required")),
+            );
+            let reason = if failing == "secret" {
+                "api_key_required"
+            } else {
+                "jev_endpoint_required"
+            };
+            assert_eq!(result, Err((2, reason).into()), "{failing}");
+            assert!(temporaries(&dir).is_empty(), "{failing}");
+            assert!(!output.exists(), "{failing}");
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_failed_rename_keeps_the_temporary_output_with_every_body() {
+        let (dir, pdf, form) = fill_inputs("fill-remote-rename-failed");
+        let output = dir.join("result.json");
+        let sends = Arc::new(AtomicU32::new(0));
+        // The target passes the preflight and becomes a directory mid-run.
+        let result = fill_remote_with(&pdf, &form, &output, &sends, || {
+            fs::create_dir(&output).expect("the target can become a directory");
+        });
+        assert_eq!(sends.load(Ordering::SeqCst), 2);
+        let failure = result.expect_err("the rename over a directory fails");
+        assert_eq!((failure.code, failure.reason), (5, "output_rename_failed"));
+        let kept = failure.kept_output.expect("the temporary file is reported");
+        assert_eq!(kept.parent(), output.parent());
+        assert_eq!(temporaries(&dir), std::slice::from_ref(&kept));
+        let written: Value =
+            serde_json::from_slice(&fs::read(&kept).expect("the temporary file remains"))
+                .expect("the kept result is complete JSON");
+        fs::remove_dir_all(&dir).ok();
+        let responses = written["jev_responses"].as_array().expect("responses");
+        assert_eq!(responses.len(), 2);
+        assert!(
+            responses
+                .iter()
+                .all(|r| r["http_status"] == 503 && r["body"] == "private_unavailable_canary")
+        );
+        assert_eq!(written["assist"]["amount"]["outcome"], "request_failed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_planted_at_the_target_mid_run_is_replaced_not_followed() {
+        let (dir, pdf, form) = fill_inputs("fill-remote-planted-link");
+        let output = dir.join("result.json");
+        let victim = dir.join("victim.txt");
+        fs::write(&victim, b"unchanged").expect("the victim must be writable");
+        let sends = Arc::new(AtomicU32::new(0));
+        let result = fill_remote_with(&pdf, &form, &output, &sends, || {
+            std::os::unix::fs::symlink(&victim, &output).expect("the symlink can be planted");
+        });
+        // Both attempts failed, so the run exits 4 after writing the result.
+        assert_eq!(result, Err((4, "fill_assist_all_failed").into()));
+        assert_eq!(sends.load(Ordering::SeqCst), 2);
+        assert!(
+            fs::symlink_metadata(&output)
+                .expect("the target exists")
+                .is_file()
+        );
+        assert_eq!(fs::read(&victim).expect("readable"), b"unchanged");
+        let written: Value =
+            serde_json::from_slice(&fs::read(&output).expect("the result is written"))
+                .expect("the result is JSON");
+        assert!(temporaries(&dir).is_empty());
+        fs::remove_dir_all(&dir).ok();
+        assert_eq!(
+            written["jev_responses"]
+                .as_array()
+                .expect("responses")
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -1207,8 +1562,9 @@ mod tests {
             |_, _, _| Err((9, "legacy_evaluator_unexpected")),
             || Ok((Unavailable(sends.clone()), FakeClock::default())),
         );
-        assert_eq!(result, Err((4, "fill_assist_all_failed")));
+        assert_eq!(result, Err((4, "fill_assist_all_failed").into()));
         assert_eq!(sends.load(Ordering::SeqCst), 2);
+        assert!(temporaries(&dir).is_empty());
         let written: Value =
             serde_json::from_slice(&fs::read(&output).expect("the result is still written"))
                 .expect("the result is JSON");
