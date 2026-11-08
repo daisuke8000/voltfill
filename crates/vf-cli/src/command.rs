@@ -423,7 +423,7 @@ impl PendingOutput {
     }
     /// Write the result and rename it over the target. On failure the stage
     /// records a verified file holding the result, or the result itself.
-    fn commit(&mut self, bytes: &[u8]) -> Result<(), (u8, &'static str)> {
+    fn commit(&mut self, bytes: Vec<u8>) -> Result<(), (u8, &'static str)> {
         let mut file = match std::mem::replace(&mut self.stage, Stage::Moved) {
             Stage::Open(file) => file,
             other => {
@@ -433,7 +433,7 @@ impl PendingOutput {
         };
         // The file stays open across the rename, so its identity can be
         // checked against the name both before and after a failed rename.
-        let reason = if write_synced(&mut file, bytes).is_err() {
+        let reason = if write_synced(&mut file, &bytes).is_err() {
             "output_write_failed"
         } else if !holds(&self.temporary, &file, bytes.len()) {
             // Renaming a name that no longer holds the result could move
@@ -452,9 +452,18 @@ impl PendingOutput {
     }
     /// Write the whole result to a new file in the target's directory, then
     /// in the working directory; keep the first one verified to hold it.
-    fn rescue(&self, bytes: &[u8]) -> Stage {
+    fn rescue(&self, bytes: Vec<u8>) -> Stage {
         let current = current_directory();
-        let directories = if current == self.directory {
+        // Compare resolved paths so an absolute target in the working
+        // directory is not tried twice.
+        let same = match (
+            fs::canonicalize(&current),
+            fs::canonicalize(&self.directory),
+        ) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => current == self.directory,
+        };
+        let directories = if same {
             vec![current]
         } else {
             vec![self.directory.clone(), current]
@@ -463,11 +472,11 @@ impl PendingOutput {
             let Ok((path, mut file)) = create_temporary(&directory) else {
                 continue;
             };
-            if write_synced(&mut file, bytes).is_ok() && holds(&path, &file, bytes.len()) {
+            if write_synced(&mut file, &bytes).is_ok() && holds(&path, &file, bytes.len()) {
                 return Stage::Kept(path);
             }
         }
-        Stage::Unsaved(bytes.to_vec())
+        Stage::Unsaved(bytes)
     }
 }
 impl Drop for PendingOutput {
@@ -513,12 +522,38 @@ fn output(sink: &mut Sink, value: &impl serde::Serialize) -> Result<(), (u8, &'s
         serde_json::to_vec_pretty(value).map_err(|_| (5, "output_serialization_failed"))?;
     bytes.push(b'\n');
     match sink {
-        Sink::File(pending) => pending.commit(&bytes),
+        Sink::File(pending) => pending.commit(bytes),
         Sink::Stdout => io::stdout()
             .lock()
             .write_all(&bytes)
             .map_err(|_| (5, "output_write_failed")),
     }
+}
+/// Write all of `bytes`, waiting briefly whenever a non-blocking stream is
+/// full, so the last-resort copy of a result is not cut short. Gives up after
+/// about a minute without progress.
+fn write_patiently(stream: &mut impl Write, mut bytes: &[u8]) -> io::Result<()> {
+    let mut idle = std::time::Duration::ZERO;
+    let step = std::time::Duration::from_millis(5);
+    while !bytes.is_empty() {
+        match stream.write(bytes) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(n) => {
+                bytes = &bytes[n..];
+                idle = std::time::Duration::ZERO;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e)
+                if e.kind() == io::ErrorKind::WouldBlock
+                    && idle < std::time::Duration::from_secs(60) =>
+            {
+                std::thread::sleep(step);
+                idle += step;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 /// A failed run. `fallback` says where the result went when it could not be
 /// moved to the `--output` target.
@@ -549,9 +584,10 @@ fn report_failure(failure: &Failure, logging: bool, stderr: &mut impl Write) {
             report["output_kept"] = json!(path.to_string_lossy());
         }
         Some(Fallback::Stderr(bytes)) => {
-            let written = write!(stderr, "{{\"error\":{},\"result\":", json!(failure.reason))
-                .and_then(|()| stderr.write_all(bytes))
-                .and_then(|()| stderr.write_all(b"}\n"))
+            let head = format!("{{\"error\":{},\"result\":", json!(failure.reason));
+            let written = write_patiently(stderr, head.as_bytes())
+                .and_then(|()| write_patiently(stderr, bytes))
+                .and_then(|()| write_patiently(stderr, b"}\n"))
                 .and_then(|()| stderr.flush());
             report["result_on_stderr"] = json!(written.is_ok());
         }
@@ -990,6 +1026,42 @@ pub(crate) fn main() {
         }
     };
     std::process::exit(i32::from(code));
+}
+
+#[cfg(test)]
+mod write_patiently_tests {
+    use super::write_patiently;
+    use std::io::{self, Write};
+
+    /// Accepts a few bytes per call and reports WouldBlock in between.
+    struct Choppy {
+        out: Vec<u8>,
+        calls: usize,
+    }
+    impl Write for Choppy {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.calls += 1;
+            if self.calls.is_multiple_of(2) {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            let n = buf.len().min(3);
+            self.out.extend_from_slice(&buf[..n]);
+            Ok(n)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn would_block_is_retried_until_every_byte_is_written() {
+        let mut stream = Choppy {
+            out: Vec::new(),
+            calls: 0,
+        };
+        write_patiently(&mut stream, b"{\"answers\":[1,2,3]}").unwrap();
+        assert_eq!(stream.out, b"{\"answers\":[1,2,3]}");
+    }
 }
 
 #[cfg(test)]
