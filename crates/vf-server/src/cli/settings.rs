@@ -1,9 +1,9 @@
 //! Environment defaults for application launchers. Core APIs use explicit values.
 use std::collections::BTreeMap;
 use std::path::Path;
-use vf_core::jev::http::Endpoint;
-use vf_core::jev::transport::Secret;
-use vf_core::resources::ResourceLimits;
+use vf_legacy::jev::http::Endpoint;
+use vf_legacy::jev::transport::Secret;
+use vf_legacy::resources::ResourceLimits;
 
 pub const COMMON: &[(&str, &str)] = &[
     ("--log-level", "VOLTFILL_LOG_LEVEL"),
@@ -108,7 +108,7 @@ pub fn resources_from_path(
 ) -> Result<ResourceLimits, &'static str> {
     let limits = if let Some(path) = path {
         let bytes = read_file(path, 64 * 1024)?;
-        let value = vf_core::jev::json::parse(&bytes, vf_core::jev::Limits::default())
+        let value = vf_legacy::jev::json::parse(&bytes, vf_legacy::jev::Limits::default())
             .map_err(|_| "invalid_resource_limits")?;
         serde_json::from_value(value).map_err(|_| "invalid_resource_limits")?
     } else {

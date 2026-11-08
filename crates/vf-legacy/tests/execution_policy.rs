@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
-use vf_core::jev;
-use vf_core::jev::transport::{
+use vf_legacy::jev;
+use vf_legacy::jev::transport::{
     self, AttemptBudget, Clock, ExecutionConfig, Failure, HttpRequest, HttpResponse, NoopObserver,
     Policy, Secret, Transport, TransportError,
 };
@@ -161,7 +161,7 @@ fn invalid_allocations_are_rejected_before_any_attempt_is_reserved() {
             ..base.clone()
         },
         ExecutionConfig {
-            completion_gap_ms: vf_core::jev::transport::MIN_COMPLETION_GAP_MS - 1,
+            completion_gap_ms: vf_legacy::jev::transport::MIN_COMPLETION_GAP_MS - 1,
             ..base.clone()
         },
         ExecutionConfig {
@@ -188,10 +188,10 @@ fn invalid_allocations_are_rejected_before_any_attempt_is_reserved() {
     assert_eq!(budget.set_worker_limit(0), Err(Failure::Config));
     assert_eq!(
         base.completion_gap_ms,
-        vf_core::jev::transport::DEFAULT_COMPLETION_GAP_MS
+        vf_legacy::jev::transport::DEFAULT_COMPLETION_GAP_MS
     );
     let shortest = ExecutionConfig {
-        completion_gap_ms: vf_core::jev::transport::MIN_COMPLETION_GAP_MS,
+        completion_gap_ms: vf_legacy::jev::transport::MIN_COMPLETION_GAP_MS,
         ..base
     };
     assert!(AttemptBudget::default().configure(&shortest).is_ok());

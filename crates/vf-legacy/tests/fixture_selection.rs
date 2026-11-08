@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use vf_core::evaluate::{EvaluationContext, EvaluationError, Evaluator, FixtureEvaluator};
-use vf_core::jev::{self, Answer, Content, Limits, Question, RequestDraft};
+use vf_legacy::evaluate::{EvaluationContext, EvaluationError, Evaluator, FixtureEvaluator};
+use vf_legacy::jev::{self, Answer, Content, Limits, Question, RequestDraft};
 
 #[test]
 fn fixture_selection_requires_one_matching_non_none_choice() {

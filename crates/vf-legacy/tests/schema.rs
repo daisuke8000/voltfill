@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
-use vf_core::model::Strategy;
-use vf_core::schema::{self, SchemaError};
+use vf_legacy::model::Strategy;
+use vf_legacy::schema::{self, SchemaError};
 fn form() -> Value {
     serde_json::from_slice(include_bytes!("../../../examples/text-form.json"))
         .expect("example form must be valid JSON")
@@ -257,8 +257,8 @@ fn multiple_candidates_require_bounded_text_array_and_one_independent_question()
 
 #[test]
 fn shared_context_keeps_exact_state_envelope_byte_and_leaf_depth_limits() {
-    use vf_core::jev::{Content, Limits};
-    use vf_core::schema;
+    use vf_legacy::jev::{Content, Limits};
+    use vf_legacy::schema;
     let mut form = schema::parse(include_bytes!("../../../examples/text-form.json"))
         .expect("example text form must parse");
     let overhead = serde_json::to_vec(&serde_json::json!({"state":{"shared_context":""}}))

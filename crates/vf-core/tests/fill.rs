@@ -1,12 +1,12 @@
 mod support;
 use serde_json::json;
 use vf_core::fill::{self, FillStatus};
-use vf_core::pdf::{self, PdfLimits};
+use vf_source::{PdfLimits, inspect};
 
 #[test]
 fn fills_a_labelled_value_from_a_real_pdf_text_layer() {
     let bytes = support::pdf_with_text("Ref: AB12");
-    let snapshot = pdf::inspect(&bytes, PdfLimits::default()).expect("synthetic PDF must inspect");
+    let snapshot = inspect(&bytes, PdfLimits::default()).expect("synthetic PDF must inspect");
     let form = fill::parse_form(
         json!({"fields":[
             {"id":"reference","label":"Ref"},

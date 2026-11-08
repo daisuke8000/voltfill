@@ -3,13 +3,13 @@ use serde_json::{Value, json};
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::rc::Rc;
-use vf_core::evaluate::{EvaluationContext, Evaluator, RemoteEvaluator};
-use vf_core::jev::multipart::PngImage;
-use vf_core::jev::transport::{
+use vf_legacy::evaluate::{EvaluationContext, Evaluator, RemoteEvaluator};
+use vf_legacy::jev::multipart::PngImage;
+use vf_legacy::jev::transport::{
     self, Attempt, AttemptBudget, AttemptObserver, Clock, Failure, HttpRequest, HttpResponse,
     Secret, Transport, TransportError,
 };
-use vf_core::jev::{self, Answer, Response};
+use vf_legacy::jev::{self, Answer, Response};
 
 #[derive(Clone, Default)]
 struct FakeClock(Rc<Cell<u64>>);
@@ -320,7 +320,7 @@ fn underestimated_usage_stops_future_sends_and_preserves_the_original_body() {
     let records = r.take_responses();
     assert_eq!(records.len(), 1);
     assert!(records[0].body_complete);
-    let Some(vf_core::model::ResponseBody::Text(original)) = &records[0].body else {
+    let Some(vf_legacy::model::ResponseBody::Text(original)) = &records[0].body else {
         panic!("missing original");
     };
     assert_eq!(
@@ -379,7 +379,7 @@ fn actual_remote_mixed_four_question_batch_retries_the_identical_bound_image_onc
     assert_eq!(r.budget.snapshot().reserved, reservation);
     let records = r.take_responses();
     assert_eq!(records.len(), 2);
-    let Some(vf_core::model::ResponseBody::Text(original)) = &records[1].body else {
+    let Some(vf_legacy::model::ResponseBody::Text(original)) = &records[1].body else {
         panic!("complete original response missing");
     };
     assert_eq!(
@@ -415,7 +415,7 @@ fn configured_json_limit_rechecks_prebuilt_text_and_image_requests_before_send()
             true,
             true,
             NeverSend,
-            vf_core::evaluate::MonotonicClock::default(),
+            vf_legacy::evaluate::MonotonicClock::default(),
             AttemptBudget::default(),
             transport::NoopObserver,
         )
@@ -427,7 +427,7 @@ fn configured_json_limit_rechecks_prebuilt_text_and_image_requests_before_send()
         .expect("the reduced JSON limit is valid configuration for preflight rejection");
         assert!(matches!(
             evaluator.evaluate(&request, &images, &context(3, 30_000)),
-            Err(vf_core::evaluate::EvaluationError::Protocol)
+            Err(vf_legacy::evaluate::EvaluationError::Protocol)
         ));
         assert_eq!(evaluator.budget.snapshot().posts, 0);
         assert!(evaluator.take_responses().is_empty());

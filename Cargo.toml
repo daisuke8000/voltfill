@@ -15,6 +15,7 @@ vf-source = { path = "crates/vf-source" }
 vf-render = { path = "crates/vf-render" }
 vf-client = { path = "crates/vf-client" }
 vf-core = { path = "crates/vf-core" }
+vf-legacy = { path = "crates/vf-legacy" }
 vf-server = { path = "crates/vf-server" }
 
 # External crates

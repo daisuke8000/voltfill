@@ -1,12 +1,12 @@
 mod support;
 use serde_json::{Value, json};
-use vf_core::engine::{self, ExtractOptions};
-use vf_core::evaluate::{FixtureEvaluator, RemoteEvaluator};
-use vf_core::jev::transport::{
+use vf_legacy::engine::{self, ExtractOptions};
+use vf_legacy::evaluate::{FixtureEvaluator, RemoteEvaluator};
+use vf_legacy::jev::transport::{
     AttemptBudget, Clock, HttpRequest, HttpResponse, NoopObserver, Secret, Transport,
     TransportError,
 };
-use vf_core::{jev, schema};
+use vf_legacy::{jev, schema};
 
 #[derive(Default)]
 struct Time(u64);

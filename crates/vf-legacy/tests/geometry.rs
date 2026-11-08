@@ -1,5 +1,5 @@
 //! Mathematical fixtures only: these do not establish PDFium device agreement.
-use vf_core::geometry::{
+use vf_legacy::geometry::{
     AffineTransform, GeometryError, ImageTransform, Padding, PageGeometry, Point, Rect, Rotation,
 };
 

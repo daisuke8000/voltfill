@@ -3,9 +3,9 @@
 use serde_json::json;
 use std::hint;
 use std::time::Instant;
-use vf_core::candidates::CandidateIndex;
-use vf_core::geometry::Rect;
-use vf_core::model::{Quality, SourceFragment, Strategy};
+use vf_legacy::candidates::CandidateIndex;
+use vf_legacy::geometry::Rect;
+use vf_legacy::model::{Quality, SourceFragment, Strategy};
 fn main() {
     let mut samples = Vec::new();
     for count in [1_000, 5_000, 10_000] {

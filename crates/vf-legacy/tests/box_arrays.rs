@@ -1,7 +1,7 @@
 //! Local source geometry and synthetic extraction; no API or rendering calls.
-use vf_core::candidates::CandidateIndex;
-use vf_core::geometry::Rect;
-use vf_core::model::{Quality, SourceFragment, Strategy};
+use vf_legacy::candidates::CandidateIndex;
+use vf_legacy::geometry::Rect;
+use vf_legacy::model::{Quality, SourceFragment, Strategy};
 
 fn fragment(id: &str, item_index: usize, text: &str, bbox: Rect) -> SourceFragment {
     SourceFragment {

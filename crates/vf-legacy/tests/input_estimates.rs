@@ -1,6 +1,6 @@
 use serde_json::json;
-use vf_core::jev;
-use vf_core::jev::planning::{self, ContextLimits};
+use vf_legacy::jev;
+use vf_legacy::jev::planning::{self, ContextLimits};
 
 fn request(value: serde_json::Value) -> jev::Request {
     jev::parse_request(
@@ -94,7 +94,7 @@ fn a_measured_byte_ratio_divides_only_the_text_estimate() {
 
 #[test]
 fn the_byte_ratio_is_read_validated_and_left_out_of_the_default_identity() {
-    use vf_core::jev::transport::ExecutionConfig;
+    use vf_legacy::jev::transport::ExecutionConfig;
     let parse = |value: serde_json::Value| serde_json::from_value::<ExecutionConfig>(value);
     let config = parse(json!({"context":{"text_tokens_per_100_bytes":25}}))
         .expect("minimum supported text ratio must deserialize");

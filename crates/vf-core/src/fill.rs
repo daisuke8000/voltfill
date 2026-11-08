@@ -5,8 +5,8 @@
 //! candidates ("a wrong value is worse than an empty one"). Values are exact
 //! source text; `value` is a deterministic normalization of that text.
 //! Results are evaluation-only and carry no calibrated probability.
-use crate::geometry::Rect;
-use crate::model::SourceFragment;
+use vf_source::geometry::Rect;
+use vf_source::SourceFragment;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -154,7 +154,7 @@ pub fn fill(document_id: &str, fragments: &[SourceFragment], form: &Form) -> Fil
     let pairs = layout::analyze(fragments).pairs;
     let has_text = fragments
         .iter()
-        .any(|f| f.quality == crate::model::Quality::Usable && !f.raw_text.trim().is_empty());
+        .any(|f| f.quality == vf_source::Quality::Usable && !f.raw_text.trim().is_empty());
     let texts: BTreeMap<&str, &SourceFragment> =
         fragments.iter().map(|f| (f.id.as_str(), f)).collect();
     // A value that reads as one of the form's own labels is a neighbouring label, not a value.
@@ -424,7 +424,7 @@ fn parse_number(text: &str, field_type: FieldType) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Quality;
+    use vf_source::Quality;
     use serde_json::json;
 
     fn frag(id: &str, text: &str, [l, t, r, b]: [f64; 4]) -> SourceFragment {

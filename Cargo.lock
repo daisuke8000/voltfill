@@ -2453,7 +2453,9 @@ dependencies = [
  "serde_json",
  "toml",
  "vf-core",
+ "vf-legacy",
  "vf-server",
+ "vf-source",
 ]
 
 [[package]]
@@ -2472,6 +2474,18 @@ dependencies = [
 
 [[package]]
 name = "vf-core"
+version = "0.1.0"
+dependencies = [
+ "lopdf 0.46.0",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "unicode-normalization",
+ "vf-source",
+]
+
+[[package]]
+name = "vf-legacy"
 version = "0.1.0"
 dependencies = [
  "log",
@@ -2507,7 +2521,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower",
- "vf-core",
+ "vf-legacy",
 ]
 
 [[package]]

@@ -1,9 +1,9 @@
 use serde_json::json;
-use vf_core::candidates::CandidateIndex;
-use vf_core::geometry::Rect;
-use vf_core::model::{Quality, SourceFragment, SourceSpan};
-use vf_core::schema::{Normalization, OutputType, Validator};
-use vf_core::validate;
+use vf_legacy::candidates::CandidateIndex;
+use vf_legacy::geometry::Rect;
+use vf_legacy::model::{Quality, SourceFragment, SourceSpan};
+use vf_legacy::schema::{Normalization, OutputType, Validator};
+use vf_legacy::validate;
 fn fragment(id: &str, page: u32, text: &str, x: f64) -> SourceFragment {
     SourceFragment {
         id: id.into(),
@@ -168,7 +168,7 @@ fn unset_radical_unification_is_omitted_from_serialization() {
     let field = json!({"id":"a","label":"A","output_type":"string","questions":[
         {"id":"q","type":"noul","instructions":"Present?","input":{"modality":"text"}}],
         "resolver":{"kind":"noul_to_boolean","question_id":"q"}});
-    let parsed: vf_core::schema::FieldDefinition = serde_json::from_value(field.clone())
+    let parsed: vf_legacy::schema::FieldDefinition = serde_json::from_value(field.clone())
         .expect("field fixture must deserialize with radical folding disabled");
     assert!(!parsed.unify_cjk_radicals);
     assert!(
@@ -179,7 +179,7 @@ fn unset_radical_unification_is_omitted_from_serialization() {
     );
     let mut on = field;
     on["unify_cjk_radicals"] = json!(true);
-    let parsed: vf_core::schema::FieldDefinition =
+    let parsed: vf_legacy::schema::FieldDefinition =
         serde_json::from_value(on).expect("explicit radical folding option must deserialize");
     assert!(parsed.unify_cjk_radicals);
     assert_eq!(
@@ -235,18 +235,18 @@ fn evidence_ids_include_field_scope() {
         CandidateIndex::new(&raw).expect("source fixture IDs and usable geometry must be valid");
     let c = &index.candidates()[0];
     let a = index
-        .evidence(c, "field_a", "q", vf_core::model::Strategy::TextFirst)
+        .evidence(c, "field_a", "q", vf_legacy::model::Strategy::TextFirst)
         .expect("canonical candidate must produce field-scoped Evidence");
     let b = index
-        .evidence(c, "field_b", "q", vf_core::model::Strategy::TextFirst)
+        .evidence(c, "field_b", "q", vf_legacy::model::Strategy::TextFirst)
         .expect("canonical candidate must produce field-scoped Evidence");
     assert_ne!(a.id, b.id);
     assert_eq!(a.question_id, b.question_id);
     let a = index
-        .evidence(c, "a_b", "c", vf_core::model::Strategy::TextFirst)
+        .evidence(c, "a_b", "c", vf_legacy::model::Strategy::TextFirst)
         .expect("canonical candidate must produce field-scoped Evidence");
     let b = index
-        .evidence(c, "a", "b_c", vf_core::model::Strategy::TextFirst)
+        .evidence(c, "a", "b_c", vf_legacy::model::Strategy::TextFirst)
         .expect("canonical candidate must produce field-scoped Evidence");
     assert_ne!(a.id, b.id);
 }
@@ -261,7 +261,7 @@ fn forged_candidate_page_bbox_and_source_quality_are_rejected() {
     forged.page = 999;
     assert!(
         index
-            .evidence(&forged, "f", "q", vf_core::model::Strategy::TextFirst)
+            .evidence(&forged, "f", "q", vf_legacy::model::Strategy::TextFirst)
             .is_err()
     );
     let mut forged = canonical.clone();
@@ -269,7 +269,7 @@ fn forged_candidate_page_bbox_and_source_quality_are_rejected() {
         Rect::new(20., 20., 30., 30.).expect("test rectangle must have positive finite extent");
     assert!(
         index
-            .evidence(&forged, "f", "q", vf_core::model::Strategy::TextFirst)
+            .evidence(&forged, "f", "q", vf_legacy::model::Strategy::TextFirst)
             .is_err()
     );
     for id in ["a", "c_missing", "c_c_a"] {
@@ -277,7 +277,7 @@ fn forged_candidate_page_bbox_and_source_quality_are_rejected() {
         forged.id = id.into();
         assert!(
             index
-                .evidence(&forged, "f", "q", vf_core::model::Strategy::TextFirst)
+                .evidence(&forged, "f", "q", vf_legacy::model::Strategy::TextFirst)
                 .is_err()
         );
     }
@@ -285,7 +285,7 @@ fn forged_candidate_page_bbox_and_source_quality_are_rejected() {
     forged.spans[0].end -= 1;
     assert!(
         index
-            .evidence(&forged, "f", "q", vf_core::model::Strategy::TextFirst)
+            .evidence(&forged, "f", "q", vf_legacy::model::Strategy::TextFirst)
             .is_err()
     );
     let mut suspect = raw[0].clone();
@@ -294,7 +294,7 @@ fn forged_candidate_page_bbox_and_source_quality_are_rejected() {
         .expect("suspect source must be excluded without invalidating the index");
     assert!(
         other
-            .evidence(canonical, "f", "q", vf_core::model::Strategy::TextFirst)
+            .evidence(canonical, "f", "q", vf_legacy::model::Strategy::TextFirst)
             .is_err()
     );
 }

@@ -7,11 +7,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use vf_core::engine::{self, EvaluationProfile, ExtractOptions};
-use vf_core::evaluate::{Evaluator, FixtureEvaluator, RemoteEvaluator};
-use vf_core::jev::transport::{ExecutionConfig, Secret};
-use vf_core::model::{JevResponse, Strategy};
-use vf_core::{pdf, schema};
+use vf_legacy::engine::{self, EvaluationProfile, ExtractOptions};
+use vf_legacy::evaluate::{Evaluator, FixtureEvaluator, RemoteEvaluator};
+use vf_legacy::jev::transport::{ExecutionConfig, Secret};
+use vf_legacy::model::{JevResponse, Strategy};
+use vf_legacy::{pdf, schema};
 use vf_server::cli::settings;
 
 const HELP: &str = "VOLTFILL — PDF extraction\n\nvoltfill run --config voltfill.yaml (or voltfill.toml / voltfill.json)\nvoltfill serve --config voltfill.yaml\nvoltfill serve --help\nvoltfill run INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --remote\nvoltfill extract INPUT.pdf SCHEMA.json --mock ANSWERS.json\nvoltfill inspect INPUT.pdf\nvoltfill fill INPUT.pdf FORM.json (offline: match form labels to PDF text)\nvoltfill validate SCHEMA.json\n\n--strategy text|vision|hybrid (default: text)\n--model ID (default: jev-1.14.0); images require a pinned version >= 1.14.0.\n--renderer pdfium|hayro selects an enabled renderer; no automatic fallback.\n--pdfium-lib PATH or VOLTFILL_PDFIUM_LIB_PATH selects PDFium when --renderer is omitted\n--pixels-per-point NUMBER sets render scale (default: 1.5).\n--config FILE (or -c FILE, default VOLTFILL_CONFIG) loads YAML/TOML launch settings or legacy JSON execution limits.\nPrecedence: CLI > selected file > environment > defaults.\n--resource-config FILE (or VOLTFILL_RESOURCE_CONFIG) lowers PDF/render ceilings.\nVOLTFILL_EXECUTION_CONFIG selects execution JSON when no execution section/file is supplied.\nVOLTFILL_MODEL, VOLTFILL_STRATEGY, VOLTFILL_RENDERER, VOLTFILL_PIXELS_PER_POINT\nand VOLTFILL_LOG_LEVEL provide startup defaults.\n--max-concurrency N (default: 2, at least 1); rate limits may reduce concurrency.\n--max-attempts 1|2|3 includes the first attempt (default: 3).\n--log-level off|error|warn|info|debug (default: off) enables JSON Lines logs.\nLogs use stderr with JSON on stdout; with --output FILE (or -o FILE),\nlogs use stdout and results go to the file. Debug logs cover VOLTFILL only.\n--dry-run inspects the input without sending requests.\n--evaluation-profile synthetic enables confidence filtering for local synthetic examples.\nBy default, resolved values are returned without a confidence cutoff.\n\nRemote mode requires VOLTFILL_JEV_ENDPOINT (trusted HTTPS, no URL fallback) and\nVOLTFILL_JEV_API_KEY or VOLTFILL_JEV_API_KEY_FILE (one explicit credential file). Vision/Hybrid select image input;\nno additional image permission flag is required. Reports retain original\nresponse bodies regardless of log level and remain evaluation-only.\nLong-form --pdf, --schema, --allow-remote and --execution-config are also supported.\n";
@@ -22,7 +22,7 @@ struct Args {
     flags: BTreeSet<String>,
     library_path: Option<PathBuf>,
     execution: Option<ExecutionConfig>,
-    resources: vf_core::resources::ResourceLimits,
+    resources: vf_legacy::resources::ResourceLimits,
     launch_path: Option<PathBuf>,
 }
 fn input_error() -> (u8, &'static str) {
@@ -298,7 +298,7 @@ fn execute<E: Evaluator>(
     let code = if report
         .fields
         .iter()
-        .all(|f| f.status == vf_core::model::Status::Extracted)
+        .all(|f| f.status == vf_legacy::model::Status::Extracted)
     {
         0
     } else {
@@ -342,9 +342,9 @@ fn configure_rendering(
     #[cfg(any(feature = "pdfium", feature = "hayro"))]
     {
         let mut config = if renderer == "hayro" {
-            vf_core::render::RenderConfig::hayro()
+            vf_legacy::render::RenderConfig::hayro()
         } else {
-            vf_core::render::RenderConfig::new(
+            vf_legacy::render::RenderConfig::new(
                 args.library_path
                     .as_ref()
                     .ok_or((2, "rendering_required"))?,
@@ -413,13 +413,13 @@ fn execution_config(args: &Args) -> Result<ExecutionConfig, (u8, &'static str)> 
         .map_err(|_| (2, "invalid_execution_config"))?;
     Ok(config)
 }
-fn logger(level: log::LevelFilter, output_file: bool) -> vf_core::logging::JsonLogger {
+fn logger(level: log::LevelFilter, output_file: bool) -> vf_legacy::logging::JsonLogger {
     let writer: Box<dyn Write + Send> = if output_file {
         Box::new(io::stdout())
     } else {
         Box::new(io::stderr())
     };
-    vf_core::logging::JsonLogger::new("voltfill-cli", level, writer)
+    vf_legacy::logging::JsonLogger::new("voltfill-cli", level, writer)
 }
 fn run_with<E: Evaluator>(
     arguments: impl IntoIterator<Item = String>,
@@ -445,8 +445,8 @@ fn run_with<E: Evaluator>(
             vf_core::fill::parse_form(&read(args.value("--form")?, vf_core::fill::MAX_FORM_BYTES)?)
                 .map_err(|_| (2, "invalid_form"))?;
         let bytes = read(args.value("--pdf")?, args.resources.pdf.max_bytes)?;
-        let snapshot =
-            pdf::inspect(&bytes, args.resources.pdf).map_err(|_| (4, "pdf_inspection_failed"))?;
+        let snapshot = vf_source::inspect(&bytes, args.resources.pdf)
+            .map_err(|_| (4, "pdf_inspection_failed"))?;
         let result = vf_core::fill::fill(&snapshot.document_id, &snapshot.fragments, &form);
         output(&args, &result)?;
         return Ok(0);
@@ -477,9 +477,9 @@ fn run_with<E: Evaluator>(
         .values
         .get("--model")
         .map(String::as_str)
-        .unwrap_or(vf_core::jev::MODEL);
-    vf_core::jev::validate_model(model).map_err(|_| (2, "invalid_model"))?;
-    if strategy != Strategy::TextFirst && !vf_core::jev::supports_images(model) {
+        .unwrap_or(vf_legacy::jev::MODEL);
+    vf_legacy::jev::validate_model(model).map_err(|_| (2, "invalid_model"))?;
+    if strategy != Strategy::TextFirst && !vf_legacy::jev::supports_images(model) {
         return Err((2, "model_does_not_support_images"));
     }
     let evaluation_profile = match args.values.get("--evaluation-profile").map(String::as_str) {
@@ -627,7 +627,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use vf_core::jev::transport::{
+    use vf_legacy::jev::transport::{
         AttemptBudget, Clock, HttpRequest, HttpResponse, NoopObserver, Transport, TransportError,
     };
 
@@ -696,7 +696,7 @@ mod tests {
                 answers.insert(id.clone(), json!({"type":"choice","choice":selected,"probabilities":probabilities,"confidence":self.1}));
             }
             Ok(HttpResponse { body_error: None, status: 200, body: serde_json::to_vec(&json!({
-                "model":vf_core::jev::MODEL,"answers":answers,"usage":{"input_tokens":10,"output_tokens":1}
+                "model":vf_legacy::jev::MODEL,"answers":answers,"usage":{"input_tokens":10,"output_tokens":1}
             })).expect("the scripted response must serialize as JSON"), retry_after_ms: None })
         }
     }
@@ -727,10 +727,10 @@ mod tests {
             owner: std::thread::current().id(),
         };
         let built =
-            vf_core::logging::JsonLogger::new("voltfill-cli", log::LevelFilter::Debug, writer);
+            vf_legacy::logging::JsonLogger::new("voltfill-cli", log::LevelFilter::Debug, writer);
         log::set_boxed_logger(Box::new(built))
             .expect("this test binary must install the log capture once");
-        let request=vf_core::jev::parse_request(br#"{"model":"jev-1.14.0","state":"private_source_canary","questions":{"q":{"type":"choice","instructions":"pick","criteria":{"a":"ALPHA42","b":"other"}}}}"#,vf_core::jev::Limits::default()).expect("the synthetic choice request satisfies the wire contract");
+        let request=vf_legacy::jev::parse_request(br#"{"model":"jev-1.14.0","state":"private_source_canary","questions":{"q":{"type":"choice","instructions":"pick","criteria":{"a":"ALPHA42","b":"other"}}}}"#,vf_legacy::jev::Limits::default()).expect("the synthetic choice request satisfies the wire contract");
         let mut baseline = None;
         for level in [
             log::LevelFilter::Off,
@@ -759,7 +759,7 @@ mod tests {
                 .evaluate(
                     &request,
                     &[],
-                    &vf_core::evaluate::EvaluationContext {
+                    &vf_legacy::evaluate::EvaluationContext {
                         field_id: "field",
                         page: 1,
                         remaining_requests: 2,
