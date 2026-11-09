@@ -1,318 +1,117 @@
-//! HTTP extraction and form-fill service, admission, and document lifetime management.
+//! HTTP form-fill service: `/v1/fill` and `/health`. Nothing here sends to Jev.
 use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Request, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing;
 use axum::{Json, Router};
-use serde::Deserialize;
 use serde_json::json;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
+use vf_core::assist::Secret;
 use vf_core::fill::{self, MAX_FORM_BYTES};
-use vf_legacy::engine::{self, DocumentCache, EvaluationProfile, ExtractOptions};
-use vf_legacy::evaluate::{FixtureEvaluator, MonotonicClock, RemoteEvaluator};
-use vf_legacy::jev::http::{Endpoint, HttpTransport};
-use vf_legacy::jev::transport::{AttemptBudget, Clock, ExecutionConfig, Secret, TransportError};
-use vf_legacy::model::{ExtractionReport, JevResponse, Strategy};
-use vf_legacy::schema;
+use vf_source::PdfLimits;
 
-enum Backend {
-    Fixture(Vec<u8>),
-    Remote(Endpoint, Arc<Secret>),
-}
 pub struct ServerConfig {
-    backend: Backend,
-    pub execution: ExecutionConfig,
-    pub resources: vf_legacy::resources::ResourceLimits,
+    pub pdf: PdfLimits,
     pub upload_timeout_ms: u64,
-    /// Off by default: reuse keeps the last document's text and page images in
-    /// memory after the request ends, until `reuse_document_ttl_ms` passes.
-    pub reuse_document: bool,
-    pub reuse_document_ttl_ms: u64,
-    pub model: String,
-    pub allow_preview_images: bool,
     pub api_key: Option<Secret>,
-    #[cfg(any(feature = "pdfium", feature = "hayro"))]
-    pub render: Option<vf_legacy::render::RenderConfig>,
-    /// Deadline of one `/v1/fill` job; [`FILL_DEADLINE`] outside this module's tests.
+    /// Deadline of one `/v1/fill` job, counted from the start of its worker. PDF
+    /// inspection is not interrupted, but its time counts, as with the CLI's
+    /// default `voltfill fill --deadline-ms 30000`.
     fill_deadline: Duration,
 }
-/// Deadline of one `/v1/fill` job, counted from the start of its worker. PDF
-/// inspection is bounded by the PDF limits and is not interrupted, but its time
-/// counts, as with the CLI's default `voltfill fill --deadline-ms 30000`.
-const FILL_DEADLINE: Duration = Duration::from_secs(30);
-impl ServerConfig {
-    pub fn fixture(bytes: Vec<u8>) -> Result<Self, &'static str> {
-        FixtureEvaluator::from_bytes(&bytes).map_err(|_| "invalid_mock")?;
-        Ok(Self {
-            backend: Backend::Fixture(bytes),
-            execution: ExecutionConfig::default(),
-            resources: Default::default(),
-            upload_timeout_ms: 30_000,
-            reuse_document: false,
-            reuse_document_ttl_ms: 60_000,
-            model: vf_legacy::jev::MODEL.into(),
-            allow_preview_images: false,
-            api_key: None,
-            #[cfg(any(feature = "pdfium", feature = "hayro"))]
-            render: None,
-            fill_deadline: FILL_DEADLINE,
-        })
-    }
-    #[must_use]
-    pub fn remote(endpoint: Endpoint, secret: Secret) -> Self {
+impl Default for ServerConfig {
+    fn default() -> Self {
         Self {
-            backend: Backend::Remote(endpoint, Arc::new(secret)),
-            execution: ExecutionConfig::default(),
-            resources: Default::default(),
+            pdf: PdfLimits::default(),
             upload_timeout_ms: 30_000,
-            reuse_document: false,
-            reuse_document_ttl_ms: 60_000,
-            model: vf_legacy::jev::MODEL.into(),
-            allow_preview_images: false,
             api_key: None,
-            #[cfg(any(feature = "pdfium", feature = "hayro"))]
-            render: None,
-            fill_deadline: FILL_DEADLINE,
-        }
-    }
-    #[must_use]
-    pub fn requires_authentication(&self) -> bool {
-        self.api_key.is_some()
-    }
-}
-struct DocumentReuse {
-    cache: Arc<Mutex<DocumentCache>>,
-    wake: Condvar,
-}
-/// Upper bound on how long the janitor sleeps, which is also how soon it notices
-/// that the server state is gone and exits.
-const JANITOR_POLL: Duration = Duration::from_secs(1);
-fn locked(cache: &Mutex<DocumentCache>) -> MutexGuard<'_, DocumentCache> {
-    cache.lock().unwrap_or_else(|e| e.into_inner())
-}
-/// Releases the cached document at its deadline on a thread of its own, so release
-/// depends on neither the request that filled the cache nor any async runtime.
-fn run_janitor(reuse: Weak<DocumentReuse>) {
-    while let Some(reuse) = reuse.upgrade() {
-        let mut cache = locked(&reuse.cache);
-        let wait = cache
-            .expire_due(Instant::now())
-            .map_or(JANITOR_POLL, |left| left.min(JANITOR_POLL));
-        drop(
-            reuse
-                .wake
-                .wait_timeout(cache, wait)
-                .unwrap_or_else(|e| e.into_inner()),
-        );
-    }
-}
-/// Clears the cache if the job unwinds, so a failed job cannot leave a document behind.
-struct CacheLease<'cache>(MutexGuard<'cache, DocumentCache>);
-impl Drop for CacheLease<'_> {
-    fn drop(&mut self) {
-        if std::thread::panicking() {
-            self.0.clear();
+            fill_deadline: Duration::from_secs(30),
         }
     }
 }
-struct Admission {
-    next: Instant,
-    paused: bool,
-}
+
 #[derive(Clone)]
 pub struct AppState {
     config: Arc<ServerConfig>,
-    transport: Option<HttpTransport>,
+    /// One job at a time; a second request is answered 429.
     jobs: Arc<Semaphore>,
     discards: Arc<Semaphore>,
-    admission: Arc<Mutex<Admission>>,
-    reuse: Option<Arc<DocumentReuse>>,
 }
 impl AppState {
-    /// Construct outside an async runtime; blocking client shutdown stays outside it too.
-    /// Compatibility name for [`Self::try_new`].
-    pub fn new(config: ServerConfig) -> Result<Self, &'static str> {
-        Self::try_new(config)
-    }
-
-    /// Validate server limits and initialize shared admission and optional cache cleanup.
-    /// Construct outside an async runtime; blocking client shutdown stays outside it too.
-    #[allow(unused_mut)]
-    pub fn try_new(mut config: ServerConfig) -> Result<Self, &'static str> {
-        config
-            .execution
-            .validate()
-            .map_err(|_| "invalid_execution_config")?;
-        config.resources.validate()?;
-        #[cfg(any(feature = "pdfium", feature = "hayro"))]
-        if let Some(render) = &mut config.render {
-            config.resources.apply_render(render);
-        }
+    pub fn try_new(config: ServerConfig) -> Result<Self, &'static str> {
         if !(1..=3_600_000).contains(&config.upload_timeout_ms) {
             return Err("invalid_upload_timeout");
         }
-        if !(1..=3_600_000).contains(&config.reuse_document_ttl_ms) {
-            return Err("invalid_reuse_document_ttl");
-        }
-        vf_legacy::jev::validate_model(&config.model).map_err(|_| "invalid_model")?;
-        let transport = match &config.backend {
-            Backend::Remote(endpoint, _) => Some(
-                HttpTransport::try_new(endpoint.clone()).map_err(|_| "transport_setup_failed")?,
-            ),
-            Backend::Fixture(_) => None,
-        };
-        let reuse = config.reuse_document.then(|| {
-            Arc::new(DocumentReuse {
-                cache: Arc::new(Mutex::new(DocumentCache::with_ttl(Duration::from_millis(
-                    config.reuse_document_ttl_ms,
-                )))),
-                wake: Condvar::new(),
-            })
-        });
-        if let Some(reuse) = &reuse {
-            let weak = Arc::downgrade(reuse);
-            std::thread::Builder::new()
-                .name("voltfill-document-janitor".into())
-                .spawn(move || run_janitor(weak))
-                .map_err(|_| "janitor_start_failed")?;
-        }
         Ok(Self {
             config: Arc::new(config),
-            transport,
             jobs: Arc::new(Semaphore::new(1)),
             discards: Arc::new(Semaphore::new(MAX_DISCARDS)),
-            admission: Arc::new(Mutex::new(Admission {
-                next: Instant::now(),
-                paused: false,
-            })),
-            reuse,
         })
     }
+    fn upload_timeout(&self) -> Duration {
+        Duration::from_millis(self.config.upload_timeout_ms)
+    }
 }
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route(
             "/health",
             routing::get(|| async { Json(json!({"status":"ok"})) }),
         )
-        .route("/v1/extract", routing::post(extract))
         .route("/v1/fill", routing::post(fill_form))
         .layer(DefaultBodyLimit::max(upload_limit(&state)))
         .with_state(state)
 }
 fn upload_limit(state: &AppState) -> usize {
-    state.config.resources.pdf.max_bytes + schema::MAX_SCHEMA_BYTES.max(MAX_FORM_BYTES) + 128 * 1024
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Options {
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default = "text_first")]
-    strategy: Strategy,
-    #[serde(default)]
-    evaluation_profile: Option<EvaluationProfile>,
-}
-fn text_first() -> Strategy {
-    Strategy::TextFirst
-}
-impl Default for Options {
-    fn default() -> Self {
-        Self {
-            model: None,
-            strategy: text_first(),
-            evaluation_profile: None,
-        }
-    }
+    state.config.pdf.max_bytes + MAX_FORM_BYTES + 128 * 1024
 }
 
 fn error(status: StatusCode, code: &'static str) -> Response {
     (status, Json(json!({"error":code,"jev_responses":[]}))).into_response()
 }
-fn busy(seconds: u64) -> Response {
+fn busy() -> Response {
     let mut response = error(StatusCode::TOO_MANY_REQUESTS, "server_busy");
-    if let Ok(value) = seconds.to_string().parse() {
-        response.headers_mut().insert(header::RETRY_AFTER, value);
-    }
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, header::HeaderValue::from_static("2"));
     response
 }
-fn authorized(request: &Request, key: Option<&Secret>) -> bool {
+/// Bearer when configured (compared in constant time), and browsers only with a key.
+fn unauthenticated(request: &Request, key: Option<&Secret>) -> Option<Response> {
     let Some(key) = key else {
-        return true;
+        return request
+            .headers()
+            .contains_key(header::ORIGIN)
+            .then(|| error(StatusCode::FORBIDDEN, "browser_authentication_required"));
     };
-    let Some(actual) = request
+    let actual = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-    else {
-        return false;
-    };
+        .unwrap_or_default()
+        .as_bytes();
     let expected = key.bearer().as_bytes();
-    let actual = actual.as_bytes();
     let mut difference = actual.len() ^ expected.len();
     for (index, byte) in expected.iter().enumerate() {
         difference |= usize::from(*byte ^ actual.get(index).copied().unwrap_or(0));
     }
-    difference == 0
+    (difference != 0).then(|| error(StatusCode::UNAUTHORIZED, "unauthorized"))
 }
-/// Shared by every upload endpoint: Bearer when configured, and browsers only with a key.
-/// Returns the rejection, if any.
-fn unauthenticated(request: &Request, state: &AppState) -> Option<Response> {
-    if !authorized(request, state.config.api_key.as_ref()) {
-        return Some(error(StatusCode::UNAUTHORIZED, "unauthorized"));
-    }
-    if state.config.api_key.is_none() && request.headers().contains_key(header::ORIGIN) {
-        return Some(error(
-            StatusCode::FORBIDDEN,
-            "browser_authentication_required",
-        ));
-    }
-    None
-}
-struct CancelOnDrop(Arc<AtomicBool>);
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Relaxed);
-    }
-}
-#[derive(Clone)]
-struct JobClock {
-    clock: MonotonicClock,
-    cancelled: Arc<AtomicBool>,
-}
-impl Clock for JobClock {
-    fn now_ms(&self) -> u64 {
-        self.clock.now_ms()
-    }
-    fn sleep_ms(&mut self, ms: u64) {
-        let end = self.clock.now_ms().saturating_add(ms);
-        while self.clock.now_ms() < end && !self.cancelled() {
-            self.clock
-                .sleep_ms(end.saturating_sub(self.clock.now_ms()).min(25));
-        }
-    }
-    fn cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Relaxed)
-    }
-}
-
-/// Received parts in the order of the endpoint's part list.
-type Upload<const N: usize> = [Option<Vec<u8>>; N];
 
 // Answering while the client is still uploading and then closing the connection shows
-// up on the client as a reset rather than the response, and a client cannot tell a
-// reset from a request that reached the provider. Reading the rest of the upload first
-// lets the rejection arrive. It is skipped where it cannot help or would only cost:
-// a client waiting for 100-continue has sent nothing and gets the answer cleanly, a
-// declared length over the limit ends in a reset anyway, and rejected uploads already
-// being read must not hold any number of connections.
+// up on the client as a reset rather than the response. Reading the rest of the upload
+// first lets the rejection arrive. It is skipped where it cannot help: a client waiting
+// for 100-continue has sent nothing, a declared length over the limit ends in a reset
+// anyway, and rejected uploads already being read must not hold any number of
+// connections.
 const MAX_DISCARDS: usize = 4;
 
 async fn reject_upload(request: Request, state: &AppState, response: Response) -> Response {
+    use axum::body::HttpBody;
     let limit = upload_limit(state);
     let headers = request.headers();
     let declared = headers
@@ -325,18 +124,7 @@ async fn reject_upload(request: Request, state: &AppState, response: Response) -
     let Ok(_slot) = state.discards.clone().try_acquire_owned() else {
         return response;
     };
-    discard_upload(
-        request.into_body(),
-        limit,
-        Duration::from_millis(state.config.upload_timeout_ms),
-    )
-    .await;
-    response
-}
-
-async fn discard_upload(body: axum::body::Body, limit: usize, deadline: Duration) {
-    use axum::body::HttpBody;
-    let mut body = std::pin::pin!(body);
+    let mut body = std::pin::pin!(request.into_body());
     let read = async {
         let mut seen = 0usize;
         while let Some(Ok(frame)) = std::future::poll_fn(|cx| body.as_mut().poll_frame(cx)).await {
@@ -346,316 +134,69 @@ async fn discard_upload(body: axum::body::Body, limit: usize, deadline: Duration
             }
         }
     };
-    let _ = tokio::time::timeout(deadline, read).await;
+    let _ = tokio::time::timeout(state.upload_timeout(), read).await;
+    response
 }
 
-async fn bounded_upload<T>(
-    upload: impl std::future::Future<Output = Result<T, (StatusCode, &'static str)>>,
-    deadline: Duration,
-) -> Result<T, (StatusCode, &'static str)> {
-    tokio::time::timeout(deadline, upload)
-        .await
-        .unwrap_or(Err((StatusCode::REQUEST_TIMEOUT, "upload_timeout")))
-}
-
-/// Read each named part at most once, within its own byte limit; any other part is rejected.
-async fn read_upload<const N: usize>(
+/// Read `pdf` and `form` at most once each, within their byte limits; any other
+/// part is rejected.
+async fn read_upload(
     request: Request,
     state: &AppState,
-    parts: [(&'static str, usize); N],
-) -> Result<Upload<N>, (StatusCode, &'static str)> {
-    let mut multipart = match Multipart::from_request(request, state).await {
-        Ok(value) => value,
-        Err(_) => return Err((StatusCode::BAD_REQUEST, "invalid_multipart")),
-    };
-    let mut upload: Upload<N> = std::array::from_fn(|_| None);
-    loop {
-        let field = match multipart.next_field().await {
-            Ok(Some(field)) => field,
-            Ok(None) => break,
-            Err(rejection) => return Err((rejection.status(), "invalid_or_oversized_upload")),
-        };
+) -> Result<[Option<Vec<u8>>; 2], (StatusCode, &'static str)> {
+    let parts = [
+        ("pdf", state.config.pdf.max_bytes),
+        ("form", MAX_FORM_BYTES),
+    ];
+    let mut multipart = Multipart::from_request(request, state)
+        .await
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_multipart"))?;
+    let oversized = |status| (status, "invalid_or_oversized_upload");
+    let mut upload = [None, None];
+    while let Some(mut field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| oversized(e.status()))?
+    {
         let name = field.name().unwrap_or("");
-        let (slot, limit) = match parts.iter().position(|(part, _)| *part == name) {
-            Some(index) if upload[index].is_none() => (index, parts[index].1),
+        let slot = match parts.iter().position(|(part, _)| *part == name) {
+            Some(slot) if upload[slot].is_none() => slot,
             _ => return Err((StatusCode::BAD_REQUEST, "unknown_or_duplicate_part")),
         };
-        let mut field = field;
         let mut bytes = Vec::new();
-        loop {
-            match field.chunk().await {
-                Ok(Some(chunk)) => {
-                    if bytes.len().saturating_add(chunk.len()) > limit {
-                        return Err((StatusCode::PAYLOAD_TOO_LARGE, "part_too_large"));
-                    }
-                    bytes.extend_from_slice(&chunk);
-                }
-                Ok(None) => break,
-                Err(rejection) => return Err((rejection.status(), "invalid_or_oversized_upload")),
+        while let Some(chunk) = field.chunk().await.map_err(|e| oversized(e.status()))? {
+            if bytes.len().saturating_add(chunk.len()) > parts[slot].1 {
+                return Err((StatusCode::PAYLOAD_TOO_LARGE, "part_too_large"));
             }
+            bytes.extend_from_slice(&chunk);
         }
         upload[slot] = Some(bytes);
     }
     Ok(upload)
 }
 
-async fn extract(State(state): State<AppState>, request: Request) -> Response {
-    if let Some(response) = unauthenticated(&request, &state) {
-        return response;
-    }
-    let rejection = match state.jobs.clone().try_acquire_owned() {
-        Err(_) => Err(busy(2)),
-        Ok(permit) => {
-            let admission = state.admission.lock().unwrap_or_else(|e| e.into_inner());
-            let remaining = admission.next.saturating_duration_since(Instant::now());
-            if admission.paused {
-                Err(error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "remote_paused_unknown_outcome",
-                ))
-            } else if !remaining.is_zero() {
-                Err(busy(remaining.as_secs().saturating_add(1)))
-            } else {
-                Ok(permit)
-            }
-        }
-    };
-    let permit = match rejection {
-        Ok(permit) => permit,
-        Err(response) => return reject_upload(request, &state, response).await,
-    };
-    let parts = [
-        ("pdf", state.config.resources.pdf.max_bytes),
-        ("schema", schema::MAX_SCHEMA_BYTES),
-        ("options", 64 * 1024),
-    ];
-    let [pdf, definition, options] = match bounded_upload(
-        read_upload(request, &state, parts),
-        Duration::from_millis(state.config.upload_timeout_ms),
-    )
-    .await
-    {
-        Ok(upload) => upload,
-        Err((status, code)) => return error(status, code),
-    };
-    let (Some(pdf), Some(definition)) = (pdf, definition) else {
-        return error(StatusCode::BAD_REQUEST, "missing_pdf_or_schema");
-    };
-    let form = match schema::parse(&definition) {
-        Ok(form) => form,
-        Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_schema"),
-    };
-    drop(definition);
-    let options = match options
-        .map(|b| serde_json::from_slice::<Options>(&b))
-        .transpose()
-    {
-        Ok(value) => value.unwrap_or_default(),
-        Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_options"),
-    };
-    if form.validate_strategy(options.strategy).is_err() {
-        return error(StatusCode::BAD_REQUEST, "strategy_schema_mismatch");
-    }
-    let model = options.model.unwrap_or_else(|| state.config.model.clone());
-    if vf_legacy::jev::validate_model(&model).is_err() {
-        return error(StatusCode::BAD_REQUEST, "invalid_model");
-    }
-    if options.strategy != Strategy::TextFirst && !vf_legacy::jev::supports_images(&model) {
-        return error(StatusCode::BAD_REQUEST, "model_does_not_support_images");
-    }
-    if matches!(state.config.backend, Backend::Remote(_, _))
-        && form
-            .fields
-            .iter()
-            .flat_map(|f| &f.questions)
-            .any(|q| q.input.modality != schema::Modality::Text)
-    {
-        if !state.config.allow_preview_images {
-            return error(StatusCode::FORBIDDEN, "image_sending_disabled");
-        }
-        #[cfg(not(any(feature = "pdfium", feature = "hayro")))]
-        return error(StatusCode::SERVICE_UNAVAILABLE, "pdfium_feature_disabled");
-        #[cfg(any(feature = "pdfium", feature = "hayro"))]
-        {
-            let Some(render) = &state.config.render else {
-                return error(StatusCode::SERVICE_UNAVAILABLE, "rendering_required");
-            };
-            if render.validate().is_err() {
-                return error(StatusCode::SERVICE_UNAVAILABLE, "invalid_render_config");
-            }
-        }
-    }
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let _cancellation = CancelOnDrop(cancelled.clone());
-    log::info!(target:"vf_server","{}",json!({"event":"extraction_started","pdf_bytes":pdf.len(),"fields":form.fields.len()}));
-    let job_state = state.clone();
-    let joined = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        let config = &job_state.config;
-        let cache_handle = job_state.reuse.as_ref().map(|r| r.cache.clone());
-        let mut lease = cache_handle.as_deref().map(|c| CacheLease(locked(c)));
-        let cache = lease.as_mut().map(|l| &mut *l.0);
-        let options = ExtractOptions {
-            model,
-            pdf_limits: config.resources.pdf,
-            strategy: options.strategy,
-            evaluation_profile: options.evaluation_profile,
-            #[cfg(any(feature = "pdfium", feature = "hayro"))]
-            render_config: config.render.clone(),
-            ..Default::default()
-        }
-        .with_execution_config(&config.execution);
-        let result = match options {
-            Err(error) => Err(error),
-            Ok(options) => match &config.backend {
-                Backend::Fixture(bytes) => match FixtureEvaluator::from_bytes(bytes) {
-                    Ok(mut evaluator) => {
-                        engine::extract_reusing(&pdf, &form, &options, &mut evaluator, cache)
-                    }
-                    Err(_) => Err(engine::EngineError::Config),
-                },
-                Backend::Remote(_, secret) => {
-                    let transport = job_state.transport.as_ref().cloned();
-                    match transport
-                        .and_then(|transport| {
-                            RemoteEvaluator::with_components(
-                                secret.clone(),
-                                true,
-                                config.allow_preview_images,
-                                transport,
-                                JobClock {
-                                    clock: MonotonicClock::default(),
-                                    cancelled,
-                                },
-                                AttemptBudget::default(),
-                                vf_legacy::jev::transport::NoopObserver,
-                            )
-                            .ok()
-                        })
-                        .and_then(|e| e.with_execution_config(&config.execution).ok())
-                    {
-                        Some(mut evaluator) => {
-                            engine::extract_reusing(&pdf, &form, &options, &mut evaluator, cache)
-                        }
-                        None => Err(engine::EngineError::Config),
-                    }
-                }
-            },
-        };
-        if matches!(config.backend, Backend::Remote(_, _)) {
-            finish_remote(&job_state, &result);
-        }
-        drop(lease);
-        if let Some(reuse) = &job_state.reuse {
-            reuse.wake.notify_one();
-        }
-        match result {
-            Ok(report) => {
-                log::info!(target:"vf_server","{}",json!({"event":"extraction_completed","fields":report.fields.len(),"attempts":report.usage.attempts}));
-                Json(report).into_response()
-            }
-            Err(error) => extraction_error(error),
-        }
-    })
-    .await;
-    match joined {
-        Ok(response) => response,
-        Err(_) => {
-            state
-                .admission
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .paused = true;
-            error(StatusCode::INTERNAL_SERVER_ERROR, "worker_failed")
-        }
-    }
-}
-fn finish_remote(state: &AppState, result: &Result<ExtractionReport, engine::EngineError>) {
-    let (records, unknown) = match result {
-        Ok(report) => (
-            &report.jev_responses[..],
-            report.usage.unknown_usage_attempts > 0,
-        ),
-        Err(error) => (error.jev_responses(), !error.jev_responses().is_empty()),
-    };
-    let mut admission = state.admission.lock().unwrap_or_else(|e| e.into_inner());
-    admission.paused |= unknown;
-    if records.is_empty() {
-        return;
-    }
-    let wait = records
-        .iter()
-        .filter_map(|r| r.retry_after_ms)
-        .max()
-        .unwrap_or(0)
-        .max(state.config.execution.completion_gap_ms);
-    admission.paused |= records.iter().any(|r| {
-        matches!(
-            r.transport_error,
-            Some(TransportError::OutcomeUnknown | TransportError::ResponseTooLarge)
-        )
-    });
-    match Instant::now().checked_add(Duration::from_millis(wait)) {
-        Some(next) => admission.next = next,
-        None => admission.paused = true,
-    }
-}
-
-#[derive(serde::Serialize)]
-struct ExtractionError<'response> {
-    error: &'static str,
-    jev_responses: &'response [JevResponse],
-}
-fn extraction_error(error: engine::EngineError) -> Response {
-    let status = match &error {
-        engine::EngineError::Schema | engine::EngineError::Config | engine::EngineError::Pdf(_) => {
-            StatusCode::BAD_REQUEST
-        }
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
-    };
-    (
-        status,
-        Json(ExtractionError {
-            error: "extraction_failed",
-            jev_responses: error.jev_responses(),
-        }),
-    )
-        .into_response()
-}
-
-/// `POST /v1/fill`: the HTTP form of `voltfill fill` without `--remote`. It inspects the
-/// PDF's own text layer and matches it to the form offline under the CLI's work limits
-/// and a [`FILL_DEADLINE`], so it never sends a Jev request, renders or uses the
-/// document cache. It shares the single job slot with extraction, but the Jev cooldown
-/// and pause do not apply because nothing here reaches Jev.
+/// `POST /v1/fill`: the HTTP form of `voltfill fill` without `--remote`. It matches
+/// the form to the PDF's own text layer offline under the CLI's work limits and
+/// the fill deadline; over a limit it answers an error, never a partial result.
 async fn fill_form(State(state): State<AppState>, request: Request) -> Response {
-    if let Some(response) = unauthenticated(&request, &state) {
+    if let Some(response) = unauthenticated(&request, state.config.api_key.as_ref()) {
         return response;
     }
-    let permit = match state.jobs.clone().try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) => return reject_upload(request, &state, busy(2)).await,
+    let Ok(permit) = state.jobs.clone().try_acquire_owned() else {
+        return reject_upload(request, &state, busy()).await;
     };
-    let pdf_limits = state.config.resources.pdf;
-    let parts = [("pdf", pdf_limits.max_bytes), ("form", MAX_FORM_BYTES)];
-    let [pdf, definition] = match bounded_upload(
-        read_upload(request, &state, parts),
-        Duration::from_millis(state.config.upload_timeout_ms),
-    )
-    .await
-    {
-        Ok(upload) => upload,
+    let upload = tokio::time::timeout(state.upload_timeout(), read_upload(request, &state))
+        .await
+        .unwrap_or(Err((StatusCode::REQUEST_TIMEOUT, "upload_timeout")));
+    let (pdf, definition) = match upload {
+        Ok([Some(pdf), Some(form)]) => (pdf, form),
+        Ok(_) => return error(StatusCode::BAD_REQUEST, "missing_pdf_or_form"),
         Err((status, code)) => return error(status, code),
     };
-    let (Some(pdf), Some(definition)) = (pdf, definition) else {
-        return error(StatusCode::BAD_REQUEST, "missing_pdf_or_form");
+    let Ok(form) = fill::parse_form(&definition) else {
+        return error(StatusCode::BAD_REQUEST, "invalid_form");
     };
-    let form = match fill::parse_form(&definition) {
-        Ok(form) => form,
-        Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_form"),
-    };
-    drop(definition);
-    let deadline = state.config.fill_deadline;
+    let (pdf_limits, deadline) = (state.config.pdf, state.config.fill_deadline);
     log::info!(target:"vf_server","{}",json!({"event":"fill_started","pdf_bytes":pdf.len(),"fields":form.fields.len()}));
     run_fill_job(permit, move || {
         let started = Instant::now();
@@ -671,13 +212,14 @@ async fn fill_form(State(state): State<AppState>, request: Request) -> Response 
             deadline: Some(started + deadline),
             ..fill::FillLimits::default()
         };
-        match vf_core::acroform::fill_with_acroform(
+        let result = vf_core::acroform::fill_with_acroform(
             &snapshot.document_id,
             &snapshot.fragments,
             &acroform,
             &form,
             &limits,
-        ) {
+        );
+        match result {
             Ok(result) => {
                 let filled = result
                     .fields
@@ -697,8 +239,7 @@ async fn fill_form(State(state): State<AppState>, request: Request) -> Response 
 }
 
 /// Runs a fill job on the blocking pool. The job permit moves into the worker, so the
-/// slot is released when the job returns or unwinds. A failed worker sent nothing to
-/// Jev, so unlike extraction it does not pause admission.
+/// slot is released when the job returns or unwinds.
 async fn run_fill_job(
     permit: tokio::sync::OwnedSemaphorePermit,
     job: impl FnOnce() -> Response + Send + 'static,
@@ -711,8 +252,7 @@ async fn run_fill_job(
     .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "worker_failed"))
 }
 
-/// A fill over its limits returns no partial result. The work limits answer 413 like
-/// the page limit (`input_too_large`); the deadline answers 504.
+/// The work limits answer 413 like the page limit (`input_too_large`); the deadline 504.
 fn fill_error(failure: fill::FillError) -> Response {
     let status = match failure {
         fill::FillError::LayoutLimitExceeded | fill::FillError::BudgetExceeded => {
@@ -724,1249 +264,4 @@ fn fill_error(failure: fill::FillError) -> Response {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::body::{self, Body};
-    use tower::ServiceExt;
-    use vf_legacy::model::{JevResponse, ResponseBody};
-
-    fn state() -> AppState {
-        AppState::try_new(
-            ServerConfig::fixture(
-                include_bytes!("../../../examples/legacy/text-mock.json").to_vec(),
-            )
-            .expect("the checked-in mock must initialize the fixture server config"),
-        )
-        .expect("the default fixture server config must initialize app state")
-    }
-
-    fn record(body: Vec<u8>, retry_after_ms: Option<u64>) -> JevResponse {
-        JevResponse {
-            body_complete: true,
-            field_id: "synthetic".into(),
-            page: 1,
-            question_ids: vec!["question".into()],
-            http_status: Some(429),
-            retry_after_ms,
-            transport_error: None,
-            body: Some(ResponseBody::from(body)),
-        }
-    }
-
-    async fn assert_error(response: Response, status: StatusCode, code: &str) {
-        assert_eq!(response.status(), status);
-        let bytes = body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .expect("the error response body must fit the test read limit");
-        let body: serde_json::Value =
-            serde_json::from_slice(&bytes).expect("the error response must be JSON");
-        assert_eq!(body, json!({"error":code,"jev_responses":[]}));
-    }
-
-    async fn request(state: AppState) -> Response {
-        router(state)
-            .oneshot(
-                Request::post("/v1/extract")
-                    .body(Body::empty())
-                    .expect("construct the local empty extraction request"),
-            )
-            .await
-            .expect("the router must return an HTTP response")
-    }
-
-    #[tokio::test]
-    async fn admission_rejects_busy_cooldown_and_paused_before_parsing_upload() {
-        let state = state();
-        let permit = state
-            .jobs
-            .clone()
-            .try_acquire_owned()
-            .expect("the idle server must have an available job permit");
-        let response = request(state.clone()).await;
-        assert_eq!(response.headers()[header::RETRY_AFTER], "2");
-        assert_error(response, StatusCode::TOO_MANY_REQUESTS, "server_busy").await;
-        drop(permit);
-
-        state
-            .admission
-            .lock()
-            .expect("the admission state must not have been poisoned in this test")
-            .next = Instant::now() + Duration::from_secs(10);
-        let response = request(state.clone()).await;
-        let retry_after: u64 = response.headers()[header::RETRY_AFTER]
-            .to_str()
-            .expect("Retry-After must be a textual header value")
-            .parse()
-            .expect("Retry-After must contain an unsigned seconds count");
-        assert!((1..=11).contains(&retry_after));
-        assert_error(response, StatusCode::TOO_MANY_REQUESTS, "server_busy").await;
-        assert_eq!(state.jobs.available_permits(), 1);
-
-        state
-            .admission
-            .lock()
-            .expect("the admission state must not have been poisoned in this test")
-            .paused = true;
-        assert_error(
-            request(state.clone()).await,
-            StatusCode::SERVICE_UNAVAILABLE,
-            "remote_paused_unknown_outcome",
-        )
-        .await;
-        assert_eq!(state.jobs.available_permits(), 1);
-    }
-
-    async fn write_all(stream: &tokio::net::TcpStream, mut bytes: &[u8]) -> std::io::Result<()> {
-        while !bytes.is_empty() {
-            stream.writable().await?;
-            match stream.try_write(bytes) {
-                Ok(n) => bytes = &bytes[n..],
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(())
-    }
-
-    async fn read_head(stream: &tokio::net::TcpStream) -> String {
-        let mut head = Vec::new();
-        let mut buf = [0u8; 1024];
-        while !head.windows(4).any(|w| w == b"\r\n\r\n") {
-            stream
-                .readable()
-                .await
-                .expect("the local response socket must become readable");
-            match stream.try_read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => head.extend_from_slice(&buf[..n]),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(e) => panic!("{e}"),
-            }
-        }
-        String::from_utf8_lossy(&head).into_owned()
-    }
-
-    async fn busy_server(state: &AppState) -> tokio::net::TcpStream {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind the local test server to an available loopback port");
-        let address = listener
-            .local_addr()
-            .expect("the bound listener must expose its assigned address");
-        tokio::spawn(axum::serve(listener, router(state.clone())).into_future());
-        tokio::net::TcpStream::connect(address)
-            .await
-            .expect("connect to the local test server")
-    }
-
-    fn upload_head(length: usize) -> String {
-        format!(
-            "POST /v1/extract HTTP/1.1\r\nhost: test\r\ncontent-type: multipart/form-data; boundary=b\r\ncontent-length: {length}\r\n\r\n"
-        )
-    }
-
-    fn busy_state(upload_timeout_ms: u64) -> AppState {
-        let mut config = ServerConfig::fixture(
-            include_bytes!("../../../examples/legacy/text-mock.json").to_vec(),
-        )
-        .expect("the checked-in mock must initialize the fixture server config");
-        config.upload_timeout_ms = upload_timeout_ms;
-        AppState::try_new(config).expect("the requested upload deadline must initialize app state")
-    }
-
-    async fn response_head(stream: &tokio::net::TcpStream) -> String {
-        tokio::time::timeout(Duration::from_secs(5), read_head(stream))
-            .await
-            .expect("no response")
-    }
-
-    #[tokio::test]
-    async fn busy_rejection_arrives_after_an_upload_near_the_limit() {
-        let state = busy_state(30_000);
-        let _permit = state
-            .jobs
-            .clone()
-            .try_acquire_owned()
-            .expect("the idle server must have an available job permit");
-        let body = vec![b'x'; upload_limit(&state) - 1024];
-        let stream = busy_server(&state).await;
-        write_all(&stream, upload_head(body.len()).as_bytes())
-            .await
-            .expect("write the near-limit upload headers to the local server");
-        write_all(&stream, &body)
-            .await
-            .expect("write the near-limit upload body to the local server");
-        let response = response_head(&stream).await;
-        assert!(response.starts_with("HTTP/1.1 429"), "{response}");
-        assert!(
-            response.to_ascii_lowercase().contains("retry-after: 2"),
-            "{response}"
-        );
-    }
-
-    #[tokio::test]
-    async fn busy_rejection_of_a_stalled_upload_waits_for_the_upload_deadline() {
-        let state = busy_state(300);
-        let _permit = state
-            .jobs
-            .clone()
-            .try_acquire_owned()
-            .expect("the idle server must have an available job permit");
-        let stream = busy_server(&state).await;
-        write_all(&stream, upload_head(1024).as_bytes())
-            .await
-            .expect("write the stalled upload headers to the local server");
-        write_all(&stream, b"partial")
-            .await
-            .expect("write the partial upload body to the local server");
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), stream.readable())
-                .await
-                .is_err(),
-            "answered before the upload deadline"
-        );
-        let response = response_head(&stream).await;
-        assert!(response.starts_with("HTTP/1.1 429"), "{response}");
-    }
-
-    #[tokio::test]
-    async fn busy_rejection_skips_the_upload_it_cannot_help() {
-        let state = busy_state(30_000);
-        let _permit = state
-            .jobs
-            .clone()
-            .try_acquire_owned()
-            .expect("the idle server must have an available job permit");
-
-        let stream = busy_server(&state).await;
-        let head = upload_head(1024).replace("\r\n\r\n", "\r\nexpect: 100-continue\r\n\r\n");
-        write_all(&stream, head.as_bytes())
-            .await
-            .expect("write the Expect header to the local server");
-        let response = response_head(&stream).await;
-        assert!(response.starts_with("HTTP/1.1 429"), "{response}");
-
-        let stream = busy_server(&state).await;
-        write_all(&stream, upload_head(upload_limit(&state) + 1).as_bytes())
-            .await
-            .expect("write the oversized upload headers to the local server");
-        let response = response_head(&stream).await;
-        assert!(response.starts_with("HTTP/1.1 429"), "{response}");
-
-        let _slots = state
-            .discards
-            .clone()
-            .try_acquire_many_owned(MAX_DISCARDS as u32)
-            .expect("the idle server must have all discard slots available");
-        let stream = busy_server(&state).await;
-        write_all(&stream, upload_head(1024).as_bytes())
-            .await
-            .expect("write the upload headers while discard slots are occupied");
-        let response = response_head(&stream).await;
-        assert!(response.starts_with("HTTP/1.1 429"), "{response}");
-    }
-
-    #[tokio::test]
-    async fn upload_deadline_releases_admission_permit() {
-        let state = state();
-        let permit = state
-            .jobs
-            .clone()
-            .try_acquire_owned()
-            .expect("the idle server must have an available job permit");
-        let upload = async move {
-            let _permit = permit;
-            std::future::pending::<Result<Upload<3>, (StatusCode, &'static str)>>().await
-        };
-        let response = bounded_upload(upload, Duration::from_millis(1))
-            .await
-            .expect_err("the pending upload must exceed its one-millisecond deadline");
-        assert_error(
-            error(response.0, response.1),
-            StatusCode::REQUEST_TIMEOUT,
-            "upload_timeout",
-        )
-        .await;
-        assert_eq!(state.jobs.available_permits(), 1);
-    }
-
-    #[tokio::test]
-    async fn error_envelope_preserves_all_original_response_bodies() {
-        let raw = "  {\"error\":\"synthetic rate limit\"}\n";
-        let responses = vec![
-            record(raw.as_bytes().to_vec(), Some(12_000)),
-            record(vec![0xff, 0], None),
-        ];
-        let expected = serde_json::to_value(&responses)
-            .expect("the text and binary response records must serialize as JSON");
-        let error = engine::EngineError::WithResponses {
-            source: Box::new(engine::EngineError::Provenance),
-            jev_responses: responses,
-        };
-        let state = state();
-        let result = Err(error);
-        finish_remote(&state, &result);
-        {
-            let admission = state
-                .admission
-                .lock()
-                .expect("the admission state must not have been poisoned in this test");
-            assert!(admission.paused);
-            assert!(
-                admission.next.saturating_duration_since(Instant::now()) > Duration::from_secs(11)
-            );
-        }
-        let Err(error) = result else { unreachable!() };
-        let response = extraction_error(error);
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let bytes = body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .expect("the extraction error response must fit the test read limit");
-        let body: serde_json::Value =
-            serde_json::from_slice(&bytes).expect("the extraction error response must be JSON");
-        assert_eq!(body["error"], "extraction_failed");
-        assert_eq!(body["jev_responses"], expected);
-        assert_eq!(body["jev_responses"][0]["body"], raw);
-        assert_eq!(body["jev_responses"][1]["body"], json!([255, 0]));
-    }
-
-    fn text_pdf(text: &str) -> Vec<u8> {
-        pages_pdf(&[text])
-    }
-
-    fn two_page_pdf() -> Vec<u8> {
-        pages_pdf(&["Ref: AB12", "Ref: CD34"])
-    }
-
-    /// One text line per page.
-    fn pages_pdf(texts: &[&str]) -> Vec<u8> {
-        let streams: Vec<String> = texts
-            .iter()
-            .map(|text| format!("BT /F1 24 Tf 72 700 Td ({text}) Tj ET"))
-            .collect();
-        streams_pdf(&streams)
-    }
-
-    /// One page per content stream. Objects: catalog, page tree, font, then a page and
-    /// its content.
-    fn streams_pdf(streams: &[String]) -> Vec<u8> {
-        let kids: Vec<String> = (0..streams.len())
-            .map(|i| format!("{} 0 R", 4 + 2 * i))
-            .collect();
-        let mut objects = vec![
-            "<</Type/Catalog/Pages 2 0 R>>".to_owned(),
-            format!(
-                "<</Type/Pages/Kids[{}]/Count {}>>",
-                kids.join(" "),
-                streams.len()
-            ),
-            "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>".to_owned(),
-        ];
-        for (i, stream) in streams.iter().enumerate() {
-            objects.push(format!(
-                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents {} 0 R/Resources<</Font<</F1 3 0 R>>>>>>",
-                5 + 2 * i
-            ));
-            objects.push(format!(
-                "<</Length {}>>\nstream\n{stream}\nendstream",
-                stream.len()
-            ));
-        }
-        let mut pdf = b"%PDF-1.4\n".to_vec();
-        let mut offsets = Vec::new();
-        for (i, object) in objects.iter().enumerate() {
-            offsets.push(pdf.len());
-            pdf.extend(format!("{} 0 obj\n{object}\nendobj\n", i + 1).bytes());
-        }
-        let xref = pdf.len();
-        pdf.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).bytes());
-        for offset in offsets {
-            pdf.extend(format!("{offset:010} 00000 n \n").bytes());
-        }
-        pdf.extend(
-            format!(
-                "trailer\n<</Size {}/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n",
-                objects.len() + 1
-            )
-            .bytes(),
-        );
-        pdf
-    }
-
-    fn multipart(parts: &[(&str, &[u8])]) -> Vec<u8> {
-        let mut body = Vec::new();
-        for (name, content) in parts {
-            body.extend(
-                format!("--b\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n").bytes(),
-            );
-            body.extend(*content);
-            body.extend(b"\r\n");
-        }
-        body.extend(b"--b--\r\n");
-        body
-    }
-
-    async fn extract_pdf(state: &AppState, pdf: &[u8], options: &str) -> Response {
-        let body = multipart(&[
-            ("pdf", pdf),
-            ("options", options.as_bytes()),
-            (
-                "schema",
-                &include_bytes!("../../../examples/legacy/text-form.json")[..],
-            ),
-        ]);
-        router(state.clone())
-            .oneshot(
-                Request::post("/v1/extract")
-                    .header(header::CONTENT_TYPE, "multipart/form-data; boundary=b")
-                    .body(Body::from(body))
-                    .expect("construct the local multipart extraction request"),
-            )
-            .await
-            .expect("the router must return a response to the multipart request")
-    }
-
-    const FORM: &[u8] = br#"{"fields":[
-        {"id":"reference","label":"Ref"},
-        {"id":"missing","label":"Total","type":"amount"}
-    ]}"#;
-
-    /// Multipart parts as (name, content), in sending order.
-    type Parts<'a> = &'a [(&'a str, &'a [u8])];
-
-    async fn post_fill(
-        state: &AppState,
-        parts: Parts<'_>,
-        headers: &[(header::HeaderName, &str)],
-    ) -> Response {
-        post_raw(state, "/v1/fill", multipart(parts), headers).await
-    }
-
-    async fn post_extract(
-        state: &AppState,
-        parts: Parts<'_>,
-        headers: &[(header::HeaderName, &str)],
-    ) -> Response {
-        post_raw(state, "/v1/extract", multipart(parts), headers).await
-    }
-
-    async fn post_raw(
-        state: &AppState,
-        path: &str,
-        body: Vec<u8>,
-        headers: &[(header::HeaderName, &str)],
-    ) -> Response {
-        let mut request =
-            Request::post(path).header(header::CONTENT_TYPE, "multipart/form-data; boundary=b");
-        for (name, value) in headers {
-            request = request.header(name, *value);
-        }
-        router(state.clone())
-            .oneshot(
-                request
-                    .body(Body::from(body))
-                    .expect("construct the local multipart request"),
-            )
-            .await
-            .expect("the router must return a response to the multipart request")
-    }
-
-    async fn json_body(response: Response) -> serde_json::Value {
-        let bytes = body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .expect("the fill response body must fit the test read limit");
-        serde_json::from_slice(&bytes).expect("the fill response must be JSON")
-    }
-
-    async fn assert_filled(response: Response) {
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = json_body(response).await;
-        assert_eq!(body["evaluation_only"], true);
-        assert_eq!(
-            body["document_id"]
-                .as_str()
-                .expect("the fill result must carry the document id")
-                .len(),
-            64
-        );
-        let reference = &body["fields"]["reference"];
-        assert_eq!(reference["status"], "filled");
-        assert_eq!(reference["raw"], "AB12");
-        assert_eq!(reference["value"], "AB12");
-        assert_eq!(reference["evidence"][0]["text"], "AB12");
-        assert_eq!(reference["evidence"][0]["page"], 1);
-        assert_eq!(body["fields"]["missing"]["status"], "not_found");
-    }
-
-    #[tokio::test]
-    async fn fill_returns_the_labelled_source_value_with_evidence() {
-        let state = state();
-        let pdf = text_pdf("Ref: AB12");
-        assert_filled(post_fill(&state, &[("form", FORM), ("pdf", &pdf)], &[]).await).await;
-        assert_eq!(state.jobs.available_permits(), 1);
-    }
-
-    #[tokio::test]
-    async fn fill_returns_the_same_json_as_the_library_including_holds() {
-        // A label and a value without a delimiter on one line: a held candidate.
-        let pdf = streams_pdf(&["BT /F1 24 Tf 72 700 Td (Ref) Tj 80 0 Td (AB12) Tj ET".to_owned()]);
-        let state = state();
-        let response = post_fill(&state, &[("pdf", &pdf), ("form", FORM)], &[]).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = json_body(response).await;
-        let snapshot = vf_source::inspect(&pdf, state.config.resources.pdf)
-            .expect("inspect the local test PDF");
-        let form = fill::parse_form(FORM).expect("parse the test form");
-        let direct = fill::fill_with_limits(
-            &snapshot.document_id,
-            &snapshot.fragments,
-            &form,
-            &fill::FillLimits::default(),
-        )
-        .expect("the small test document stays within the fill limits");
-        assert_eq!(
-            body,
-            serde_json::from_slice::<serde_json::Value>(
-                &serde_json::to_vec(&direct).expect("serialize the library fill result")
-            )
-            .expect("parse the serialized library fill result")
-        );
-        let reference = &body["fields"]["reference"];
-        assert_eq!(reference["status"], "ambiguous");
-        assert!(
-            reference["candidates"][0]["holds"]
-                .as_array()
-                .is_some_and(|holds| !holds.is_empty()),
-            "{reference}"
-        );
-        assert_eq!(state.jobs.available_permits(), 1);
-    }
-
-    #[tokio::test]
-    async fn fill_rejects_missing_unknown_duplicate_and_invalid_parts() {
-        let state = state();
-        let pdf = text_pdf("Ref: AB12");
-        let oversized = vec![b' '; MAX_FORM_BYTES + 1];
-        let cases: [(Parts, StatusCode, &str); 9] = [
-            (
-                &[("pdf", &pdf)],
-                StatusCode::BAD_REQUEST,
-                "missing_pdf_or_form",
-            ),
-            (
-                &[("form", FORM)],
-                StatusCode::BAD_REQUEST,
-                "missing_pdf_or_form",
-            ),
-            (
-                &[("pdf", &pdf), ("schema", FORM)],
-                StatusCode::BAD_REQUEST,
-                "unknown_or_duplicate_part",
-            ),
-            (
-                &[("pdf", &pdf), ("form", FORM), ("form", FORM)],
-                StatusCode::BAD_REQUEST,
-                "unknown_or_duplicate_part",
-            ),
-            (
-                &[("pdf", &pdf), ("form", b"{")],
-                StatusCode::BAD_REQUEST,
-                "invalid_form",
-            ),
-            (
-                &[("pdf", &pdf), ("form", br#"{"fields":[]}"#)],
-                StatusCode::BAD_REQUEST,
-                "invalid_form",
-            ),
-            (
-                &[
-                    ("pdf", &pdf),
-                    ("form", br#"{"fields":[{"id":"a","label":"x","extra":1}]}"#),
-                ],
-                StatusCode::BAD_REQUEST,
-                "invalid_form",
-            ),
-            (
-                &[("pdf", &pdf), ("form", &oversized)],
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "part_too_large",
-            ),
-            (
-                &[("pdf", b"not a pdf"), ("form", FORM)],
-                StatusCode::BAD_REQUEST,
-                "pdf_inspection_failed",
-            ),
-        ];
-        for (parts, status, code) in cases {
-            assert_error(post_fill(&state, parts, &[]).await, status, code).await;
-            assert_eq!(state.jobs.available_permits(), 1, "{code}");
-        }
-        let response = router(state.clone())
-            .oneshot(
-                Request::post("/v1/fill")
-                    .body(Body::from("{}"))
-                    .expect("construct the local non-multipart fill request"),
-            )
-            .await
-            .expect("the router must return a response to the fill request");
-        assert_error(response, StatusCode::BAD_REQUEST, "invalid_multipart").await;
-    }
-
-    #[tokio::test]
-    async fn fill_applies_the_configured_pdf_limits() {
-        let pdf = text_pdf("Ref: AB12");
-        let mut config = ServerConfig::fixture(
-            include_bytes!("../../../examples/legacy/text-mock.json").to_vec(),
-        )
-        .expect("the checked-in mock must initialize the fixture server config");
-        config.resources.pdf.max_bytes = pdf.len() - 1;
-        let state =
-            AppState::try_new(config).expect("the lowered PDF limit must initialize app state");
-        assert_error(
-            post_fill(&state, &[("pdf", &pdf), ("form", FORM)], &[]).await,
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "part_too_large",
-        )
-        .await;
-
-        let mut config = ServerConfig::fixture(
-            include_bytes!("../../../examples/legacy/text-mock.json").to_vec(),
-        )
-        .expect("the checked-in mock must initialize the fixture server config");
-        config.resources.pdf.max_pages = 1;
-        let state =
-            AppState::try_new(config).expect("the lowered page limit must initialize app state");
-        assert_error(
-            post_fill(&state, &[("pdf", &two_page_pdf()), ("form", FORM)], &[]).await,
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "input_too_large",
-        )
-        .await;
-        assert_eq!(state.jobs.available_permits(), 1);
-    }
-
-    #[tokio::test]
-    async fn fill_requires_the_configured_bearer_key_and_browser_authentication() {
-        let pdf = text_pdf("Ref: AB12");
-        let parts: Parts = &[("pdf", &pdf), ("form", FORM)];
-        assert_error(
-            post_fill(&state(), parts, &[(header::ORIGIN, "https://app.example")]).await,
-            StatusCode::FORBIDDEN,
-            "browser_authentication_required",
-        )
-        .await;
-
-        let mut config = ServerConfig::fixture(
-            include_bytes!("../../../examples/legacy/text-mock.json").to_vec(),
-        )
-        .expect("the checked-in mock must initialize the fixture server config");
-        config.api_key = Some(
-            Secret::new("synthetic-server-key".into())
-                .expect("the synthetic server key must be a valid bearer value"),
-        );
-        let state = AppState::try_new(config).expect("the keyed config must initialize app state");
-        for headers in [
-            &[][..],
-            &[(header::AUTHORIZATION, "Bearer synthetic-server-kex")][..],
-            &[(header::AUTHORIZATION, "synthetic-server-key")][..],
-        ] {
-            assert_error(
-                post_fill(&state, parts, headers).await,
-                StatusCode::UNAUTHORIZED,
-                "unauthorized",
-            )
-            .await;
-        }
-        assert_filled(
-            post_fill(
-                &state,
-                parts,
-                &[
-                    (header::AUTHORIZATION, "Bearer synthetic-server-key"),
-                    (header::ORIGIN, "https://app.example"),
-                ],
-            )
-            .await,
-        )
-        .await;
-    }
-
-    /// One page of `rows` stacked two-cell rows (`label(i)` and `value(i)`) in a tiny
-    /// font, so up to 10,000 text items (`PdfLimits::max_items_per_page`) fit the page.
-    fn stacked_rows_pdf(
-        rows: usize,
-        label: impl Fn(usize) -> String,
-        value: impl Fn(usize) -> String,
-    ) -> Vec<u8> {
-        let mut stream = String::from("BT /F1 0.12 Tf 72 785 Td");
-        for i in 0..rows {
-            stream.push_str(&format!(
-                " ({}) Tj 200 0 Td ({}) Tj -200 -0.156 Td",
-                label(i),
-                value(i)
-            ));
-        }
-        stream.push_str(" ET");
-        streams_pdf(&[stream])
-    }
-
-    /// One page of `lines` one-item lines stacked in one column, alternating `Note`
-    /// and `x`.
-    fn stacked_lines_pdf(lines: usize) -> Vec<u8> {
-        let mut stream = String::from("BT /F1 0.3 Tf 72 785 Td");
-        for i in 0..lines {
-            let text = if i % 2 == 0 { "Note" } else { "x" };
-            stream.push_str(&format!(" ({text}) Tj 0 -0.39 Td"));
-        }
-        stream.push_str(" ET");
-        streams_pdf(&[stream])
-    }
-
-    /// The job slot is free again and serves a normal fill.
-    async fn assert_slot_reusable(state: &AppState) {
-        assert_eq!(state.jobs.available_permits(), 1);
-        let pdf = text_pdf("Ref: AB12");
-        assert_filled(post_fill(state, &[("pdf", &pdf), ("form", FORM)], &[]).await).await;
-    }
-
-    #[tokio::test]
-    async fn fill_bounds_stacked_lines_without_a_quadratic_result() {
-        // Before the layout bounds, n stacked lines gave n(n+1)/2 value spans.
-        let state = state();
-        let pdf = stacked_lines_pdf(2000);
-        let form = br#"{"fields":[{"id":"note","label":"Note"}]}"#;
-        let started = Instant::now();
-        let response = post_fill(&state, &[("pdf", &pdf), ("form", form)], &[]).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let bytes = body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .expect("the bounded fill result must fit the test read limit");
-        assert!(started.elapsed() < Duration::from_secs(30));
-        assert!(bytes.len() < 20_000, "{}", bytes.len());
-        let body: serde_json::Value =
-            serde_json::from_slice(&bytes).expect("the fill response must be JSON");
-        let note = &body["fields"]["note"];
-        assert_eq!(note["status"], "ambiguous");
-        let candidates = note["candidates"]
-            .as_array()
-            .expect("an ambiguous field lists its candidates");
-        assert!(!candidates.is_empty() && candidates.len() <= 5);
-        assert!(candidates.iter().all(|c| {
-            c["evidence"]
-                .as_array()
-                .is_some_and(|e| e.len() <= vf_source::layout::MAX_VALUE_LINES)
-        }));
-        assert_slot_reusable(&state).await;
-    }
-
-    #[tokio::test]
-    async fn fill_reports_the_layout_limit_for_stacked_rows_and_frees_the_slot() {
-        // 5,000 stacked rows on one page (10,000 items) yield more than the default
-        // 50,000 label/value hypotheses: an error, not a partial result.
-        let state = state();
-        let pdf = stacked_rows_pdf(5000, |_| "A".into(), |_| "1".into());
-        let form = br#"{"fields":[{"id":"a","label":"A"}]}"#;
-        let started = Instant::now();
-        assert_error(
-            post_fill(&state, &[("pdf", &pdf), ("form", form)], &[]).await,
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "layout_limit_exceeded",
-        )
-        .await;
-        assert!(
-            started.elapsed() < Duration::from_secs(30),
-            "{:?}",
-            started.elapsed()
-        );
-        assert_slot_reusable(&state).await;
-    }
-
-    #[tokio::test]
-    async fn fill_reports_the_work_budget_for_an_oversized_form_and_frees_the_slot() {
-        // The largest form (512 fields with 16 aliases each) against 4,000 rows:
-        // matching would compare every name with every label.
-        let state = state();
-        let hints: Vec<String> = (0..16).map(|h| format!("Alias{h:02}")).collect();
-        let fields: Vec<serde_json::Value> = (0..fill::MAX_FIELDS)
-            .map(|f| json!({"id": format!("f{f}"), "label": format!("Item{f:03}"), "hints": hints}))
-            .collect();
-        let form = serde_json::to_vec(&json!({ "fields": fields }))
-            .expect("the synthetic form serializes");
-        assert!(form.len() <= MAX_FORM_BYTES);
-        let pdf = stacked_rows_pdf(4000, |i| format!("Label{i:05}"), |i| format!("V{i:05}"));
-        let started = Instant::now();
-        assert_error(
-            post_fill(&state, &[("pdf", &pdf), ("form", &form)], &[]).await,
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "fill_budget_exceeded",
-        )
-        .await;
-        assert!(
-            started.elapsed() < Duration::from_secs(30),
-            "{:?}",
-            started.elapsed()
-        );
-        assert_slot_reusable(&state).await;
-    }
-
-    #[tokio::test]
-    async fn fill_reports_its_deadline_and_frees_the_slot() {
-        // Inspection is not interrupted but counts: 2,000 lines take longer than 1 ms,
-        // so matching never starts.
-        let mut config = ServerConfig::fixture(
-            include_bytes!("../../../examples/legacy/text-mock.json").to_vec(),
-        )
-        .expect("the checked-in mock must initialize the fixture server config");
-        config.fill_deadline = Duration::from_millis(1);
-        let state = AppState::try_new(config).expect("the fixture config must initialize");
-        let pdf = stacked_lines_pdf(2000);
-        let form = br#"{"fields":[{"id":"note","label":"Note"}]}"#;
-        assert_error(
-            post_fill(&state, &[("pdf", &pdf), ("form", form)], &[]).await,
-            StatusCode::GATEWAY_TIMEOUT,
-            "fill_deadline_exceeded",
-        )
-        .await;
-        assert_eq!(state.jobs.available_permits(), 1);
-    }
-
-    #[test]
-    fn fill_limit_errors_map_to_statuses() {
-        for (failure, status) in [
-            (
-                fill::FillError::LayoutLimitExceeded,
-                StatusCode::PAYLOAD_TOO_LARGE,
-            ),
-            (
-                fill::FillError::BudgetExceeded,
-                StatusCode::PAYLOAD_TOO_LARGE,
-            ),
-            (
-                fill::FillError::DeadlineExceeded,
-                StatusCode::GATEWAY_TIMEOUT,
-            ),
-        ] {
-            let response = fill_error(failure);
-            assert_eq!(response.status(), status, "{}", failure.code());
-        }
-    }
-
-    #[tokio::test]
-    async fn a_panicking_fill_worker_answers_worker_failed_and_frees_the_slot() {
-        let state = state();
-        let permit = state
-            .jobs
-            .clone()
-            .try_acquire_owned()
-            .expect("the idle server must have an available job permit");
-        let response = run_fill_job(permit, || -> Response {
-            panic!("synthetic fill worker panic")
-        })
-        .await;
-        assert_error(response, StatusCode::INTERNAL_SERVER_ERROR, "worker_failed").await;
-        assert!(
-            !state
-                .admission
-                .lock()
-                .expect("the admission state must not have been poisoned in this test")
-                .paused
-        );
-        assert_slot_reusable(&state).await;
-    }
-
-    // Holding the cache lock is how the test keeps the extraction inside its worker.
-    #[allow(clippy::await_holding_lock)]
-    #[tokio::test]
-    async fn fill_is_busy_while_an_extraction_runs() {
-        let (state, reuse) = reuse_state(60_000);
-        let held = locked(&reuse.cache);
-        // The job clones the cache handle just before it blocks on the lock held here.
-        let waiting = Arc::strong_count(&reuse.cache) + 1;
-        let extraction = tokio::spawn({
-            let state = state.clone();
-            async move { extract_pdf(&state, &text_pdf("ALPHA42"), "{}").await }
-        });
-        until(|| Arc::strong_count(&reuse.cache) >= waiting).await;
-        let pdf = text_pdf("Ref: AB12");
-        let response = post_fill(&state, &[("pdf", &pdf), ("form", FORM)], &[]).await;
-        assert_eq!(response.headers()[header::RETRY_AFTER], "2");
-        assert_error(response, StatusCode::TOO_MANY_REQUESTS, "server_busy").await;
-        assert_eq!(state.jobs.available_permits(), 0);
-        drop(held);
-        let response = extraction
-            .await
-            .expect("the extraction request task must complete");
-        assert_eq!(response.status(), StatusCode::OK);
-        let report = json_body(response).await;
-        assert_eq!(report["evaluation_only"], true);
-        until(|| state.jobs.available_permits() == 1).await;
-        assert_slot_reusable(&state).await;
-    }
-
-    #[tokio::test]
-    async fn extraction_is_busy_while_a_fill_runs() {
-        let state = busy_state(30_000);
-        let pdf = text_pdf("Ref: AB12");
-        let body = multipart(&[("pdf", &pdf), ("form", FORM)]);
-        let (first, rest) = body.split_at(body.len() / 2);
-        let stream = busy_server(&state).await;
-        let head = upload_head(body.len()).replace("/v1/extract", "/v1/fill");
-        write_all(&stream, head.as_bytes())
-            .await
-            .expect("write the fill upload headers to the local server");
-        write_all(&stream, first)
-            .await
-            .expect("write the first half of the fill upload to the local server");
-        // The fill holds the slot from admission until its worker ends.
-        until(|| state.jobs.available_permits() == 0).await;
-        let response = extract_pdf(&state, &text_pdf("ALPHA42"), "{}").await;
-        assert_eq!(response.headers()[header::RETRY_AFTER], "2");
-        assert_error(response, StatusCode::TOO_MANY_REQUESTS, "server_busy").await;
-        write_all(&stream, rest)
-            .await
-            .expect("write the rest of the fill upload to the local server");
-        let response = response_head(&stream).await;
-        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
-        until(|| state.jobs.available_permits() == 1).await;
-        let response = extract_pdf(&state, &text_pdf("ALPHA42"), "{}").await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(state.jobs.available_permits(), 1);
-    }
-
-    const SCHEMA: &[u8] = include_bytes!("../../../examples/legacy/text-form.json");
-
-    #[tokio::test]
-    async fn extract_requires_the_configured_bearer_key_and_browser_authentication() {
-        let pdf = text_pdf("ALPHA42");
-        let parts: Parts = &[("pdf", &pdf), ("schema", SCHEMA)];
-        let state = state();
-        assert_error(
-            post_extract(&state, parts, &[(header::ORIGIN, "https://app.example")]).await,
-            StatusCode::FORBIDDEN,
-            "browser_authentication_required",
-        )
-        .await;
-        assert_eq!(state.jobs.available_permits(), 1);
-
-        let mut config = ServerConfig::fixture(
-            include_bytes!("../../../examples/legacy/text-mock.json").to_vec(),
-        )
-        .expect("the checked-in mock must initialize the fixture server config");
-        config.api_key = Some(
-            Secret::new("synthetic-server-key".into())
-                .expect("the synthetic server key must be a valid bearer value"),
-        );
-        let state = AppState::try_new(config).expect("the keyed config must initialize app state");
-        for headers in [
-            &[][..],
-            &[(header::AUTHORIZATION, "Bearer synthetic-server-kex")][..],
-            &[(
-                header::AUTHORIZATION,
-                "Bearer synthetic-server-key-and-more",
-            )][..],
-            &[(header::AUTHORIZATION, "synthetic-server-key")][..],
-        ] {
-            assert_error(
-                post_extract(&state, parts, headers).await,
-                StatusCode::UNAUTHORIZED,
-                "unauthorized",
-            )
-            .await;
-            assert_eq!(state.jobs.available_permits(), 1);
-        }
-        let response = post_extract(
-            &state,
-            parts,
-            &[
-                (header::AUTHORIZATION, "Bearer synthetic-server-key"),
-                (header::ORIGIN, "https://app.example"),
-            ],
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(json_body(response).await["evaluation_only"], true);
-    }
-
-    #[tokio::test]
-    async fn extract_rejects_missing_unknown_duplicate_and_oversized_parts() {
-        let state = state();
-        let pdf = text_pdf("ALPHA42");
-        let schema = vec![b' '; schema::MAX_SCHEMA_BYTES + 1];
-        let options = vec![b' '; 64 * 1024 + 1];
-        let cases: [(Parts, StatusCode, &str); 8] = [
-            (
-                &[("pdf", &pdf)],
-                StatusCode::BAD_REQUEST,
-                "missing_pdf_or_schema",
-            ),
-            (
-                &[("schema", SCHEMA), ("options", b"{}")],
-                StatusCode::BAD_REQUEST,
-                "missing_pdf_or_schema",
-            ),
-            (
-                &[("pdf", &pdf), ("form", FORM)],
-                StatusCode::BAD_REQUEST,
-                "unknown_or_duplicate_part",
-            ),
-            (
-                &[("pdf", &pdf), ("pdf", &pdf), ("schema", SCHEMA)],
-                StatusCode::BAD_REQUEST,
-                "unknown_or_duplicate_part",
-            ),
-            (
-                &[
-                    ("pdf", &pdf),
-                    ("schema", SCHEMA),
-                    ("options", b"{}"),
-                    ("options", b"{}"),
-                ],
-                StatusCode::BAD_REQUEST,
-                "unknown_or_duplicate_part",
-            ),
-            (
-                &[("pdf", &pdf), ("schema", &schema)],
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "part_too_large",
-            ),
-            (
-                &[("pdf", &pdf), ("schema", SCHEMA), ("options", &options)],
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "part_too_large",
-            ),
-            (
-                &[("pdf", &pdf), ("schema", b"{")],
-                StatusCode::BAD_REQUEST,
-                "invalid_schema",
-            ),
-        ];
-        for (parts, status, code) in cases {
-            assert_error(post_extract(&state, parts, &[]).await, status, code).await;
-            assert_eq!(state.jobs.available_permits(), 1, "{code}");
-        }
-        let mut config = ServerConfig::fixture(
-            include_bytes!("../../../examples/legacy/text-mock.json").to_vec(),
-        )
-        .expect("the checked-in mock must initialize the fixture server config");
-        config.resources.pdf.max_bytes = pdf.len() - 1;
-        let small = AppState::try_new(config).expect("the lowered PDF limit must initialize");
-        assert_error(
-            post_extract(&small, &[("pdf", &pdf), ("schema", SCHEMA)], &[]).await,
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "part_too_large",
-        )
-        .await;
-        assert_eq!(small.jobs.available_permits(), 1);
-    }
-
-    #[tokio::test]
-    async fn upload_endpoints_reject_malformed_and_oversized_multipart() {
-        let mut config = ServerConfig::fixture(
-            include_bytes!("../../../examples/legacy/text-mock.json").to_vec(),
-        )
-        .expect("the checked-in mock must initialize the fixture server config");
-        config.resources.pdf.max_bytes = 1024;
-        let state = AppState::try_new(config).expect("the lowered PDF limit must initialize");
-        // A preamble before the first boundary counts toward the whole-upload limit
-        // although no part exceeds its own.
-        let mut oversized = vec![b'x'; upload_limit(&state) + 1];
-        oversized.extend(multipart(&[("pdf", b"%PDF")]));
-        for path in ["/v1/extract", "/v1/fill"] {
-            let response = router(state.clone())
-                .oneshot(
-                    Request::post(path)
-                        .body(Body::from("{}"))
-                        .expect("construct the local non-multipart request"),
-                )
-                .await
-                .expect("the router must return a response to the request");
-            assert_error(response, StatusCode::BAD_REQUEST, "invalid_multipart").await;
-            let truncated =
-                b"--b\r\nContent-Disposition: form-data; name=\"pdf\"\r\n\r\n%PDF".to_vec();
-            for (body, status) in [
-                (truncated, StatusCode::BAD_REQUEST),
-                (oversized.clone(), StatusCode::PAYLOAD_TOO_LARGE),
-            ] {
-                assert_error(
-                    post_raw(&state, path, body, &[]).await,
-                    status,
-                    "invalid_or_oversized_upload",
-                )
-                .await;
-                assert_eq!(state.jobs.available_permits(), 1, "{path}");
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn fill_upload_is_bounded_by_the_upload_deadline() {
-        let state = busy_state(300);
-        let stream = busy_server(&state).await;
-        let head = upload_head(1024).replace("/v1/extract", "/v1/fill");
-        write_all(&stream, head.as_bytes())
-            .await
-            .expect("write the stalled fill upload headers to the local server");
-        write_all(
-            &stream,
-            b"--b\r\nContent-Disposition: form-data; name=\"pdf\"\r\n\r\n%PDF",
-        )
-        .await
-        .expect("write the partial fill upload body to the local server");
-        let response = response_head(&stream).await;
-        assert!(response.starts_with("HTTP/1.1 408"), "{response}");
-        until(|| state.jobs.available_permits() == 1).await;
-    }
-
-    // The remote backend owns a blocking HTTP client, which must be dropped outside a runtime.
-    #[test]
-    fn fill_works_on_a_remote_backend_while_jev_admission_is_paused() {
-        let config = ServerConfig::remote(
-            Endpoint::try_new("https://127.0.0.1:9/")
-                .expect("the synthetic HTTPS endpoint must validate without a request"),
-            Secret::new("synthetic-jev-key".into())
-                .expect("the synthetic Jev key must be a valid bearer value"),
-        );
-        let state = AppState::try_new(config).expect("the remote config must initialize app state");
-        {
-            let mut admission = state
-                .admission
-                .lock()
-                .expect("the admission state must not have been poisoned in this test");
-            admission.paused = true;
-            admission.next = Instant::now() + Duration::from_secs(60);
-        }
-        let runtime =
-            tokio::runtime::Runtime::new().expect("create the runtime used for local requests");
-        runtime.block_on(async {
-            assert_error(
-                request(state.clone()).await,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "remote_paused_unknown_outcome",
-            )
-            .await;
-            let pdf = text_pdf("Ref: AB12");
-            assert_filled(post_fill(&state, &[("pdf", &pdf), ("form", FORM)], &[]).await).await;
-        });
-        drop(runtime);
-        assert_eq!(state.jobs.available_permits(), 1);
-    }
-
-    fn reuse_state(ttl_ms: u64) -> (AppState, Arc<DocumentReuse>) {
-        let mut config = ServerConfig::fixture(
-            include_bytes!("../../../examples/legacy/text-mock.json").to_vec(),
-        )
-        .expect("the checked-in mock must initialize the fixture server config");
-        config.reuse_document = true;
-        config.reuse_document_ttl_ms = ttl_ms;
-        let state = AppState::try_new(config)
-            .expect("the enabled reuse configuration must initialize app state");
-        let reuse = state
-            .reuse
-            .clone()
-            .expect("enabling reuse must allocate a document cache");
-        (state, reuse)
-    }
-
-    fn cached(reuse: &DocumentReuse) -> bool {
-        !locked(&reuse.cache).is_empty()
-    }
-
-    async fn until(mut done: impl FnMut() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !done() {
-            assert!(Instant::now() < deadline, "condition not reached");
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    }
-
-    // Holding the cache lock is how the test keeps the job inside its blocking section.
-    #[allow(clippy::await_holding_lock)]
-    #[tokio::test]
-    async fn reused_document_is_dropped_after_the_ttl_even_if_the_client_disconnects() {
-        let (state, reuse) = reuse_state(1000);
-        let held = locked(&reuse.cache);
-        // The job clones the cache handle just before it blocks on the lock held here.
-        let waiting = Arc::strong_count(&reuse.cache) + 1;
-        let request = tokio::spawn({
-            let state = state.clone();
-            async move { extract_pdf(&state, &text_pdf("ALPHA42"), "{}").await }
-        });
-        until(|| Arc::strong_count(&reuse.cache) >= waiting).await;
-        request.abort();
-        let _ = request.await;
-        drop(held);
-        until(|| state.jobs.available_permits() == 1).await;
-        assert!(cached(&reuse));
-        until(|| !cached(&reuse)).await;
-    }
-
-    #[tokio::test]
-    async fn a_job_failing_before_it_opens_the_document_does_not_extend_its_lifetime() {
-        let (state, reuse) = reuse_state(1500);
-        let response = extract_pdf(&state, &text_pdf("ALPHA42"), "{}").await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let filled = Instant::now();
-        tokio::time::sleep(Duration::from_millis(900)).await;
-        let invalid = r#"{"evaluation_profile":{"min_confidence":2.0,"noul_true_min":0.9,"noul_false_max":0.1}}"#;
-        let response = extract_pdf(&state, &text_pdf("ALPHA42"), invalid).await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert!(cached(&reuse));
-        tokio::time::sleep(
-            (filled + Duration::from_millis(2100)).saturating_duration_since(Instant::now()),
-        )
-        .await;
-        assert!(!cached(&reuse));
-    }
-
-    #[test]
-    fn janitor_releases_the_document_without_traffic_or_a_runtime() {
-        let (state, reuse) = reuse_state(1000);
-        let runtime = tokio::runtime::Runtime::new()
-            .expect("create the runtime used to populate the document cache");
-        let response = runtime.block_on(extract_pdf(&state, &text_pdf("ALPHA42"), "{}"));
-        assert_eq!(response.status(), StatusCode::OK);
-        drop(runtime);
-        assert!(cached(&reuse));
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while cached(&reuse) {
-            assert!(Instant::now() < deadline, "document was not released");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    #[test]
-    fn janitor_exits_when_the_server_state_is_dropped() {
-        let (state, reuse) = reuse_state(60_000);
-        let weak = Arc::downgrade(&reuse);
-        drop((state, reuse));
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while weak.upgrade().is_some() {
-            assert!(Instant::now() < deadline, "janitor still holds the state");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    #[test]
-    fn reuse_is_off_by_default_and_the_ttl_is_range_checked() {
-        let config = || {
-            ServerConfig::fixture(
-                include_bytes!("../../../examples/legacy/text-mock.json").to_vec(),
-            )
-            .expect("the checked-in mock must initialize the fixture server config")
-        };
-        assert!(
-            AppState::try_new(config())
-                .expect("the default fixture server config must initialize app state")
-                .reuse
-                .is_none()
-        );
-        for ttl in [0, 3_600_001] {
-            let mut config = config();
-            config.reuse_document_ttl_ms = ttl;
-            assert_eq!(
-                AppState::try_new(config).err(),
-                Some("invalid_reuse_document_ttl")
-            );
-        }
-    }
-}
+mod tests;

@@ -9,17 +9,11 @@ publish.workspace = true
 [dependencies]
 vf-source.workspace = true
 vf-core.workspace = true
-vf-legacy.workspace = true
 axum.workspace = true
 tokio.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 log.workspace = true
 
 [dev-dependencies]
 tower.workspace = true
 
-[features]
-default = []
-pdfium = ["vf-legacy/pdfium"]
-hayro = ["vf-legacy/hayro"]

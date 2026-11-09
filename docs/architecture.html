@@ -31,7 +31,6 @@ h2{font-size:26px;letter-spacing:-.03em;margin:4px 0 6px}
 .chip{display:inline-block;font-size:11px;border-radius:4px;padding:1px 8px;border:1px solid;white-space:nowrap}
 .chip.done{color:var(--done);border-color:var(--done);background:var(--done-tint)}
 .chip.plan{color:var(--plan);border-color:#b8bec9;border-style:dashed;background:#fff}
-.chip.gone{color:#a33;border-color:#d8a5a5;border-style:dashed;background:#fff}
 .layers{display:grid;gap:12px}
 .layer{display:grid;grid-template-columns:120px minmax(0,1fr) auto;gap:16px;align-items:start;background:#fff;border:1px solid var(--rule);border-radius:8px;padding:16px 20px}
 .layer .tag{font:600 15px system-ui,sans-serif}
@@ -46,7 +45,6 @@ h2{font-size:26px;letter-spacing:-.03em;margin:4px 0 6px}
 .node.external rect{fill:#eceef1;stroke:#a7aebb}
 .node.planned rect{fill:#fff;stroke:#a7aebb;stroke-dasharray:6 4}
 .node.optional rect{fill:#f5f5f5;stroke:#a7aebb;stroke-dasharray:3 3}
-.node.gone rect{fill:#fff;stroke:#d8a5a5;stroke-dasharray:6 4}
 .node-tag{font-size:10px;letter-spacing:.04em;fill:var(--muted)}
 .node-title{font-size:16px;font-weight:600;fill:var(--ink)}
 .node-sub{font-size:11px;fill:var(--muted)}
@@ -94,7 +92,6 @@ footer{border-top:1px solid var(--rule);padding:20px 0;font-size:12px;color:var(
   <div class="legend">
     <span><span class="chip done">実装済み</span> 現在のmainで動作</span>
     <span><span class="chip plan">計画</span> 未実装</span>
-    <span><span class="chip gone">削除予定</span> 旧方式</span>
   </div>
 
   <section id="pipeline">
@@ -132,7 +129,7 @@ footer{border-top:1px solid var(--rule);padding:20px 0;font-size:12px;color:var(
   <section id="containers">
     <div class="eyebrow">03 · C4 Level 2</div>
     <h2>Containers</h2>
-    <p class="sub">実行ファイルは <span class="mono">voltfill</span> だけです。CLIとHTTPサーバーは同じライブラリを呼ぶ薄い入口です。削除予定の旧方式（<span class="mono">run</span>・<span class="mono">extract</span>・<span class="mono">/v1/extract</span>）は省いています。</p>
+    <p class="sub">実行ファイルは <span class="mono">voltfill</span> だけです。CLIとHTTPサーバーは同じライブラリを呼ぶ薄い入口です。</p>
     <div class="canvas"><svg viewBox="0 0 1000 460" role="img" aria-label="Container diagram">
       <defs><marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#4f5d75"/></marker><marker id="arr2x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#2e5aa8"/></marker></defs>
       <rect class="boundary" x="230" y="20" width="540" height="420" rx="10"/><text class="zone-label" x="246" y="42">VOLTFILL</text>
@@ -161,7 +158,6 @@ footer{border-top:1px solid var(--rule);padding:20px 0;font-size:12px;color:var(
       <defs><marker id="arr3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#4f5d75"/></marker></defs>
       <g class="node"><rect x="40" y="30" width="260" height="80" rx="8"/><text class="node-tag" x="56" y="52">FRONT END · バイナリ</text><text class="node-title" x="56" y="76">vf-cli</text><text class="node-sub" x="56" y="96">引数・設定・ログ・serve</text></g>
       <g class="node"><rect x="370" y="30" width="260" height="80" rx="8"/><text class="node-tag" x="386" y="52">LIBRARY</text><text class="node-title" x="386" y="76">vf-server</text><text class="node-sub" x="386" y="96">HTTPルート・認証・同時実行</text></g>
-      <g class="node gone"><rect x="700" y="30" width="260" height="80" rx="8"/><text class="node-tag" x="716" y="52">LEGACY · 削除予定</text><text class="node-title" x="716" y="76">vf-legacy</text><text class="node-sub" x="716" y="96">旧 run/extract/validate · /v1/extract</text></g>
       <g class="node accent"><rect x="40" y="170" width="920" height="100" rx="8"/><text class="node-tag" x="56" y="192">CORE</text><text class="node-title" x="56" y="216">vf-core</text><text class="node-sub" x="56" y="238">フォームの契約 · 照合と確定 · 正規化 · 表 · AcroForm · Jev補助（assist / images）· 結果とEvidence</text><text class="node-sub" x="56" y="256">詳細は次の図</text></g>
       <g class="node"><rect x="40" y="340" width="280" height="100" rx="8"/><text class="node-tag" x="56" y="362">FOUNDATION</text><text class="node-title" x="56" y="386">vf-source</text><text class="node-sub" x="56" y="408">inspection · geometry · layout</text><text class="node-sub" x="56" y="426">select · acroform · budget</text></g>
       <g class="node optional"><rect x="360" y="340" width="280" height="100" rx="8"/><text class="node-tag" x="376" y="362">FOUNDATION · 任意機能</text><text class="node-title" x="376" y="386">vf-render</text><text class="node-sub" x="376" y="408">hayro / pdfium（既定オフ）</text><text class="node-sub" x="376" y="426">ページ画像と座標変換</text></g>
@@ -169,15 +165,13 @@ footer{border-top:1px solid var(--rule);padding:20px 0;font-size:12px;color:var(
       <path class="edge" d="M300,70 H370" marker-end="url(#arr3)"/><text class="edge-text" x="314" y="62">serve</text>
       <path class="edge" d="M170,110 V170" marker-end="url(#arr3)"/><text class="edge-text" x="178" y="146">fill · inspect</text>
       <path class="edge" d="M500,110 V170" marker-end="url(#arr3)"/><text class="edge-text" x="508" y="146">/v1/fill</text>
-      <path class="edge planned" d="M630,58 H700" marker-end="url(#arr3)"/>
-      <path class="edge planned" d="M170,30 V14 H830 V30" marker-end="url(#arr3)"/>
       <path class="edge" d="M180,270 V340" marker-end="url(#arr3)"/>
       <path class="edge opt" d="M500,270 V340" marker-end="url(#arr3)"/><text class="edge-text" x="508" y="310">--images</text>
       <path class="edge" d="M820,270 V340" marker-end="url(#arr3)"/><text class="edge-text" x="828" y="310">--remote</text>
       <path class="edge" d="M360,390 H320" marker-end="url(#arr3)"/>
     </svg></div>
     <div class="notes">
-      <div class="note"><h3>依存の約束</h3><ul><li>vf-client は PDF の crate と vf-core に依存しない</li><li>vf-source・vf-render はフォームもEvidenceも知らない</li><li>vf-core は Jev への送信に vf-client だけ、描画に vf-render だけを使う</li><li>vf-cli・vf-server は PDF の読み取りに vf-source も直接使う</li><li>削除予定の vf-legacy は vf-source・vf-client・vf-render を使う</li></ul></div>
+      <div class="note"><h3>依存の約束</h3><ul><li>vf-client は PDF の crate と vf-core に依存しない</li><li>vf-source・vf-render はフォームもEvidenceも知らない</li><li>vf-core は Jev への送信に vf-client だけ、描画に vf-render だけを使う</li><li>vf-cli・vf-server は PDF の読み取りに vf-source も直接使う</li></ul></div>
       <div class="note"><h3>外部crate</h3><p>PDF解析は <span class="mono">pdf-inspector</span> と <span class="mono">lopdf</span>、HTTPは <span class="mono">reqwest</span>（rustls）、サーバーは <span class="mono">axum</span> / <span class="mono">tokio</span>。描画の <span class="mono">hayro</span>・PDFium は既定オフ。</p></div>
     </div>
   </section>
