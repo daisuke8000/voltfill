@@ -62,7 +62,7 @@ voltfill serve --remote --listen 127.0.0.1:3000
 curl -sS http://127.0.0.1:3000/v1/fill -F 'pdf=@input.pdf' -F 'form=@examples/forms/invoice.json'
 ```
 
-`POST /v1/fill` はオフラインの `voltfill fill` と同じ結果を返し、Jevには送りません。`GET /health` はヘルスチェックです。同時実行は1件で、実行中は `429` を返します。`VOLTFILL_SERVER_API_KEY`（または `_FILE`）を設定するとBearer認証が有効になり、ループバック以外で待ち受けるには必須です。
+`POST /v1/fill` はオフラインの `voltfill fill` と同じ結果を返し、Jevには送りません（`serve --remote` の起動にはJevの接続先とキーが必要です）。`GET /health` はヘルスチェックです。同時実行は1件で、実行中は `429` を返します。`VOLTFILL_SERVER_API_KEY`（または `_FILE`）を設定するとBearer認証が有効になり、ループバック以外で待ち受けるには必須です。
 
 ## 開発
 
