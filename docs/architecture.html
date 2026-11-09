@@ -102,8 +102,8 @@ footer{border-top:1px solid var(--rule);padding:20px 0;font-size:12px;color:var(
     <h2>処理の流れ</h2>
     <p class="sub">入力はPDFとフォーム項目（id・ラベル・型・別名、表は列）。出力は項目ごとの状態・原文・正規化値・根拠です。</p>
     <div class="layers">
-      <div class="layer"><div class="tag">L1 読む<small>vf-source</small></div><p>テキスト片・座標・品質と、AcroFormのフィールド値を読みます。文字化けした片、斜め・縦書きのページは値に使いません。</p><span class="chip done">実装済み</span></div>
-      <div class="layer"><div class="tag">L2 構造化<small>vf-source</small></div><p>片を<b>行</b>にまとめ、<b>ラベルと値の候補</b>と<b>表</b>を作ります。回転した片はその向きで同じ規則を使います。</p><span class="chip done">実装済み</span></div>
+      <div class="layer"><div class="tag">L1 読む<small>vf-source</small></div><p>テキスト片・座標・品質と、AcroFormのフィールド値を読みます。文字化けした片と、斜めの文字・縦書きフォントを含むページは値に使いません。</p><span class="chip done">実装済み</span></div>
+      <div class="layer"><div class="tag">L2 構造化<small>vf-source</small></div><p>片を<b>行</b>にまとめ、<b>ラベルと値の候補</b>と<b>表</b>を作ります。90°単位で回転した片はその向きで同じ規則を使います。</p><span class="chip done">実装済み</span></div>
       <div class="layer core"><div class="tag">L3 当てる<small>vf-core</small></div><p>ラベル・型・別名で候補を採点し、<b>厳格な確定方針</b>で埋めます。確定できない候補には理由（<span class="mono">hold</span>）を付けて返します。</p><span class="chip done">実装済み</span></div>
       <div class="layer"><div class="tag">L4 補う<small>vf-core · 任意</small></div><p><span class="mono">--remote</span> で残った候補をJevに選ばせ、<span class="mono">--images</span> でページ画像から値の位置を指させます。値は常にその位置の原文です。</p><span class="chip done">実装済み</span></div>
       <div class="layer"><div class="tag">L5 返す<small>vf-core</small></div><p>項目ごとの <span class="mono">status</span>・原文・正規化値（日付・金額・数値）・Evidenceと、Jevの全受信本文を返します。</p><span class="chip done">実装済み</span></div>
@@ -124,7 +124,7 @@ footer{border-top:1px solid var(--rule);padding:20px 0;font-size:12px;color:var(
       <path class="edge" d="M130,120 V230" marker-end="url(#arr)"/><text class="edge-text" x="140" y="180">PDFをアップロード</text>
       <path class="edge planned" d="M230,262 C300,262 320,215 400,215" marker-end="url(#arr)"/><text class="edge-text" x="246" y="248">PDF＋フォーム項目</text>
       <path class="edge planned" d="M400,240 C320,240 300,300 230,300" marker-end="url(#arr)"/><text class="edge-text" x="250" y="330">値・根拠・状態（JSON）</text>
-      <path class="edge ext" d="M640,180 C700,180 710,105 770,105" marker-end="url(#arrx)"/><text class="edge-text" x="650" y="140">候補・ページ画像（--remote）</text>
+      <path class="edge ext" d="M640,180 C700,180 710,105 770,105" marker-end="url(#arrx)"/><text class="edge-text" x="600" y="140">候補（--remote）・ページ画像（--images）</text>
       <path class="edge" d="M770,295 C710,295 700,240 640,240" marker-end="url(#arr)"/><text class="edge-text" x="660" y="290">環境変数・設定</text>
     </svg></div>
   </section>
@@ -132,17 +132,17 @@ footer{border-top:1px solid var(--rule);padding:20px 0;font-size:12px;color:var(
   <section id="containers">
     <div class="eyebrow">03 · C4 Level 2</div>
     <h2>Containers</h2>
-    <p class="sub">実行ファイルは <span class="mono">voltfill</span> だけです。CLIとHTTPサーバーは同じライブラリを呼ぶ薄い入口です。</p>
+    <p class="sub">実行ファイルは <span class="mono">voltfill</span> だけです。CLIとHTTPサーバーは同じライブラリを呼ぶ薄い入口です。削除予定の旧方式（<span class="mono">run</span>・<span class="mono">extract</span>・<span class="mono">/v1/extract</span>）は省いています。</p>
     <div class="canvas"><svg viewBox="0 0 1000 460" role="img" aria-label="Container diagram">
       <defs><marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#4f5d75"/></marker><marker id="arr2x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#2e5aa8"/></marker></defs>
       <rect class="boundary" x="230" y="20" width="540" height="420" rx="10"/><text class="zone-label" x="246" y="42">VOLTFILL</text>
       <g class="node external"><rect x="20" y="70" width="180" height="80" rx="8"/><text class="node-tag" x="34" y="92">CALLER</text><text class="node-title" x="34" y="116">CLI利用者</text><text class="node-sub" x="34" y="136">開発・一括処理</text></g>
       <g class="node planned"><rect x="20" y="290" width="180" height="80" rx="8"/><text class="node-tag" x="34" y="312">CALLER · 計画</text><text class="node-title" x="34" y="336">Webアプリ</text><text class="node-sub" x="34" y="356">バックエンドから呼出</text></g>
       <g class="node"><rect x="260" y="60" width="230" height="110" rx="8"/><text class="node-tag" x="276" y="82">CONTAINER · Rust CLI</text><text class="node-title" x="276" y="106">vf-cli（voltfill）</text><text class="node-sub" x="276" y="128">inspect · fill · serve</text><text class="node-sub" x="276" y="148">設定・ログ・出力先の保護</text></g>
-      <g class="node"><rect x="260" y="280" width="230" height="110" rx="8"/><text class="node-tag" x="276" y="302">CONTAINER · Axum HTTP</text><text class="node-title" x="276" y="326">vf-server</text><text class="node-sub" x="276" y="348">POST /v1/fill · GET /health</text><text class="node-sub" x="276" y="368">Bearer認証 · 同時1件</text></g>
+      <g class="node"><rect x="260" y="280" width="230" height="110" rx="8"/><text class="node-tag" x="276" y="302">CONTAINER · Axum HTTP</text><text class="node-title" x="276" y="326">vf-server</text><text class="node-sub" x="276" y="348">POST /v1/fill · GET /health</text><text class="node-sub" x="276" y="368">Bearer認証（キー設定時）· 同時1件</text></g>
       <g class="node accent"><rect x="540" y="160" width="210" height="130" rx="8"/><text class="node-tag" x="556" y="182">LIBRARIES</text><text class="node-title" x="556" y="206">vf-core</text><text class="node-sub" x="556" y="228">照合・正規化・Evidence</text><text class="node-sub" x="556" y="248">＋ vf-source · vf-client</text><text class="node-sub" x="556" y="268">＋ vf-render（任意）</text></g>
       <g class="node external"><rect x="800" y="70" width="180" height="80" rx="8"/><text class="node-tag" x="814" y="92">EXTERNAL</text><text class="node-title" x="814" y="116">Jev API</text><text class="node-sub" x="814" y="136">HTTPS（信頼済み）</text></g>
-      <g class="node optional"><rect x="800" y="300" width="180" height="80" rx="8"/><text class="node-tag" x="814" y="322">OPTIONAL · 利用者指定</text><text class="node-title" x="814" y="346">PDFium</text><text class="node-sub" x="814" y="366">ネイティブ描画</text></g>
+      <g class="node optional"><rect x="800" y="300" width="180" height="80" rx="8"/><text class="node-tag" x="814" y="322">OPTIONAL · 描画</text><text class="node-title" x="814" y="346">hayro / PDFium</text><text class="node-sub" x="814" y="366">PDFiumは利用者が指定</text></g>
       <path class="edge" d="M200,110 H260" marker-end="url(#arr2)"/>
       <path class="edge planned" d="M200,330 H260" marker-end="url(#arr2)"/><text class="edge-text" x="206" y="322">HTTP</text>
       <path class="edge" d="M375,170 V280" marker-end="url(#arr2)"/><text class="edge-text" x="383" y="230">serve</text>
@@ -161,7 +161,7 @@ footer{border-top:1px solid var(--rule);padding:20px 0;font-size:12px;color:var(
       <defs><marker id="arr3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#4f5d75"/></marker></defs>
       <g class="node"><rect x="40" y="30" width="260" height="80" rx="8"/><text class="node-tag" x="56" y="52">FRONT END · バイナリ</text><text class="node-title" x="56" y="76">vf-cli</text><text class="node-sub" x="56" y="96">引数・設定・ログ・serve</text></g>
       <g class="node"><rect x="370" y="30" width="260" height="80" rx="8"/><text class="node-tag" x="386" y="52">LIBRARY</text><text class="node-title" x="386" y="76">vf-server</text><text class="node-sub" x="386" y="96">HTTPルート・認証・同時実行</text></g>
-      <g class="node gone"><rect x="700" y="30" width="260" height="80" rx="8"/><text class="node-tag" x="716" y="52">LEGACY · 削除予定</text><text class="node-title" x="716" y="76">vf-legacy</text><text class="node-sub" x="716" y="96">旧 Text/Vision/Hybrid · /v1/extract</text></g>
+      <g class="node gone"><rect x="700" y="30" width="260" height="80" rx="8"/><text class="node-tag" x="716" y="52">LEGACY · 削除予定</text><text class="node-title" x="716" y="76">vf-legacy</text><text class="node-sub" x="716" y="96">旧 run/extract/validate · /v1/extract</text></g>
       <g class="node accent"><rect x="40" y="170" width="920" height="100" rx="8"/><text class="node-tag" x="56" y="192">CORE</text><text class="node-title" x="56" y="216">vf-core</text><text class="node-sub" x="56" y="238">フォームの契約 · 照合と確定 · 正規化 · 表 · AcroForm · Jev補助（assist / images）· 結果とEvidence</text><text class="node-sub" x="56" y="256">詳細は次の図</text></g>
       <g class="node"><rect x="40" y="340" width="280" height="100" rx="8"/><text class="node-tag" x="56" y="362">FOUNDATION</text><text class="node-title" x="56" y="386">vf-source</text><text class="node-sub" x="56" y="408">inspection · geometry · layout</text><text class="node-sub" x="56" y="426">select · acroform · budget</text></g>
       <g class="node optional"><rect x="360" y="340" width="280" height="100" rx="8"/><text class="node-tag" x="376" y="362">FOUNDATION · 任意機能</text><text class="node-title" x="376" y="386">vf-render</text><text class="node-sub" x="376" y="408">hayro / pdfium（既定オフ）</text><text class="node-sub" x="376" y="426">ページ画像と座標変換</text></g>
@@ -170,13 +170,14 @@ footer{border-top:1px solid var(--rule);padding:20px 0;font-size:12px;color:var(
       <path class="edge" d="M170,110 V170" marker-end="url(#arr3)"/><text class="edge-text" x="178" y="146">fill · inspect</text>
       <path class="edge" d="M500,110 V170" marker-end="url(#arr3)"/><text class="edge-text" x="508" y="146">/v1/fill</text>
       <path class="edge planned" d="M630,58 H700" marker-end="url(#arr3)"/>
+      <path class="edge planned" d="M170,30 V14 H830 V30" marker-end="url(#arr3)"/>
       <path class="edge" d="M180,270 V340" marker-end="url(#arr3)"/>
       <path class="edge opt" d="M500,270 V340" marker-end="url(#arr3)"/><text class="edge-text" x="508" y="310">--images</text>
       <path class="edge" d="M820,270 V340" marker-end="url(#arr3)"/><text class="edge-text" x="828" y="310">--remote</text>
       <path class="edge" d="M360,390 H320" marker-end="url(#arr3)"/>
     </svg></div>
     <div class="notes">
-      <div class="note"><h3>依存の約束</h3><ul><li>vf-client は PDF の crate と vf-core に依存しない</li><li>vf-source・vf-render はフォームもEvidenceも知らない</li><li>vf-core は Jev への送信に vf-client だけ、描画に vf-render だけを使う</li></ul></div>
+      <div class="note"><h3>依存の約束</h3><ul><li>vf-client は PDF の crate と vf-core に依存しない</li><li>vf-source・vf-render はフォームもEvidenceも知らない</li><li>vf-core は Jev への送信に vf-client だけ、描画に vf-render だけを使う</li><li>vf-cli・vf-server は PDF の読み取りに vf-source も直接使う</li><li>削除予定の vf-legacy は vf-source・vf-client・vf-render を使う</li></ul></div>
       <div class="note"><h3>外部crate</h3><p>PDF解析は <span class="mono">pdf-inspector</span> と <span class="mono">lopdf</span>、HTTPは <span class="mono">reqwest</span>（rustls）、サーバーは <span class="mono">axum</span> / <span class="mono">tokio</span>。描画の <span class="mono">hayro</span>・PDFium は既定オフ。</p></div>
     </div>
   </section>
@@ -190,26 +191,25 @@ footer{border-top:1px solid var(--rule);padding:20px 0;font-size:12px;color:var(
       <rect class="boundary core" x="20" y="20" width="960" height="270" rx="10"/><text class="zone-label" x="36" y="42">vf-core</text>
       <rect class="boundary" x="40" y="60" width="540" height="210" rx="8"/><text class="zone-label" x="56" y="80">オフライン（常に実行）</text>
       <rect class="boundary" x="610" y="60" width="350" height="210" rx="8"/><text class="zone-label" x="626" y="80">補助（--remote のとき）</text>
-      <g class="node accent"><rect x="60" y="96" width="160" height="70" rx="8"/><text class="node-title" x="76" y="124">fill</text><text class="node-sub" x="76" y="146">照合・厳格な確定</text></g>
-      <g class="node"><rect x="240" y="96" width="150" height="70" rx="8"/><text class="node-title" x="256" y="124">fill::table</text><text class="node-sub" x="256" y="146">表の項目</text></g>
-      <g class="node"><rect x="410" y="96" width="150" height="70" rx="8"/><text class="node-title" x="426" y="124">acroform</text><text class="node-sub" x="426" y="146">フィールド値</text></g>
+      <g class="node accent"><rect x="60" y="96" width="160" height="70" rx="8"/><text class="node-title" x="76" y="124">acroform</text><text class="node-sub" x="76" y="146">入口・フィールド値</text></g>
+      <g class="node"><rect x="240" y="96" width="150" height="70" rx="8"/><text class="node-title" x="256" y="124">fill</text><text class="node-sub" x="256" y="146">照合・厳格な確定</text></g>
+      <g class="node"><rect x="410" y="96" width="150" height="70" rx="8"/><text class="node-title" x="426" y="124">fill::table</text><text class="node-sub" x="426" y="146">表の項目</text></g>
       <g class="node"><rect x="60" y="186" width="500" height="64" rx="8"/><text class="node-title" x="76" y="212">正規化・hold・Evidence</text><text class="node-sub" x="76" y="234">日付（和暦）・金額・数値の書式 / 確定できない理由 / 原文のバイト範囲と座標</text></g>
       <g class="node"><rect x="630" y="96" width="150" height="70" rx="8"/><text class="node-title" x="646" y="124">assist</text><text class="node-sub" x="646" y="146">候補を選ばせる</text></g>
-      <g class="node"><rect x="795" y="96" width="150" height="70" rx="8"/><text class="node-title" x="811" y="124">images</text><text class="node-sub" x="811" y="146">画像で位置を指す</text></g>
-      <g class="node"><rect x="630" y="186" width="315" height="64" rx="8"/><text class="node-title" x="646" y="212">remote</text><text class="node-sub" x="646" y="234">共有の予算・期限・本文の記録</text></g>
+      <g class="node"><rect x="795" y="96" width="150" height="80" rx="8"/><text class="node-title" x="811" y="124">images</text><text class="node-sub" x="811" y="146">画像で位置を指す</text><text class="node-sub" x="811" y="164">枠内は select で選ぶ</text></g>
+      <g class="node"><rect x="630" y="196" width="150" height="54" rx="8"/><text class="node-title" x="646" y="219">remote</text><text class="node-sub" x="646" y="238">予算・期限・本文記録</text></g>
       <g class="node"><rect x="40" y="340" width="260" height="70" rx="8"/><text class="node-title" x="56" y="368">vf-source</text><text class="node-sub" x="56" y="390">layout · select · acroform</text></g>
-      <g class="node optional"><rect x="370" y="340" width="260" height="70" rx="8"/><text class="node-title" x="386" y="368">vf-render</text><text class="node-sub" x="386" y="390">ページ画像</text></g>
-      <g class="node"><rect x="700" y="340" width="260" height="70" rx="8"/><text class="node-title" x="716" y="368">vf-client → Jev API</text><text class="node-sub" x="716" y="390">choice · noul · box</text></g>
+      <g class="node"><rect x="370" y="340" width="260" height="70" rx="8"/><text class="node-title" x="386" y="368">vf-client → Jev API</text><text class="node-sub" x="386" y="390">choice · noul · box</text></g>
+      <g class="node optional"><rect x="700" y="340" width="260" height="70" rx="8"/><text class="node-title" x="716" y="368">vf-render</text><text class="node-sub" x="716" y="390">ページ画像</text></g>
       <path class="edge" d="M220,131 H240" marker-end="url(#arr4)"/>
       <path class="edge" d="M390,131 H410" marker-end="url(#arr4)"/>
-      <path class="edge" d="M560,120 C595,120 600,120 630,120" marker-end="url(#arr4)"/><text class="edge-text" x="566" y="112">未確定</text>
+      <path class="edge" d="M580,120 H630" marker-end="url(#arr4)"/><text class="edge-text" x="584" y="112">未確定</text>
       <path class="edge" d="M780,131 H795" marker-end="url(#arr4)"/>
-      <path class="edge" d="M710,166 V186" marker-end="url(#arr4)"/>
-      <path class="edge" d="M870,166 V186" marker-end="url(#arr4)"/>
-      <path class="edge" d="M140,250 V340" marker-end="url(#arr4)"/><text class="edge-text" x="148" y="300">候補・表・フィールド</text>
-      <path class="edge opt" d="M700,250 V292 C700,322 575,318 560,340" marker-end="url(#arr4)"/><text class="edge-text" x="606" y="334">--images</text>
-      <path class="edge ext" d="M880,250 V340" marker-end="url(#arr4x)"/><text class="edge-text" x="888" y="300">--remote</text>
-      <path class="edge" d="M630,240 H600 V310 H270 V340" marker-end="url(#arr4)"/><text class="edge-text" x="330" y="304">枠内の原文を選ぶ（images）</text>
+      <path class="edge" d="M705,166 V196" marker-end="url(#arr4)"/>
+      <path class="edge" d="M820,176 C820,205 805,223 780,223" marker-end="url(#arr4)"/>
+      <path class="edge" d="M140,250 V340" marker-end="url(#arr4)"/><text class="edge-text" x="148" y="300">候補・表・フィールド・select</text>
+      <path class="edge ext" d="M690,250 C690,300 520,300 500,340" marker-end="url(#arr4x)"/><text class="edge-text" x="596" y="318">--remote</text>
+      <path class="edge opt" d="M880,176 V340" marker-end="url(#arr4)"/><text class="edge-text" x="888" y="300">--images</text>
     </svg></div>
   </section>
 
@@ -239,6 +239,7 @@ footer{border-top:1px solid var(--rule);padding:20px 0;font-size:12px;color:var(
       <tr><td class="mono">not_found</td><td>候補がない</td></tr>
       <tr><td class="mono">no_text</td><td>使えるテキスト層がない（スキャンなど）</td></tr>
       <tr><td class="mono">invalid</td><td>値が型の書式に合わない</td></tr>
+      <tr><td class="mono">limit_exceeded</td><td>処理量の上限を超えたため評価していない（ライブラリの <span class="mono">fill</span> のみ。CLIとHTTPはエラーで返す）</td></tr>
     </table>
   </section>
 
