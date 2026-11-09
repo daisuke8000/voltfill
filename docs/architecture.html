@@ -84,7 +84,6 @@ footer{border-top:1px solid var(--rule);padding:20px 0;font-size:12px;color:var(
   <div class="eyebrow">VOLTFILL · Architecture &amp; C4</div>
   <h1>PDFの原文から、<span>フォームの値を。</span></h1>
   <p class="intro">VOLTFILLは、PDFのテキスト層から、指定されたフォーム項目に当てはまる<b>原文の値</b>を、ページと座標の<b>根拠（Evidence）</b>付きで返します。文字を生成・読み取りせず、モデル（Jev）は「どの原文か」「どこにあるか」を選ぶためだけに使います。UIは別のWebアプリが担います。</p>
-  <p class="intro">現在、旧来の抽出（Text／Vision／Hybrid）からフォーム入力向けの構成へ移行中です。図では実装状況を区別しています。</p>
   <div class="legend">
     <span><span class="chip done">実装済み</span> 現在のmainで動作</span>
     <span><span class="chip wip">実装中</span> 一部のみ実装</span>
@@ -125,15 +124,15 @@ footer{border-top:1px solid var(--rule);padding:20px 0;font-size:12px;color:var(
   <section id="containers">
     <div class="eyebrow">03 · C4 Level 2</div>
     <h2>Containers</h2>
-    <p class="sub">CLIとHTTPサーバーは同じ処理を呼ぶ薄い入口です。複数の要求でJevの送信量・費用の上限を共有する場合はHTTPサーバーを常駐させます。</p>
+    <p class="sub">CLIとHTTPサーバーは同じ処理を呼ぶ薄い入口です。Jevに送るのはCLIの fill --remote だけです。</p>
     <div class="canvas"><svg viewBox="0 0 1000 440" role="img" aria-label="Container diagram">
       <defs><marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#4f5d75"/></marker></defs>
       <rect class="boundary" x="230" y="20" width="520" height="400" rx="10"/><text class="zone-label" x="246" y="42">VOLTFILL</text>
       <g class="node external"><rect x="20" y="70" width="180" height="80" rx="8"/><text class="node-tag" x="34" y="92">CALLER</text><text class="node-title" x="34" y="116">CLI利用者</text><text class="node-sub" x="34" y="136">開発・一括処理</text></g>
       <g class="node planned"><rect x="20" y="250" width="180" height="80" rx="8"/><text class="node-tag" x="34" y="272">CALLER · 計画</text><text class="node-title" x="34" y="296">Webアプリ</text><text class="node-sub" x="34" y="316">バックエンドから呼出</text></g>
-      <g class="node"><rect x="260" y="60" width="220" height="110" rx="8"/><text class="node-tag" x="276" y="82">CONTAINER · Rust CLI</text><text class="node-title" x="276" y="106">vf-cli</text><text class="node-sub" x="276" y="128">inspect / validate / run / extract</text><text class="node-sub" x="276" y="148">serve（サーバー起動）· fill（Jevは任意）</text></g>
-      <g class="node"><rect x="260" y="240" width="220" height="110" rx="8"/><text class="node-tag" x="276" y="262">CONTAINER · Axum HTTP</text><text class="node-title" x="276" y="286">vf-server</text><text class="node-sub" x="276" y="308">POST /v1/extract · /v1/fill</text><text class="node-sub" x="276" y="328">GET /health · 同時1件</text></g>
-      <g class="node accent"><rect x="530" y="150" width="200" height="110" rx="8"/><text class="node-tag" x="546" y="172">LIBRARY</text><text class="node-title" x="546" y="196">vf-core / vf-legacy</text><text class="node-sub" x="546" y="218">fill（新）・抽出（旧）</text><text class="node-sub" x="546" y="238">Evidence・上限・本文保存</text></g>
+      <g class="node"><rect x="260" y="60" width="220" height="110" rx="8"/><text class="node-tag" x="276" y="82">CONTAINER · Rust CLI</text><text class="node-title" x="276" y="106">vf-cli</text><text class="node-sub" x="276" y="128">inspect / fill（--remote でJev）</text><text class="node-sub" x="276" y="148">serve（サーバー起動）</text></g>
+      <g class="node"><rect x="260" y="240" width="220" height="110" rx="8"/><text class="node-tag" x="276" y="262">CONTAINER · Axum HTTP</text><text class="node-title" x="276" y="286">vf-server</text><text class="node-sub" x="276" y="308">POST /v1/fill（Jevへ送らない）</text><text class="node-sub" x="276" y="328">GET /health · 同時1件</text></g>
+      <g class="node accent"><rect x="530" y="150" width="200" height="110" rx="8"/><text class="node-tag" x="546" y="172">LIBRARY</text><text class="node-title" x="546" y="196">vf-core</text><text class="node-sub" x="546" y="218">fill・assist・images</text><text class="node-sub" x="546" y="238">Evidence・上限・本文保存</text></g>
       <g class="node external"><rect x="790" y="80" width="190" height="80" rx="8"/><text class="node-tag" x="804" y="102">EXTERNAL</text><text class="node-title" x="804" y="126">Jev API</text><text class="node-sub" x="804" y="146">HTTPS（信頼済み）</text></g>
       <g class="node optional"><rect x="790" y="260" width="190" height="80" rx="8"/><text class="node-tag" x="804" y="282">OPTIONAL · 利用者指定</text><text class="node-title" x="804" y="306">PDFium</text><text class="node-sub" x="804" y="326">ネイティブ描画（任意）</text></g>
       <path class="edge" d="M200,110 H260" marker-end="url(#arr2)"/>
@@ -149,38 +148,27 @@ footer{border-top:1px solid var(--rule);padding:20px 0;font-size:12px;color:var(
   <section id="components">
     <div class="eyebrow">04 · C4 Level 3</div>
     <h2>Components（crate）</h2>
-    <p class="sub">基盤crateは抽出スキーマやEvidenceに依存せず、vf-core・vf-legacyに依存しません。vf-coreはvf-legacyに依存しないため、旧方式はcrateごと削除できます。実行ファイルは vf-cli が作る voltfill だけです。</p>
+    <p class="sub">基盤crateはフォームやEvidenceに依存せず、vf-coreに依存しません。実行ファイルは vf-cli が作る voltfill だけです。</p>
     <div class="canvas"><svg viewBox="0 0 1000 492" role="img" aria-label="Component diagram">
       <defs><marker id="arr3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#4f5d75"/></marker></defs>
       <g class="node"><rect x="40" y="30" width="200" height="70" rx="8"/><text class="node-tag" x="56" y="50">FRONT END · バイナリ voltfill</text><text class="node-title" x="56" y="72">vf-cli</text><text class="node-sub" x="56" y="90">設定・ログ・serve</text></g>
       <g class="node"><rect x="300" y="30" width="200" height="70" rx="8"/><text class="node-tag" x="316" y="50">LIBRARY</text><text class="node-title" x="316" y="72">vf-server</text><text class="node-sub" x="316" y="90">HTTP ルーター</text></g>
       <g class="node wip"><rect x="40" y="160" width="260" height="104" rx="8"/><text class="node-tag" x="56" y="182">CORE · 実装中</text><text class="node-title" x="56" y="206">vf-core</text><text class="node-sub" x="56" y="228">fill／acroform：照合・正規化・根拠</text><text class="node-sub" x="56" y="248">assist / images：Jevが選択・位置を指す</text></g>
-      <rect class="boundary" x="340" y="140" width="620" height="130" rx="10"/><text class="zone-label" x="356" y="160">vf-legacy · 旧方式（比較後に crate ごと削除）</text>
-      <g class="node"><rect x="356" y="172" width="138" height="80" rx="8"/><text class="node-title" x="370" y="206">schema</text><text class="node-sub" x="370" y="228">旧スキーマ定義</text></g>
-      <g class="node"><rect x="506" y="172" width="138" height="80" rx="8"/><text class="node-title" x="520" y="206">engine</text><text class="node-sub" x="520" y="228">Text/Vision/Hybrid</text></g>
-      <g class="node"><rect x="656" y="172" width="138" height="80" rx="8"/><text class="node-title" x="670" y="206">candidates</text><text class="node-sub" x="670" y="228">候補・in_box照合</text></g>
-      <g class="node"><rect x="806" y="172" width="138" height="80" rx="8"/><text class="node-title" x="820" y="206">model / jev</text><text class="node-sub" x="820" y="228">Evidence・上限</text></g>
       <g class="node wip"><rect x="40" y="330" width="260" height="128" rx="8"/><text class="node-tag" x="56" y="352">FOUNDATION</text><text class="node-title" x="56" y="376">vf-source</text><text class="node-sub" x="56" y="398">inspect · geometry · metadata</text><text class="node-sub" x="56" y="418">layout（L2）は実装中</text><text class="node-sub" x="56" y="438">select：box内の原文（画像フォールバック）</text></g>
       <g class="node optional"><rect x="360" y="330" width="260" height="110" rx="8"/><text class="node-tag" x="376" y="352">FOUNDATION · 任意機能</text><text class="node-title" x="376" y="376">vf-render</text><text class="node-sub" x="376" y="398">hayro / pdfium（既定オフ）</text><text class="node-sub" x="376" y="418">ページ画像と座標変換</text></g>
       <g class="node"><rect x="680" y="330" width="280" height="110" rx="8"/><text class="node-tag" x="696" y="352">FOUNDATION</text><text class="node-title" x="696" y="376">vf-client</text><text class="node-sub" x="696" y="398">protocol · transport · 上限/予算</text><text class="node-sub" x="696" y="418">全試行の受信本文を記録</text></g>
       <path class="edge" d="M240,65 H300" marker-end="url(#arr3)"/><text class="edge-text" x="250" y="58">serve</text>
       <path class="edge" d="M120,100 V160" marker-end="url(#arr3)"/><text class="edge-text" x="128" y="134">fill</text>
-      <path class="edge" d="M200,100 C250,125 320,118 360,140" marker-end="url(#arr3)"/>
-      <path class="edge" d="M450,100 V140" marker-end="url(#arr3)"/><text class="edge-text" x="458" y="124">/v1/extract</text>
       <path class="edge" d="M330,100 C310,125 295,140 285,160" marker-end="url(#arr3)"/><text class="edge-text" x="228" y="152">/v1/fill</text>
       <path class="edge" d="M345,100 C345,122 320,126 320,148 V336 C320,344 313,348 302,348" marker-end="url(#arr3)"/>
       <path class="edge" d="M170,264 V330" marker-end="url(#arr3)"/>
       <path class="edge" d="M270,264 C270,300 290,300 330,300 H700 C720,300 730,310 730,330" marker-end="url(#arr3)"/><text class="edge-text" x="520" y="294">assist（--remote）</text>
-      <path class="edge" d="M380,270 C360,300 310,310 290,330" marker-end="url(#arr3)"/>
-      <path class="edge" d="M490,270 V330" marker-end="url(#arr3)"/>
-      <path class="edge" d="M820,270 V330" marker-end="url(#arr3)"/>
       <path class="edge" d="M360,385 H300" marker-end="url(#arr3)"/>
       <path class="edge" d="M40,240 H22 V478 H490 V440" marker-end="url(#arr3)"/><text class="edge-text" x="330" y="472">images（任意機能）</text>
     </svg></div>
     <div class="notes">
-      <div class="note"><h3>依存の約束</h3><ul><li>vf-source・vf-render は抽出スキーマ・Evidenceを必要としない</li><li>vf-client は PDF crate と vf-core・vf-legacy に依存しない</li><li>基盤crateは vf-core・vf-legacy に依存しない</li><li>vf-core は vf-legacy に依存しない</li><li>vf-core は Jev への送信に vf-client だけを使い（assist・images）、描画には任意機能の vf-render だけを使う</li><li>vf-server は /v1/fill のPDF読み取りに vf-source を直接使う</li></ul></div>
+      <div class="note"><h3>依存の約束</h3><ul><li>vf-source・vf-render はフォーム・Evidenceを必要としない</li><li>vf-client は PDF crate と vf-core に依存しない</li><li>基盤crateは vf-core に依存しない</li><li>vf-core は Jev への送信に vf-client だけを使い（assist・images）、描画には任意機能の vf-render だけを使う</li><li>vf-server は /v1/fill のPDF読み取りに vf-source を直接使う</li></ul></div>
       <div class="note"><h3>外部crate</h3><p>PDF解析は <span class="mono">pdf-inspector</span> と <span class="mono">lopdf</span>、HTTPは <span class="mono">reqwest</span>（rustls）、サーバーは <span class="mono">axum</span> / <span class="mono">tokio</span>。描画の <span class="mono">hayro</span>・PDFium は既定オフです。</p></div>
-      <div class="note"><h3>移行の方針</h3><p>新しいL2〜L4（vf-core）は旧方式（vf-legacy）と並べて作り、同じPDFでの比較（誤入力率→空欄率→トークン→時間の順）で方式を決めてから vf-legacy を削除します。</p></div>
     </div>
   </section>
 
@@ -190,7 +178,7 @@ footer{border-top:1px solid var(--rule);padding:20px 0;font-size:12px;color:var(
     <p class="sub">Jevは文字列を返さず、選択（choice）・有無（noul）・位置（box）だけを答えます。値は必ずPDFの原文から取ります。</p>
     <div class="notes">
       <div class="note"><h3>候補から選ぶ <span class="chip done">実装済み</span></h3><p>原文の候補を <span class="mono">choice</span> の選択肢として渡し、どれかを選ばせます（該当なしも選択肢に含む）。<span class="mono">fill --remote</span> は曖昧な項目（表の項目を除く）だけを、項目のラベル・型・別名と候補のページ・原文のラベルと値として送ります（前後の行・画像は送りません）。確定できない理由（holds）がラベルか結び付き（位置だけ・空白だけ）だけの候補を選択肢にし、値が2つ以上・複数行・途中で切れている可能性の理由を1つでも持つ候補と、型に合わない候補は選択肢にしません。選ばれた候補が確率の単独最大で確率の合計が1のときだけ、その候補の原文とEvidenceで埋めます。模擬応答で試験済みで、実APIでは未測定です。</p></div>
-      <div class="note"><h3>位置を指す <span class="chip done">実装済み</span></h3><p>ページ画像を渡して <span class="mono">noul</span> で値の有無を、<span class="mono">box</span> で値の位置（ラベルを除く）を答えさせ、座標をPDFに戻して範囲内の原文片を値にします。<span class="mono">fill --remote --images</span> は残った項目（表の項目と、AcroFormのフィールドが一致したが確定しなかった項目を除く）のラベル・型・別名とページ画像だけを送り、<span class="mono">select</span> で選んだ片が1つに決まり、値があるページが1つだけで、次の検査をすべて通るときに埋めます（<span class="mono">jev_box</span>、モデルの位置は <span class="mono">located</span> に記録）：範囲内のラベルと、値を区切り記号か空白で結び付けたラベル（同じ片でも別の片でも）が項目自身のラベルか別名に一致する、フォームのラベルを語として含まない、ほかの項目のラベルに結び付いた値・表の見出し・文書のラベル・埋まった項目の根拠（AcroFormで埋まった項目は入力欄の枠に重なる片）でない、同じ行で続く片がなく複数行の値の一部でもない（オフラインの <span class="mono">split_value</span>・<span class="mono">multi_line</span>）、表のセルなら列の見出しが項目と一致し、オフラインで候補があった項目なら値の候補のラベルが項目と一致する（いずれも部分一致は不可）、金額・数値なら値に重なるラベル（表の見出しを含む）に単位がない、同じ片をほかの項目が選んでいない、確定方針の値の条件（値が1つ・型・単位）を満たす。範囲が回転した片に触れる場合は埋めません。テキスト層のないページと回転した片だけのページは位置だけを返します。位置だけで結び付いた値やどのラベルとも結び付かない値は、候補のなかった項目に別の項目の値として埋まる可能性が残ります。片の一部だけを囲む場合はL2の分割で対応します。旧方式のVisionも box の位置から原文片を選びます。fill の画像フォールバックは模擬応答で試験済みで、実APIでは未測定です。</p></div>
+      <div class="note"><h3>位置を指す <span class="chip done">実装済み</span></h3><p>ページ画像を渡して <span class="mono">noul</span> で値の有無を、<span class="mono">box</span> で値の位置（ラベルを除く）を答えさせ、座標をPDFに戻して範囲内の原文片を値にします。<span class="mono">fill --remote --images</span> は残った項目（表の項目と、AcroFormのフィールドが一致したが確定しなかった項目を除く）のラベル・型・別名とページ画像だけを送り、<span class="mono">select</span> で選んだ片が1つに決まり、値があるページが1つだけで、次の検査をすべて通るときに埋めます（<span class="mono">jev_box</span>、モデルの位置は <span class="mono">located</span> に記録）：範囲内のラベルと、値を区切り記号か空白で結び付けたラベル（同じ片でも別の片でも）が項目自身のラベルか別名に一致する、フォームのラベルを語として含まない、ほかの項目のラベルに結び付いた値・表の見出し・文書のラベル・埋まった項目の根拠（AcroFormで埋まった項目は入力欄の枠に重なる片）でない、同じ行で続く片がなく複数行の値の一部でもない（オフラインの <span class="mono">split_value</span>・<span class="mono">multi_line</span>）、表のセルなら列の見出しが項目と一致し、オフラインで候補があった項目なら値の候補のラベルが項目と一致する（いずれも部分一致は不可）、金額・数値なら値に重なるラベル（表の見出しを含む）に単位がない、同じ片をほかの項目が選んでいない、確定方針の値の条件（値が1つ・型・単位）を満たす。範囲が回転した片に触れる場合は埋めません。テキスト層のないページと回転した片だけのページは位置だけを返します。位置だけで結び付いた値やどのラベルとも結び付かない値は、候補のなかった項目に別の項目の値として埋まる可能性が残ります。片の一部だけを囲む場合はL2の分割で対応します。fill の画像フォールバックは模擬応答で試験済みで、実APIでは未測定です。</p></div>
       <div class="note"><h3>送らないもの</h3><p>認証情報・HTTPヘッダー・本文はログに出しません。送信には明示的な <span class="mono">--remote</span> が必要で、送信回数・トークン・費用・期限の上限を全試行に適用します。</p></div>
     </div>
 <pre>{ "questions": { "q0": { "type": "choice",

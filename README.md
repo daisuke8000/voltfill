@@ -6,8 +6,6 @@
 
 PDFのテキスト層（入力欄つきPDFではAcroFormのフィールド値も）から、指定された項目に対応する原文の値を根拠（Evidence）付きで返すRust製CLI／HTTPサーバーです。PDFは変更しません。構成と実装状況は[アーキテクチャ・C4](https://daisuke8000.github.io/voltfill/)を参照してください。
 
-> 機能の範囲を絞り込み中です。Vision／Hybrid方式とスキーマ形式は今後変更されます。
-
 ## インストール
 
 Rust 1.99.1で、リポジトリのルートから実行します。
@@ -216,7 +214,7 @@ AcroFormは、PDFの解析（inspect）と同じ読み込みから `vf_source::a
 
 <a id="fill-remote"></a>
 
-`--remote` を付けると、`ambiguous` の項目（表の項目を除く）だけをJevに送り、その項目の候補から選ばせます。表の項目は送らず、そのまま返します。接続先とキーは `run --remote` と同じく必要です（[実APIの利用](#environment)）。`--remote` なしでは認証情報を読まず、結果も変わりません。
+`--remote` を付けると、`ambiguous` の項目（表の項目を除く）だけをJevに送り、その項目の候補から選ばせます。表の項目は送らず、そのまま返します。接続先とキーが必要です（[実APIの利用](#environment)）。`--remote` なしでは認証情報を読まず、結果も変わりません。
 
 ```sh
 voltfill fill input.pdf examples/forms/invoice.json --remote -o result.json
@@ -279,35 +277,11 @@ voltfill fill input.pdf examples/forms/invoice.json --remote --images --renderer
 - 模擬応答（合成画像と、hayroで描画した画像）でのみ試験しており、実APIでの精度は未測定です。結果は評価専用です。
 
 
-接続先とキーを設定し（[実APIの利用](#environment)）、PDFと抽出定義を渡します。
-
-```sh
-voltfill run input.pdf examples/legacy/text-form.json --remote -o result.json
-```
-
-既定はText方式です。全オプションは `voltfill --help` を参照してください。
-
-| 方式 | 動作 | スキーマ例 |
-|---|---|---|
-| `text` | 原文の候補から選択 | [Text](examples/legacy/text-form.json) |
-| `vision` | 画像のBoxを原文に対応付け | [Vision](examples/legacy/vision-form.json) |
-| `hybrid` | 文字候補とBoxを照合 | [Hybrid](examples/legacy/hybrid-form.json) |
-
-既定モデルは `jev-1.14.0`（`--model ID` で変更）。Vision／Hybridは1.14.0以降のバージョン指定IDと[レンダラー](#rendering)が必要です。
-
-<a id="results"></a>
-
-## 抽出結果
-
-結果は `fields`・`evidence`・`usage`・`jev_responses` です。部分失敗でも値を保持するため、`status`・`reason_codes` を確認してください。再試行・エラーの受信本文も残し、未受信・不完全なら `body_complete: false` です。
-
-原文・座標・型・validatorを検証し、既定ではconfidenceで足切りしません。結果は評価専用（`evaluation_only: true`）で、confidenceは校正済みの正答確率ではありません。
-
 <a id="output"></a>
 
 ## 出力先（`-o` / `--output`）
 
-`-o` を付けたコマンド（`fill`・`inspect`・`run`／`extract`）は、設定ファイル（`--config`・`--execution-config`・`--resource-config`）を読んだ後、PDF・フォーム・スキーマ・模擬応答・APIキーを読む前で送信前に、出力先を確かめて同じディレクトリに一時ファイル（`.voltfill-<PID>-<番号>.tmp`）を作ります。次の場合は終了コード5で止まり、何も送りません。
+`-o` を付けたコマンド（`fill`・`inspect`）は、設定ファイル（`--execution-config`・`--resource-config`）を読んだ後、PDF・フォーム・APIキーを読む前で送信前に、出力先を確かめて同じディレクトリに一時ファイル（`.voltfill-<PID>-<番号>.tmp`）を作ります。次の場合は終了コード5で止まり、何も送りません。
 
 | エラー | 出力先 |
 |---|---|
@@ -330,13 +304,7 @@ voltfill run input.pdf examples/legacy/text-form.json --remote -o result.json
 
 ## 設定
 
-```sh
-voltfill run --config examples/legacy/voltfill.yaml
-```
-
-[YAML例](examples/legacy/voltfill.yaml)は固定回答で無送信です。TOML・JSONも使えます。優先順位は **CLI → 指定ファイル → 環境変数 → 既定値**。`--config` 省略時は `VOLTFILL_CONFIG` を使います。相対パスの基準は、ファイル内なら設定ディレクトリ、それ以外は作業ディレクトリです。
-
-送信制限の[設定例](examples/legacy/execution-config.json)は既定値一覧ではありません。`--execution-config FILE` / `--resource-config FILE` は `execution` / `resources` 全体をJSONで置き換えます。資源制限はPDF解析を隔離せず、費用予約も入力の推定で請求上限ではありません。
+`--execution-config FILE` / `--resource-config FILE` は送信制限／資源制限をJSONで指定します。資源制限はPDF解析を隔離せず、費用予約も入力の推定で請求上限ではありません。
 
 ログは既定オフ（`--log-level`）で、1行1件のJSONを出力します。CLIは標準エラー、`--output` 指定時とサーバーは標準出力です。本文・認証情報・HTTPヘッダーは出しません。
 
@@ -344,17 +312,17 @@ voltfill run --config examples/legacy/voltfill.yaml
 
 ### 実APIの利用
 
-接続先は `VOLTFILL_JEV_ENDPOINT`（信頼できるHTTPS）、キーは `VOLTFILL_JEV_API_KEY` / `VOLTFILL_JEV_API_KEY_FILE` の一方だけで指定します。設定ファイルにキーは書けず、`.env` も読みません。送信には `--remote` / `remote: true` が必須です。
+接続先は `VOLTFILL_JEV_ENDPOINT`（信頼できるHTTPS）、キーは `VOLTFILL_JEV_API_KEY` / `VOLTFILL_JEV_API_KEY_FILE` の一方だけで指定します。`.env` は読みません。送信には `--remote` が必須です。
 
 <a id="rendering"></a>
 
 ### 描画
 
-Vision／Hybridと `fill --images` はレンダラーのビルドと選択が必要です。自動切り替え・自動取得・OCRは行いません。
+`fill --images` はレンダラーのビルドと選択が必要です。自動切り替え・自動取得・OCRは行いません。
 
 ```sh
 cargo install --path crates/vf-cli --locked --features hayro
-voltfill run input.pdf examples/legacy/vision-form.json --remote --strategy vision --renderer hayro
+voltfill fill input.pdf examples/forms/invoice.json --remote --images --renderer hayro
 ```
 
 Hayroはネイティブライブラリ不要です。PDFiumは利用側で用意し、`--features pdfium`、`--renderer pdfium` と `--pdfium-lib` / `VOLTFILL_PDFIUM_LIB_PATH` の絶対パスで指定します。描画倍率は既定1.5ピクセル/PDF単位（`--pixels-per-point`）です。
@@ -364,18 +332,12 @@ Hayroはネイティブライブラリ不要です。PDFiumは利用側で用意
 ## HTTPサーバー
 
 ```sh
-voltfill serve --mock examples/legacy/text-mock.json --listen 127.0.0.1:3000
+voltfill serve --listen 127.0.0.1:3000
 ```
 
-`POST /v1/extract` はmultipartの `pdf`・`schema` と任意のJSON `options`（`strategy`・`model`）、`GET /health` はヘルスチェックです。モックは形式確認用で、精度評価には使えません。実APIでは `--remote` で起動し、Vision／Hybridは `--allow-images` とレンダラーを指定します。
+`GET /health` はヘルスチェックです。
 
-```sh
-curl --fail-with-body --silent --show-error http://127.0.0.1:3000/v1/extract \
-  --form 'pdf=@input.pdf;type=application/pdf' \
-  --form 'schema=@examples/legacy/text-form.json;type=application/json'
-```
-
-`POST /v1/fill` は[フォーム入力](#fill)のHTTP版（`--remote` なしの `voltfill fill`）で、multipartの `pdf` と `form`（`voltfill fill` と同じフォーム項目のJSON）を受け取り、`voltfill fill` と同じ形の結果JSONを `200` で返します。Jevには送信せず、描画もしないため、`--mock` / `--remote` のどちらで起動しても同じ動作です。
+`POST /v1/fill` は[フォーム入力](#fill)のHTTP版（`--remote` なしの `voltfill fill`）で、multipartの `pdf` と `form`（`voltfill fill` と同じフォーム項目のJSON）を受け取り、`voltfill fill` と同じ形の結果JSONを `200` で返します。Jevには送信せず、描画もしません。
 
 ```sh
 curl --fail-with-body --silent --show-error http://127.0.0.1:3000/v1/fill \
@@ -391,7 +353,7 @@ curl --fail-with-body --silent --show-error http://127.0.0.1:3000/v1/fill \
 |---|---|---|
 | 401 | `unauthorized` | APIキーを設定していて、`Authorization: Bearer <key>` がないか一致しない |
 | 403 | `browser_authentication_required` | APIキーが未設定で、`Origin` 付きの要求 |
-| 429 | `server_busy` | 抽出かフォーム入力を実行中（`Retry-After: 2`） |
+| 429 | `server_busy` | フォーム入力を実行中（`Retry-After: 2`） |
 | 400 | `invalid_multipart` | multipartでない（`Content-Type` が違う、boundaryがない） |
 | 400・413・500 | `invalid_or_oversized_upload` | multipartを読めない。400は形式の誤り、413は本文全体がアップロード上限（PDFの `max_bytes` ＋1 MiB＋128 KiB）を超えた場合、500はそのほかの読み込みの失敗 |
 | 400 | `unknown_or_duplicate_part` | `pdf`・`form` 以外のpart、または同じpartが2つある |
@@ -404,11 +366,11 @@ curl --fail-with-body --silent --show-error http://127.0.0.1:3000/v1/fill \
 | 413 | `layout_limit_exceeded` | ラベル・値の候補が50,000件を超えた |
 | 413 | `fill_budget_exceeded` | レイアウト解析と照合の作業量が上限を超えた |
 | 504 | `fill_deadline_exceeded` | 処理の開始から30秒を過ぎた |
-| 500 | `worker_failed` | 処理中の内部エラー。Jevには送信していないため、受付は止めません |
+| 500 | `worker_failed` | 処理中の内部エラー |
 
-認証は `VOLTFILL_SERVER_API_KEY` / `VOLTFILL_SERVER_API_KEY_FILE` の一方を設定し、`Authorization: Bearer <key>` を送ります。未設定のループバックでは任意、非ループバック待ち受け・`Origin` 付き要求では必須です（`/v1/extract`・`/v1/fill` 共通）。VOLTFILLはHTTPのため、別マシンからはTLSプロキシを使います。
+認証は `VOLTFILL_SERVER_API_KEY` / `VOLTFILL_SERVER_API_KEY_FILE` の一方を設定し、`Authorization: Bearer <key>` を送ります。未設定のループバックでは任意、非ループバック待ち受け・`Origin` 付き要求では必須です。VOLTFILLはHTTPのため、別マシンからはTLSプロキシを使います。
 
-抽出とフォーム入力は合わせて同時1件で、実行中は `Retry-After` 付き `429 server_busy` です。抽出はJevの送信間隔の待機中も `429`、送信停止中は `503 remote_paused_unknown_outcome` で、Jevに送信しないフォーム入力はこの2つの影響を受けません。`--reuse-document`（既定オフ）は直前1件の文書をTTL（`--reuse-document-ttl-ms`、既定60000 ms）までメモリに保持して再利用します。内容が要求後も残るため単一テナント向けです。
+フォーム入力は同時1件で、実行中は `Retry-After` 付き `429 server_busy` です。
 
 ## 開発
 
