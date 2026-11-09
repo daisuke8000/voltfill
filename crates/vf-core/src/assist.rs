@@ -489,8 +489,7 @@ fn build(
 
 /// Apply one answer. The value and Evidence come only from the chosen
 /// candidate, which must be one of the offered `options`.
-/// Probabilities that do not sum to 1 make the answer invalid, as in the
-/// legacy engine's `probability_sum_not_one`.
+/// Probabilities that do not sum to 1 make the answer invalid.
 fn decide(
     field: &mut FieldFill,
     options: &[(String, usize)],
