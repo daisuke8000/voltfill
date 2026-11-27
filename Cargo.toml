@@ -30,7 +30,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal
 bytes = "1"
 httpdate = "1.0"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
-pdf-inspector = { version = "=1.25.2", default-features = false }
+pdf-inspector = { version = "=1.27.0", default-features = false }
 lopdf = { version = "=0.47.0", default-features = false }
 firecrawl-pdfium = "=0.1.0"
 png = "0.18"
