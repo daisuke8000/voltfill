@@ -8,7 +8,19 @@ use std::io::Write;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const TARGETS: &[&str] = &["vf_core", "vf_legacy", "vf_client", "vf_server", "vf_cli"];
+const TARGETS: &[&str] = &["vf_core", "vf_client", "vf_server", "vf_cli"];
+
+/// The level named by `--log-level` (default `off`).
+pub fn level(name: Option<&str>) -> Option<log::LevelFilter> {
+    Some(match name.unwrap_or("off") {
+        "off" => log::LevelFilter::Off,
+        "error" => log::LevelFilter::Error,
+        "warn" => log::LevelFilter::Warn,
+        "info" => log::LevelFilter::Info,
+        "debug" => log::LevelFilter::Debug,
+        _ => return None,
+    })
+}
 
 pub struct JsonLogger {
     service: &'static str,

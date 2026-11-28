@@ -16,12 +16,11 @@ These rules protect users, credentials and response data. Do not relax them with
 
 ## Crate boundaries
 
-- `vf-source` owns PDF inspection, source diagnostics, geometry and layout hypotheses (lines and label/value pairs). `vf-render` owns optional page rendering and may depend on `vf-source`. Neither requires a form, an extraction schema or Evidence.
-- `vf-client` owns the Jev protocol, transport, bounded execution and received-body recording. It must not depend on `vf-source`, `vf-render`, `vf-core` or `vf-legacy`.
-- `vf-core` owns the form contract, label/type matching, value normalization, fill results and their Evidence. It is the product core and must not depend on `vf-legacy`.
-- `vf-legacy` owns the legacy schema-based Text/Vision/Hybrid extraction, its models, Jev adapter and resource limits. It is kept only for the Text-versus-Vision comparison and will be removed as a whole; do not add features to it.
+- `vf-source` owns PDF inspection, source diagnostics, geometry and layout hypotheses (lines and label/value pairs). `vf-render` owns optional page rendering and may depend on `vf-source`. Neither requires a form or Evidence.
+- `vf-client` owns the Jev protocol, transport, bounded execution and received-body recording. It must not depend on `vf-source`, `vf-render` or `vf-core`.
+- `vf-core` owns the form contract, label/type matching, value normalization, fill results and their Evidence. It is the product core.
 - `vf-server` is a library of HTTP routes. `vf-cli` builds the only binary, `voltfill`, and owns settings loading, logging setup and `serve`.
-- Foundation crates (`vf-source`, `vf-render`, `vf-client`) never depend on `vf-core`, `vf-legacy`, `vf-server` or `vf-cli`. `vf-server` never depends on `vf-cli`.
+- Foundation crates (`vf-source`, `vf-render`, `vf-client`) never depend on `vf-core`, `vf-server` or `vf-cli`. `vf-server` never depends on `vf-cli`.
 
 ## Conventions
 
